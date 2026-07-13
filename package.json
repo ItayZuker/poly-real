@@ -20,7 +20,9 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "mongodb": "^7.5.0",
-    "typescript": "^6.0.3"
+    "poly-simulator": "file:",
+    "typescript": "^6.0.3",
+    "viem": "^2.46.3"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",

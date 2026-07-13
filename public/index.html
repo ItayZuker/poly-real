@@ -3,24 +3,17 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Poly Simulator</title>
+  <title>Poly Real</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div class="app">
     <header class="app-header controls">
-      <h1 class="app-title">Poly Simulator</h1>
+      <h1 class="app-title">Poly Real</h1>
       <select id="market-select"></select>
-      <label class="toggle-switch">
-        <span class="toggle-label">Recording</span>
-        <span class="switch">
-          <input type="checkbox" id="recording-toggle" />
-          <span class="switch-slider"></span>
-        </span>
-      </label>
-      <label class="header-field">
+      <label class="header-field header-field--plain">
         <span class="header-field-label">Latency (ms)</span>
-        <input type="number" id="sim-latency-ms" min="0" max="2000" step="10" value="150" />
+        <span id="feed-latency-ms" class="header-field-value">—</span>
       </label>
       <div id="schedule-highlighted-summary" class="schedule-highlighted-summary" hidden>
         <div class="schedule-highlighted-stats-dots"></div>
@@ -60,50 +53,121 @@
     <div class="app-body">
       <div id="page-simulator" class="app-page app-page-simulator">
       <div class="left-column">
-        <section class="panel last-window-panel" aria-label="Last outcome">
-          <div class="last-window-panel-header">
-            <h2 class="last-window-panel-title">Prev</h2>
+        <section class="panel settings-panel" aria-label="Wallet">
+          <div class="settings-panel-header">
+            <h2 class="settings-panel-title">Wallet</h2>
           </div>
-          <div id="sim-last-window" class="last-window-body">
-            <div class="sim-window-summary-rows">
-              <div class="sim-window-summary-row">
-                <span class="sim-window-summary-label">Outcome</span>
-                <span id="sim-last-outcome" class="sim-window-summary-value">—</span>
+          <div id="settings-body" class="settings-panel-body">
+            <div class="wallet-summary-rows">
+              <div class="wallet-summary-row">
+                <span class="wallet-summary-label">Status</span>
+                <span id="wallet-status" class="wallet-summary-value">—</span>
               </div>
-              <div class="sim-window-summary-row">
-                <span class="sim-window-summary-label">Buy</span>
-                <span id="sim-last-buy" class="sim-window-summary-value">—</span>
+              <div class="wallet-summary-row">
+                <button
+                  type="button"
+                  id="wallet-balance-refresh"
+                  class="wallet-balance-refresh"
+                  aria-label="Refresh balance"
+                  title="Refresh balance"
+                >
+                  <svg class="wallet-balance-refresh-icon" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M2.5 3.5v3h3M13.5 12.5v-3h-3"
+                    />
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      d="M3.2 9.2A5 5 0 0 0 12.5 11M12.8 6.8A5 5 0 0 0 3.5 5"
+                    />
+                  </svg>
+                  <span>Balance</span>
+                </button>
+                <span id="wallet-balance" class="wallet-summary-value">—</span>
               </div>
-              <div class="sim-window-summary-row">
-                <span class="sim-window-summary-label">Fees</span>
-                <span id="sim-last-fees" class="sim-window-summary-value">—</span>
+              <div class="wallet-summary-row">
+                <span class="wallet-summary-label">Signer</span>
+                <span id="wallet-signer" class="wallet-summary-value wallet-summary-mono" title="">—</span>
               </div>
-              <div class="sim-window-summary-row">
-                <span class="sim-window-summary-label">Sell</span>
-                <span id="sim-last-sell" class="sim-window-summary-value">—</span>
+              <div class="wallet-summary-row">
+                <span class="wallet-summary-label">Funder</span>
+                <span id="wallet-funder" class="wallet-summary-value wallet-summary-mono" title="">—</span>
               </div>
-              <div class="sim-window-summary-row sim-window-summary-row-net">
-                <span class="sim-window-summary-label">P/L</span>
-                <span id="sim-last-pl" class="sim-window-summary-value">—</span>
+              <div class="wallet-summary-row">
+                <span class="wallet-summary-label">Sig type</span>
+                <span id="wallet-sig-type" class="wallet-summary-value">—</span>
+              </div>
+              <div class="wallet-control-fields">
+                <label class="wallet-control-field wallet-control-field--toggle" for="auto-trade">
+                  <span class="wallet-control-label">Auto Trade</span>
+                  <span class="switch">
+                    <input type="checkbox" id="auto-trade" />
+                    <span class="switch-slider"></span>
+                  </span>
+                </label>
+                <div id="wallet-shares-field" class="wallet-control-field wallet-control-field--shares">
+                  <span class="wallet-control-label">Shares</span>
+                  <input type="number" id="manual-shares" class="wallet-shares-input" min="1" max="100000" step="1" value="10" />
+                </div>
+                <label id="wallet-use-schedule-field" class="wallet-control-field wallet-control-field--toggle" for="use-schedule" hidden>
+                  <span class="wallet-control-label">Use Schedule</span>
+                  <span class="switch">
+                    <input type="checkbox" id="use-schedule" />
+                    <span class="switch-slider"></span>
+                  </span>
+                </label>
+                <label id="wallet-start-trading-field" class="wallet-control-field wallet-control-field--toggle" for="start-trading" hidden>
+                  <span class="wallet-control-label">Start Trading</span>
+                  <span class="switch">
+                    <input type="checkbox" id="start-trading" />
+                    <span class="switch-slider"></span>
+                  </span>
+                </label>
               </div>
             </div>
           </div>
         </section>
 
-        <div
-          id="left-row-splitter"
-          class="row-splitter"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-valuenow="50"
-          aria-label="Resize Prev and Log panels"
-          tabindex="0"
-        ></div>
+        <section class="panel positions-panel" aria-label="Positions">
+          <div class="positions-panel-header">
+            <div
+              class="panel-header-drag-handle"
+              data-drag-edge="prev"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize Wallet and Positions sections"
+              tabindex="0"
+            ></div>
+            <div class="panel-header-main">
+              <h2 class="positions-panel-title">Positions</h2>
+            </div>
+          </div>
+          <div id="positions-list" class="positions-body is-collapsed">
+            <div class="positions-empty" id="positions-empty">No positions yet</div>
+            <div class="positions-cards" id="positions-cards"></div>
+          </div>
+        </section>
 
         <section class="panel log-panel" aria-label="Application log">
           <div class="log-panel-header">
-            <h2 class="log-panel-title">Log</h2>
-            <div class="log-panel-actions">
+            <div
+              class="panel-header-drag-handle"
+              data-drag-edge="log"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize Positions and Log sections"
+              tabindex="0"
+            ></div>
+            <div class="panel-header-main">
+              <h2 class="log-panel-title">Log</h2>
+              <div class="log-panel-actions">
               <button type="button" id="log-clear" class="log-clear-btn">Clear</button>
               <button
                 type="button"
@@ -117,8 +181,9 @@
                 </svg>
               </button>
             </div>
+            </div>
           </div>
-          <div id="log-output" class="log-output" role="log" aria-live="polite"></div>
+          <div id="log-output" class="log-output is-collapsed" role="log" aria-live="polite"></div>
         </section>
       </div>
 
@@ -207,7 +272,7 @@
           <canvas id="price-chart" aria-label="Market price chart"></canvas>
           <div id="sim-phase-hover" class="sim-phase-hover" hidden></div>
           <div id="sim-marker-tooltip" class="sim-marker-tooltip" hidden></div>
-          <button type="button" id="graph-save-btn" class="graph-save-btn" aria-label="Add">
+          <button type="button" id="graph-save-btn" class="graph-save-btn" aria-label="Add" hidden>
             <svg class="graph-save-btn-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 5v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               <path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -215,51 +280,6 @@
           </button>
         </div>
 
-        <div class="simulator-box-scroll">
-        <div class="sim-row sim-row-3col">
-          <div class="sim-box sim-box-muted">
-            <div class="sim-cell">
-              <div class="sim-label">Crossings</div>
-              <div id="graph-crossings" class="sim-value">—</div>
-            </div>
-          </div>
-          <div class="sim-box sim-box-muted">
-            <div class="sim-cell">
-              <div class="sim-label">Max top</div>
-              <div id="graph-range-top" class="sim-value">—</div>
-            </div>
-          </div>
-          <div class="sim-box sim-box-muted">
-            <div class="sim-cell">
-              <div class="sim-label">Max bottom</div>
-              <div id="graph-range-bottom" class="sim-value">—</div>
-            </div>
-          </div>
-        </div>
-        </div>
-
-        <div class="simulator-box-scroll">
-        <div class="sim-row sim-row-3col">
-          <div class="sim-box sim-box-muted">
-            <div class="sim-cell">
-              <div class="sim-label">Traders</div>
-              <div id="graph-traders" class="sim-value">—</div>
-            </div>
-          </div>
-          <div class="sim-box sim-box-muted">
-            <div class="sim-cell">
-              <div class="sim-label">New wallets</div>
-              <div id="graph-new-wallets" class="sim-value">—</div>
-            </div>
-          </div>
-          <div class="sim-box sim-box-muted">
-            <div class="sim-cell">
-              <div class="sim-label">Known wallets</div>
-              <div id="graph-known-wallets" class="sim-value">—</div>
-            </div>
-          </div>
-        </div>
-        </div>
       </section>
       </div>
 

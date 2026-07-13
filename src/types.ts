@@ -9,7 +9,6 @@ export interface MarketDocument {
   _id: string;
   label: string;
   timeframeMinutes: number;
-  recordingEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -201,6 +200,8 @@ export interface LiveWindowState {
   assetRange?: number;
   uniqueTraders?: number;
   lastTickMs?: number;
+  /** Measured CLOB WebSocket round-trip latency (ms). */
+  feedLatencyMs?: number;
   priceHistory: Array<{ t: number; price: number }>;
 }
 
@@ -305,14 +306,60 @@ export interface SimPublicState {
   lastWindow: SimLastWindow | null;
 }
 
+export interface TradingConfig {
+  autoTrade: boolean;
+  useSchedule: boolean;
+  startTrading: boolean;
+  manualShares: number;
+}
+
+export interface LiveSidePosition {
+  shares: number;
+  avgPrice: number;
+  cost: number;
+  cardId?: string;
+}
+
+export type TradingPositionCardStatus = "open" | "sold" | "win" | "loss";
+
+export interface TradingPositionCard {
+  id: string;
+  windowKey: string;
+  series: string;
+  side: "up" | "down";
+  shares: number;
+  buyPrice: number;
+  buyCost: number;
+  buyAt: number;
+  status: TradingPositionCardStatus;
+  sellPrice?: number;
+  sellProceeds?: number;
+  soldAt?: number;
+  pl?: number;
+  outcome?: "up" | "down";
+  /** Polymarket outcome token id */
+  asset?: string;
+  conditionId?: string;
+  slug?: string;
+  /** Whether buy/sell/P/L numbers were confirmed from Polymarket Data API */
+  confirmed?: boolean;
+}
+
+export interface TradingPublicState {
+  config: TradingConfig;
+  positions: { up: LiveSidePosition | null; down: LiveSidePosition | null };
+  positionCards: TradingPositionCard[];
+  quoteLocks: SimQuoteLocks;
+  markers: SimMarker[];
+  phaseSetup: TradingPhaseSetup | null;
+  phasesVisible: boolean;
+  phasesEditable: boolean;
+  scheduleTitle: string | null;
+  quotesEnabled: boolean;
+  previewMode: boolean;
+}
+
 export interface EnrichedLiveWindowState extends LiveWindowState {
-  recording?: {
-    ptbCrossings?: number;
-    rangeTop?: number;
-    rangeBottom?: number;
-    uniqueTraders?: number;
-    newWallets?: number;
-    knownWallets?: number;
-  } | null;
   sim: SimPublicState;
+  trading: TradingPublicState;
 }

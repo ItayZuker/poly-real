@@ -28,8 +28,6 @@
   let openMenuId = null;
   let dropPreviewEl = null;
   let framedPlacementIds = new Set();
-  let recordingNowTimer = null;
-  const RECORDING_PULSE_MS = 1400;
   /** Pinned UTC hour rows (0–23). */
   let pinnedUtcHours = new Set();
   /** Transient UTC hour under the pointer, or null when not hovering the column. */
@@ -68,10 +66,6 @@
     return isSchedulePage() && !document.getElementById("page-schedule-heatmap")?.classList.contains("is-heatmap-view");
   }
 
-  function isRecordingEnabled() {
-    return Boolean(document.getElementById("recording-toggle")?.checked);
-  }
-
   /** Current UTC weekday key + fractional hour for the schedule grid. */
   function getUtcScheduleClock() {
     const now = new Date();
@@ -81,48 +75,6 @@
       now.getUTCMinutes() / 60 +
       now.getUTCSeconds() / 3600;
     return { day, hour, hourSlot: now.getUTCHours() };
-  }
-
-  function recordingPulseDelaySec() {
-    return -((Date.now() % RECORDING_PULSE_MS) / 1000);
-  }
-
-  function setRecordingPulsePageActive(active) {
-    const page = document.getElementById("page-schedule-heatmap");
-    if (!page) return;
-    if (active) {
-      const starting = !page.classList.contains("is-recording-pulse");
-      page.classList.add("is-recording-pulse");
-      if (starting) {
-        page.style.animationDelay = `${recordingPulseDelaySec()}s`;
-      }
-      return;
-    }
-    page.classList.remove("is-recording-pulse");
-    page.style.removeProperty("animation-delay");
-  }
-
-  function clearRecordingNowHighlights() {
-    setRecordingPulsePageActive(false);
-    document.querySelectorAll(".schedule-placement-card.is-recording-now").forEach((el) => {
-      el.classList.remove("is-recording-now");
-    });
-    document.querySelectorAll(".schedule-recording-now-highlight.is-active").forEach((el) => {
-      el.classList.remove("is-active");
-      el.style.removeProperty("--recording-hour");
-    });
-    document.querySelectorAll(".schedule-utc-hour.is-recording-now").forEach((el) => {
-      el.classList.remove("is-recording-now");
-    });
-  }
-
-  function ensureRecordingHighlightLayer(wrap) {
-    if (!wrap?.classList.contains("schedule-day-body-wrap")) return;
-    if (wrap.querySelector(".schedule-recording-now-highlight")) return;
-    const highlight = document.createElement("div");
-    highlight.className = "schedule-recording-now-highlight";
-    highlight.setAttribute("aria-hidden", "true");
-    wrap.appendChild(highlight);
   }
 
   function findActivePlacement() {
@@ -135,42 +87,6 @@
           hour < p.startHour + p.durationHours,
       ) ?? null
     );
-  }
-
-  function updateRecordingNowHighlight() {
-    if (!isSchedulePage() || !isRecordingEnabled()) {
-      clearRecordingNowHighlights();
-      return;
-    }
-
-    const { day, hourSlot } = getUtcScheduleClock();
-    const activePlacement = findActivePlacement();
-    const activePlacementId = activePlacement?._id ?? null;
-    const heatmapMode = !isScheduleView();
-
-    setRecordingPulsePageActive(true);
-
-    document.querySelectorAll(".schedule-placement-card").forEach((card) => {
-      const shouldPulse = card.dataset.placementId === activePlacementId;
-      card.classList.toggle("is-recording-now", shouldPulse);
-    });
-
-    document.querySelectorAll(".schedule-recording-now-highlight").forEach((highlight) => {
-      const colDay = highlight.closest(".schedule-day-column")?.dataset.day;
-      const shouldPulse = heatmapMode && colDay === day;
-      if (shouldPulse) {
-        highlight.style.setProperty("--recording-hour", String(hourSlot));
-        highlight.classList.add("is-active");
-      } else {
-        highlight.classList.remove("is-active");
-        highlight.style.removeProperty("--recording-hour");
-      }
-    });
-
-    document.querySelectorAll(".schedule-utc-hour").forEach((hourEl) => {
-      const slot = Number(hourEl.dataset.hour);
-      hourEl.classList.toggle("is-recording-now", slot === hourSlot);
-    });
   }
 
   function rangesOverlap(aStart, aDur, bStart, bDur) {
@@ -304,7 +220,6 @@
         layer.dataset.day = day;
         body.parentElement.appendChild(layer);
       }
-      ensureRecordingHighlightLayer(col.querySelector(".schedule-day-body-wrap"));
     });
   }
 
@@ -1212,7 +1127,6 @@
       applyCardStatsStates();
     }
     applyPlacementFrameStates();
-    updateRecordingNowHighlight();
     window.updateSetupListPlacementCounts?.();
   }
 
@@ -1742,7 +1656,6 @@
     document.body.classList.remove("is-schedule-moving");
     renderPlacements({ reloadStats: false });
     updateHighlightedHeaderSummary();
-    updateRecordingNowHighlight();
     if (isScheduleView() && placements.length > 0) {
       hydrateStatsFromCache();
       applyStatsToCards();
@@ -1755,10 +1668,6 @@
     bindUtcRowHover();
     bindHighlightedSummaryClear();
     bindGlobalPointer();
-    if (recordingNowTimer == null) {
-      recordingNowTimer = setInterval(updateRecordingNowHighlight, 1000);
-    }
-    updateRecordingNowHighlight();
   }
 
   window.SchedulePlacements = {
@@ -1768,7 +1677,6 @@
     onSetupsRendered,
     onViewChange,
     onHeatmapUpdated,
-    updateRecordingNowHighlight,
     getPlacementCountsBySetup,
     refreshPlacementStats: scheduleStatsRefresh,
     refreshAllPlacementStats: (options = {}) =>

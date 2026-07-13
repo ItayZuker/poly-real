@@ -14,6 +14,7 @@ import {
 import { takeLevels } from "./book-depth.js";
 import { pickDisplayPrice } from "./quote-price.js";
 import { simulatorService } from "./simulator-service.js";
+import { liveTradingService } from "./live-trading-service.js";
 import { resolveTakerFeeParams } from "./taker-fee.js";
 import { logService } from "./log-service.js";
 import type { LiveWindowState } from "./types.js";
@@ -130,7 +131,11 @@ export class DisplayService {
     }
     const tickMs = Date.now();
     this.state.lastTickMs = tickMs;
-    simulatorService.tick(this.state, tickMs);
+    const feedLatency = clobMarketFeed.getFeedLatencyMs();
+    if (feedLatency != null) {
+      this.state.feedLatencyMs = feedLatency;
+    }
+    void liveTradingService.tick(this.state, tickMs);
     this.notify();
   }
 

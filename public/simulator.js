@@ -42,11 +42,28 @@
 
   function syncFromState(state) {
     if (dragLine != null) {
-      if (state?.sim?.markers) serverMarkers = state.sim.markers;
+      if (state?.trading?.markers?.length) serverMarkers = state.trading.markers;
+      else if (state?.sim?.markers) serverMarkers = state.sim.markers;
       return;
     }
-    if (state?.sim?.setup) localSetup = JSON.parse(JSON.stringify(state.sim.setup));
-    if (state?.sim?.markers) serverMarkers = state.sim.markers;
+    if (state?.sim?.setup && state?.trading?.phasesEditable !== false) {
+      localSetup = JSON.parse(JSON.stringify(state.sim.setup));
+    }
+    if (state?.trading?.markers?.length) serverMarkers = state.trading.markers;
+    else if (state?.sim?.markers) serverMarkers = state.sim.markers;
+  }
+
+  function phasesEditable(state) {
+    const trading = state?.trading;
+    if (trading) return Boolean(trading.phasesEditable);
+    return true;
+  }
+
+  function phasesVisible(state, options = {}) {
+    if (options.phasesVisible === false) return false;
+    const trading = state?.trading;
+    if (trading) return Boolean(trading.phasesVisible);
+    return options.phasesVisible !== false;
   }
 
   function isDraggingPhaseLine() {
@@ -204,7 +221,12 @@
 
   function updatePhaseHover(canvasX, layout) {
     if (!phaseHoverEl || !layout) return;
-    const setup = getSetup(window.windowState);
+    const state = window.windowState;
+    if (!phasesVisible(state)) {
+      hidePhaseHover();
+      return;
+    }
+    const setup = getSetup(state);
     if (canvasX == null || !Number.isFinite(canvasX)) {
       hidePhaseHover();
       return;
@@ -299,32 +321,36 @@
   function drawPhasesAndMarkers(ctx, layout, state, options = {}) {
     const { padding, plotH, yAt, xAt } = layout;
     const setup = options.setupOverride ?? getSetup(state);
-    const splits = setup.phaseSplit;
-    const bounds = [0, splits[0], splits[1], 1];
     const key = sessionKeyFor(state);
-    const hoverLine = options.hoverLine !== undefined ? options.hoverLine : hoveredPhaseLine;
-    const activeDragLine = options.dragLine !== undefined ? options.dragLine : dragLine;
-    const lineState = { hoverLine, dragLine: activeDragLine };
+    const markerList = options.markersOverride ?? serverMarkers;
 
-    for (let i = 0; i < 3; i += 1) {
-      const x0 = fracToX(bounds[i], layout);
-      const x1 = fracToX(bounds[i + 1], layout);
-      ctx.fillStyle = PHASE_COLOR;
-      ctx.fillRect(x0, padding.top, x1 - x0, plotH);
-      ctx.fillStyle = "#6e7681";
-      ctx.font = "10px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillText(`P${i + 1}`, (x0 + x1) / 2, padding.top + 4);
-    }
+    if (phasesVisible(state, options)) {
+      const splits = setup.phaseSplit;
+      const bounds = [0, splits[0], splits[1], 1];
+      const hoverLine = options.hoverLine !== undefined ? options.hoverLine : hoveredPhaseLine;
+      const activeDragLine = options.dragLine !== undefined ? options.dragLine : dragLine;
+      const lineState = { hoverLine, dragLine: activeDragLine };
 
-    for (let i = 0; i < 2; i += 1) {
-      drawPhaseSplitLine(ctx, fracToX(splits[i], layout), layout, splits[i], i, lineState);
+      for (let i = 0; i < 3; i += 1) {
+        const x0 = fracToX(bounds[i], layout);
+        const x1 = fracToX(bounds[i + 1], layout);
+        ctx.fillStyle = PHASE_COLOR;
+        ctx.fillRect(x0, padding.top, x1 - x0, plotH);
+        ctx.fillStyle = "#6e7681";
+        ctx.font = "10px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(`P${i + 1}`, (x0 + x1) / 2, padding.top + 4);
+      }
+
+      for (let i = 0; i < 2; i += 1) {
+        drawPhaseSplitLine(ctx, fracToX(splits[i], layout), layout, splits[i], i, lineState);
+      }
     }
 
     if (options.markers === false) return;
 
-    for (const m of serverMarkers) {
+    for (const m of markerList) {
       if (!state?.windowStart) continue;
       if (m.windowKey && m.windowKey !== key) continue;
       const x = xAt(m.t);
@@ -398,23 +424,32 @@
     const footer = document.querySelector("#phase-modal .modal-footer");
     const saveBtn = document.getElementById("phase-modal-save");
     const external = !!externalPhaseContext;
-    if (saveBtn) saveBtn.hidden = external;
-    if (footer) footer.hidden = external;
+    const readOnly = window.windowState?.trading?.phasesEditable === false;
+    if (saveBtn) saveBtn.hidden = external || readOnly;
+    if (footer) footer.hidden = external || readOnly;
   }
 
   function openPhaseModal(phaseIdx) {
-    const setup = externalPhaseContext?.setup ?? getSetup(window.windowState);
+    const trading = window.windowState?.trading;
+    const setup = externalPhaseContext?.setup
+      ?? (trading?.phaseSetup
+        ? { phaseSplit: trading.phaseSetup.phaseSplit, phases: trading.phaseSetup.phases, latencyMs: 150 }
+        : getSetup(window.windowState));
     activePhaseModal = phaseIdx;
     const modal = document.getElementById("phase-modal");
     const cfg = setup.phases[phaseIdx];
-    document.getElementById("phase-modal-title").textContent = `Phase ${phaseIdx + 1} setup`;
+    const readOnly = window.windowState?.trading?.phasesEditable === false;
+    const scheduleTitle = window.windowState?.trading?.scheduleTitle;
+    document.getElementById("phase-modal-title").textContent = readOnly && scheduleTitle
+      ? `Phase ${phaseIdx + 1} — ${scheduleTitle}`
+      : `Phase ${phaseIdx + 1} setup`;
     document.getElementById("phase-buy-enabled").checked = cfg.buyEnabled;
     document.getElementById("phase-buy-shares").value = cfg.buyShares;
     document.getElementById("phase-buy-trigger").value = cfg.buyTrigger;
     document.getElementById("phase-buy-optimize").value = cfg.buyOptimize;
     document.getElementById("phase-sell-profit").value = cfg.sellProfitCents;
     document.getElementById("phase-sell-optimize").value = cfg.sellOptimize;
-    syncPhaseFormDisabled();
+    syncPhaseFormDisabled(readOnly);
     if (externalPhaseContext) modal.classList.add("modal-overlay-stacked");
     else modal.classList.remove("modal-overlay-stacked");
     syncPhaseModalFooter();
@@ -436,11 +471,15 @@
     syncPhaseModalFooter();
   }
 
-  function syncPhaseFormDisabled() {
+  function syncPhaseFormDisabled(readOnly = false) {
     const enabled = document.getElementById("phase-buy-enabled").checked;
-    document.getElementById("phase-buy-shares").disabled = !enabled;
-    document.getElementById("phase-buy-trigger").disabled = !enabled;
-    document.getElementById("phase-buy-optimize").disabled = !enabled;
+    const locked = readOnly || window.windowState?.trading?.phasesEditable === false;
+    document.getElementById("phase-buy-enabled").disabled = locked;
+    document.getElementById("phase-buy-shares").disabled = locked || !enabled;
+    document.getElementById("phase-buy-trigger").disabled = locked || !enabled;
+    document.getElementById("phase-buy-optimize").disabled = locked || !enabled;
+    document.getElementById("phase-sell-profit").disabled = locked;
+    document.getElementById("phase-sell-optimize").disabled = locked;
   }
 
   async function savePhaseModal() {
@@ -455,7 +494,9 @@
   function bindChartInteraction(canvas) {
     canvas.addEventListener("mousedown", (e) => {
       if (!chartLayout) return;
-      const setup = getSetup(window.windowState);
+      const state = window.windowState;
+      if (!phasesEditable(state)) return;
+      const setup = getSetup(state);
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       dragMoved = false;
@@ -467,10 +508,14 @@
 
     canvas.addEventListener("mousemove", (e) => {
       if (!chartLayout) return;
-      const setup = getSetup(window.windowState);
+      const state = window.windowState;
+      const setup = getSetup(state);
+      const editable = phasesEditable(state);
+      const showPhases = phasesVisible(state);
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       if (dragLine != null) {
+        if (!editable) return;
         dragMoved = true;
         hideMarkerTooltip();
         hidePhaseHover();
@@ -482,20 +527,22 @@
         if (window.drawPriceChart && window.windowState) window.drawPriceChart(window.windowState);
         return;
       }
-      const onLine = nearLine(x, chartLayout, 0, setup) || nearLine(x, chartLayout, 1, setup);
+      const onLine = editable && (nearLine(x, chartLayout, 0, setup) || nearLine(x, chartLayout, 1, setup));
       const y = e.clientY - rect.top;
       const marker = markerAt(x, y, chartLayout);
 
-      if (!onLine) {
+      if (showPhases && !onLine) {
         if (setHoveredPhaseLine(null) && window.drawPriceChart && window.windowState) {
           window.drawPriceChart(window.windowState);
         }
         updatePhaseHover(x, chartLayout);
       } else {
         hidePhaseHover();
-        const hoverLine = hoveredLineAt(x, chartLayout, setup);
-        if (setHoveredPhaseLine(hoverLine) && window.drawPriceChart && window.windowState) {
-          window.drawPriceChart(window.windowState);
+        if (editable) {
+          const hoverLine = hoveredLineAt(x, chartLayout, setup);
+          if (setHoveredPhaseLine(hoverLine) && window.drawPriceChart && window.windowState) {
+            window.drawPriceChart(window.windowState);
+          }
         }
       }
 
@@ -509,12 +556,15 @@
     });
 
     canvas.addEventListener("mouseup", async (e) => {
-      const setup = getSetup(window.windowState);
+      const state = window.windowState;
+      const setup = getSetup(state);
+      const editable = phasesEditable(state);
+      const showPhases = phasesVisible(state);
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       if (dragLine != null) {
-        await pushSetupToServer();
-      } else if (!dragMoved && chartLayout) {
+        if (editable) await pushSetupToServer();
+      } else if (!dragMoved && chartLayout && showPhases) {
         const idx = phaseFromClick(x, chartLayout, setup);
         if (!nearLine(x, chartLayout, 0, setup) && !nearLine(x, chartLayout, 1, setup)) {
           openPhaseModal(idx);

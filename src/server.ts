@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { initStorageAndSeed, ensureAllMarketIndexes, listMarkets, updateMarket, getMarket } from "./db/market-repository.js";
+import { initStorageAndSeed, ensureAllMarketIndexes, listMarkets, getMarket } from "./db/market-repository.js";
 import { listReplayTicks } from "./db/replay-tick-repository.js";
 import {
   listChainlinkTicks,
@@ -12,8 +12,6 @@ import {
 import { clobMarketFeed } from "./clob-market-feed.js";
 import { chainlinkPriceFeed } from "./chainlink-price-feed.js";
 import { displayService } from "./display-service.js";
-import { recordingManager } from "./recording-manager.js";
-import { startArchiveScheduler, stopArchiveScheduler } from "./archive-service.js";
 import { simulatorService } from "./simulator-service.js";
 import { logService } from "./log-service.js";
 import {
@@ -40,13 +38,20 @@ import {
   loadAllHeatmapWindows,
   setHeatmapUpdateListener,
 } from "./heatmap-service.js";
-import { getWindowRangeFromPtb } from "./window-dynamics.js";
 import { backtestSchedulePlacements } from "./schedule-backtest-service.js";
 import type { EnrichedLiveWindowState, ReplayTickDocument, SimSetup } from "./types.js";
 import { createPublicClient, getClobHost, getChainId } from "./clob-service.js";
+import {
+  getTradingAccountStatus,
+  initTradingClient,
+  isTradingConfigured,
+  onBalanceRefresh,
+  refreshCollateralBalance,
+} from "./trading-client.js";
+import { liveTradingService } from "./live-trading-service.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT) || 3847;
+const PORT = Number(process.env.PORT) || 3848;
 
 const app = express();
 app.use(express.json());
@@ -73,24 +78,10 @@ function windowDurationSec(state: { windowStart?: number; windowEnd?: number }):
 }
 
 function enrichWindowState(state: ReturnType<typeof displayService.getState>): EnrichedLiveWindowState {
-  const recorderWindow = recordingManager.getActiveWindow(state.series);
-  const traderStats = recordingManager.getTraderStats(state.series);
-  const range = recorderWindow
-    ? getWindowRangeFromPtb(recorderWindow, state.prevCloseAsset)
-    : null;
   return {
     ...state,
-    recording: recorderWindow || traderStats
-      ? {
-          ptbCrossings: recorderWindow?.ptbCrossings,
-          rangeTop: range?.rangeTop,
-          rangeBottom: range?.rangeBottom,
-          uniqueTraders: traderStats?.uniqueTraders,
-          newWallets: traderStats?.newWallets,
-          knownWallets: traderStats?.knownWallets,
-        }
-      : null,
     sim: simulatorService.getPublicState(),
+    trading: liveTradingService.getPublicState(),
   };
 }
 
@@ -119,34 +110,64 @@ function filterSchedulePlacements(
   return all.filter((p) => idSet.has(p._id));
 }
 
-app.get("/api/markets", async (_req, res) => {
+app.get("/api/account", async (_req, res) => {
   try {
-    const markets = await listMarkets();
-    res.json(markets);
+    const status = await refreshCollateralBalance();
+    res.json(status);
+  } catch {
+    res.json(getTradingAccountStatus());
+  }
+});
+
+app.get("/api/trading/config", (_req, res) => {
+  res.json(liveTradingService.getConfig());
+});
+
+app.put("/api/trading/config", (req, res) => {
+  try {
+    const body = req.body as Partial<import("./types.js").TradingConfig>;
+    const config = liveTradingService.setConfig(body);
+    void liveTradingService.refreshScheduleContext(true);
+    pushWindowState();
+    res.json(config);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-app.patch("/api/markets/:series", async (req, res) => {
+app.post("/api/trading/order", async (req, res) => {
   try {
-    const series = req.params.series;
-    const patch: { recordingEnabled?: boolean } = {};
-    if (typeof req.body.recordingEnabled === "boolean") {
-      patch.recordingEnabled = req.body.recordingEnabled;
-    }
-    const updated = await updateMarket(series, patch);
-    if (!updated) {
-      res.status(404).json({ error: "Market not found" });
+    if (!isTradingConfigured()) {
+      res.status(400).json({ error: "Trading account not configured" });
       return;
     }
-    await recordingManager.refreshMarket(updated);
-    broadcast("markets", await listMarkets());
-    logService.info(
-      "recording",
-      `Recording ${updated.recordingEnabled ? "enabled" : "disabled"} for ${updated._id}`,
-    );
-    res.json(updated);
+    const side = req.body?.side;
+    const leg = req.body?.leg;
+    if (side !== "up" && side !== "down") {
+      res.status(400).json({ error: "side must be up or down" });
+      return;
+    }
+    if (leg !== "buy" && leg !== "sell") {
+      res.status(400).json({ error: "leg must be buy or sell" });
+      return;
+    }
+    const state = displayService.getState();
+    const result = await liveTradingService.manualOrder(state, side, leg);
+    pushWindowState();
+    if (!result.ok) {
+      res.status(400).json({ error: result.error ?? "Order failed" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/markets", async (_req, res) => {
+  try {
+    const markets = await listMarkets();
+    res.json(markets);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -621,20 +642,26 @@ async function main(): Promise<void> {
     broadcastLog(entry);
   });
 
+  onBalanceRefresh((status) => {
+    broadcast("account", status);
+  });
+
+  liveTradingService.onUpdate(() => {
+    pushWindowState();
+  });
+
   setHeatmapUpdateListener((state) => {
     broadcast("heatmap", state);
   });
   await loadAllHeatmapWindows();
 
+  if (isTradingConfigured()) {
+    await initTradingClient();
+  }
+
   chainlinkPriceFeed.start();
   clobMarketFeed.start();
   displayService.start();
-
-  recordingManager.setOnChange(() => {
-    pushWindowState();
-  });
-  await recordingManager.sync();
-  startArchiveScheduler();
 
   displayService.onUpdate(() => {
     pushWindowState();
@@ -654,8 +681,6 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async () => {
-    stopArchiveScheduler();
-    recordingManager.stopAll();
     displayService.stop();
     clobMarketFeed.stop();
     chainlinkPriceFeed.stop();

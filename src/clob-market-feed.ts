@@ -82,6 +82,8 @@ export function hasSocketBook(info: MarketInfo | undefined): boolean {
 export class ClobMarketFeed {
   private ws: WebSocket | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPingSentMs: number | null = null;
+  private feedLatencyMs: number | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private connecting = false;
@@ -148,6 +150,10 @@ export class ClobMarketFeed {
       bids: state.bids,
       asks: state.asks,
     };
+  }
+
+  getFeedLatencyMs(): number | undefined {
+    return this.feedLatencyMs ?? undefined;
   }
 
   getCachedBookDepth(tokenId: string): BookDepth | undefined {
@@ -233,6 +239,7 @@ export class ClobMarketFeed {
         this.clearPingTimer();
         this.pingTimer = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
+            this.lastPingSentMs = Date.now();
             ws.send("PING");
           }
         }, PING_INTERVAL_MS);
@@ -240,7 +247,15 @@ export class ClobMarketFeed {
 
       ws.addEventListener("message", (event: MessageEvent) => {
         const raw = typeof event.data === "string" ? event.data : String(event.data);
-        if (!raw || raw === "PONG" || raw === "PING") return;
+        if (!raw) return;
+        if (raw === "PONG") {
+          if (this.lastPingSentMs != null) {
+            this.feedLatencyMs = Math.max(0, Date.now() - this.lastPingSentMs);
+            this.lastPingSentMs = null;
+          }
+          return;
+        }
+        if (raw === "PING") return;
         this.handleMessage(raw);
       });
 

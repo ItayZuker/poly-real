@@ -10,6 +10,82 @@ let chartWindowStart = null;
 
 const MAX_LOG_LINES = 500;
 
+const SIGNATURE_TYPE_LABELS = {
+  0: "EOA",
+  1: "Proxy",
+  2: "Gnosis Safe",
+  3: "Deposit",
+};
+
+function shortAddress(addr) {
+  if (!addr || addr.length < 10) return addr || "—";
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+function formatUsdcBalance(raw) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return "—";
+  return `$${(value / 1_000_000).toFixed(2)}`;
+}
+
+function renderWalletAccount(data) {
+  const statusEl = $("wallet-status");
+  const balanceEl = $("wallet-balance");
+  const signerEl = $("wallet-signer");
+  const funderEl = $("wallet-funder");
+  const sigTypeEl = $("wallet-sig-type");
+  if (!statusEl || !balanceEl || !signerEl || !funderEl || !sigTypeEl) return;
+
+  if (!data?.connected) {
+    statusEl.textContent = data?.error ? "Error" : "Not connected";
+    statusEl.className = "wallet-summary-value wallet-summary-value-negative";
+    balanceEl.textContent = "—";
+    signerEl.textContent = "—";
+    signerEl.title = "";
+    funderEl.textContent = "—";
+    funderEl.title = "";
+    sigTypeEl.textContent = "—";
+    return;
+  }
+
+  statusEl.textContent = "Connected";
+  statusEl.className = "wallet-summary-value wallet-summary-value-positive";
+  balanceEl.textContent = formatUsdcBalance(data.collateralBalance);
+  signerEl.textContent = shortAddress(data.signerAddress);
+  signerEl.title = data.signerAddress || "";
+  funderEl.textContent = shortAddress(data.funderAddress);
+  funderEl.title = data.funderAddress || "";
+  const sigLabel = SIGNATURE_TYPE_LABELS[data.signatureType] ?? `Type ${data.signatureType}`;
+  sigTypeEl.textContent = `${sigLabel} (${data.signatureType})`;
+}
+
+async function loadWalletAccount() {
+  try {
+    const res = await fetch("/api/account");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderWalletAccount(await res.json());
+  } catch {
+    renderWalletAccount({ connected: false, error: "Failed to load" });
+  }
+}
+
+function bindWalletBalanceRefresh() {
+  const btn = $("wallet-balance-refresh");
+  if (!btn || btn.dataset.bound === "1") return;
+  btn.dataset.bound = "1";
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("is-loading");
+    try {
+      await loadWalletAccount();
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("is-loading");
+    }
+  });
+}
+
 const HEATMAP_METRICS = [
   {
     key: "crossings",
@@ -121,6 +197,8 @@ const QUOTE_BOXES = [
     lockedId: "up-buy-locked",
     liveId: "up-buy",
     lockKey: "upBuy",
+    side: "up",
+    leg: "buy",
     livePrice: (state) => state.yesAsk,
     tone: "up",
   },
@@ -129,6 +207,8 @@ const QUOTE_BOXES = [
     lockedId: "up-sell-locked",
     liveId: "up-sell",
     lockKey: "upSell",
+    side: "up",
+    leg: "sell",
     livePrice: (state) => state.yesBid,
     tone: "up",
   },
@@ -137,6 +217,8 @@ const QUOTE_BOXES = [
     lockedId: "down-buy-locked",
     liveId: "down-buy",
     lockKey: "downBuy",
+    side: "down",
+    leg: "buy",
     livePrice: (state) => state.noAsk,
     tone: "down",
   },
@@ -145,13 +227,28 @@ const QUOTE_BOXES = [
     lockedId: "down-sell-locked",
     liveId: "down-sell",
     lockKey: "downSell",
+    side: "down",
+    leg: "sell",
     livePrice: (state) => state.noBid,
     tone: "down",
   },
 ];
 
+function tradingState(state) {
+  return state?.trading ?? null;
+}
+
+function canQuoteAction(trading, side, leg) {
+  if (trading && trading.quotesEnabled === false) return false;
+  if (!trading) return true;
+  const pos = trading.positions?.[side];
+  if (leg === "buy") return !pos;
+  return Boolean(pos);
+}
+
 function updateQuoteBoxes(state) {
-  const locks = state?.sim?.quoteLocks ?? {};
+  const trading = tradingState(state);
+  const locks = trading?.quoteLocks ?? state?.sim?.quoteLocks ?? {};
   for (const cfg of QUOTE_BOXES) {
     const box = $(cfg.boxId);
     const locked = $(cfg.lockedId);
@@ -161,18 +258,144 @@ function updateQuoteBoxes(state) {
 
     live.textContent = fmtQuote(cfg.livePrice(state));
 
+    const allowed = canQuoteAction(trading, cfg.side, cfg.leg);
+    box.classList.toggle("quote-box-disabled", !allowed);
+
     const lockedPrice = locks[cfg.lockKey];
     if (lockedPrice != null && Number.isFinite(lockedPrice)) {
       locked.hidden = false;
       locked.textContent = fmtQuote(lockedPrice);
       values.classList.add("quote-has-locked");
       box.classList.add(cfg.tone === "up" ? "quote-triggered-up" : "quote-triggered-down");
+      box.classList.add("quote-box-latched");
+      box.classList.remove("quote-box-pressing");
     } else {
       locked.hidden = true;
       locked.textContent = "";
       values.classList.remove("quote-has-locked");
-      box.classList.remove("quote-triggered-up", "quote-triggered-down");
+      box.classList.remove("quote-triggered-up", "quote-triggered-down", "quote-box-latched");
     }
+  }
+}
+
+let quoteOrderInFlight = false;
+
+const ORDER_RETRY_BASE_MS = 500;
+const ORDER_RETRY_MAX_MS = 3000;
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNonRetriableOrderError(message) {
+  const msg = String(message || "").toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes("not configured") ||
+    msg.includes("start trading") ||
+    msg.includes("already holding") ||
+    msg.includes("no position") ||
+    msg.includes("already in progress") ||
+    msg.includes("invalid share")
+  );
+}
+
+async function postTradingOrder(side, leg) {
+  const res = await fetch("/api/trading/order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ side, leg }),
+  });
+  const body = await res.json().catch(() => ({}));
+  return { ok: res.ok, status: res.status, body };
+}
+
+async function clickQuoteBox(side, leg) {
+  if (quoteOrderInFlight) return;
+  const trading = tradingState(windowState);
+  if (trading && !canQuoteAction(trading, side, leg)) return;
+
+  quoteOrderInFlight = true;
+  const boxId = QUOTE_BOXES.find((b) => b.side === side && b.leg === leg)?.boxId;
+  const box = boxId ? $(boxId) : null;
+  if (box) box.classList.add("quote-box-pending");
+
+  let attempt = 0;
+  try {
+    while (true) {
+      attempt += 1;
+      try {
+        const { ok, status, body } = await postTradingOrder(side, leg);
+        if (ok) {
+          if (attempt > 1) {
+            appendLogEntry({
+              level: "info",
+              source: "trading",
+              message: `${leg.toUpperCase()} ${side.toUpperCase()} filled after ${attempt} attempts`,
+            });
+          }
+          const winRes = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
+          if (winRes.ok) updateWindowUI(await winRes.json());
+          void loadWalletAccount();
+          return;
+        }
+
+        const errMsg = body.error || `Order failed (${status})`;
+        if (isNonRetriableOrderError(errMsg)) {
+          appendLogEntry({
+            level: "error",
+            source: "trading",
+            message: errMsg,
+          });
+          if (box) box.classList.remove("quote-box-pressing");
+          return;
+        }
+
+        appendLogEntry({
+          level: "warn",
+          source: "trading",
+          message: `${errMsg} — retrying ${leg} ${side} (attempt ${attempt})…`,
+        });
+      } catch (err) {
+        appendLogEntry({
+          level: "warn",
+          source: "trading",
+          message: `Order error: ${err.message || err} — retrying ${leg} ${side} (attempt ${attempt})…`,
+        });
+      }
+
+      const delay = Math.min(ORDER_RETRY_MAX_MS, ORDER_RETRY_BASE_MS * attempt);
+      await sleepMs(delay);
+    }
+  } finally {
+    quoteOrderInFlight = false;
+    if (box) box.classList.remove("quote-box-pending");
+  }
+}
+
+function bindQuoteBoxes() {
+  for (const cfg of QUOTE_BOXES) {
+    const box = $(cfg.boxId);
+    if (!box || box.dataset.bound === "1") continue;
+    box.dataset.bound = "1";
+
+    box.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || box.classList.contains("quote-box-disabled")) return;
+      box.classList.add("quote-box-pressing");
+    });
+
+    const releasePress = () => {
+      if (!box.classList.contains("quote-box-latched")) {
+        box.classList.remove("quote-box-pressing");
+      }
+    };
+
+    box.addEventListener("mouseup", releasePress);
+    box.addEventListener("mouseleave", releasePress);
+
+    box.addEventListener("click", () => {
+      void clickQuoteBox(cfg.side, cfg.leg);
+    });
   }
 }
 
@@ -288,80 +511,159 @@ function setColumnSplit(pct) {
 
 function initLeftRowSplitter() {
   const leftColumn = document.querySelector(".left-column");
-  const splitter = $("left-row-splitter");
-  const prevPanel = document.querySelector(".last-window-panel");
-  const logPanel = document.querySelector(".log-panel");
-  if (!leftColumn || !splitter || !prevPanel || !logPanel) return;
+  const settingsHeader = document.querySelector(".settings-panel-header");
+  const prevHeader = document.querySelector(".positions-panel-header");
+  const logHeader = document.querySelector(".log-panel-header");
+  const prevBody = document.querySelector(".positions-body");
+  const logBody = document.querySelector(".log-output");
+  const prevDragHandle = document.querySelector('[data-drag-edge="prev"]');
+  const logDragHandle = document.querySelector('[data-drag-edge="log"]');
+  if (
+    !leftColumn ||
+    !settingsHeader ||
+    !prevHeader ||
+    !logHeader ||
+    !prevDragHandle ||
+    !logDragHandle ||
+    !prevBody ||
+    !logBody
+  ) {
+    return;
+  }
 
   let dragging = false;
+  let dragKind = null;
+  let anchorLogHeaderTop = 0;
+  let anchorLogContent = 0;
+  let anchorSettingsContent = 0;
+  let activeHandle = null;
 
-  const getBounds = () => {
+  const parseHeight = (name, fallback) => {
+    const raw = getComputedStyle(leftColumn).getPropertyValue(name);
+    const value = raw ? parseFloat(raw) : Number.NaN;
+    return Number.isFinite(value) ? value : fallback;
+  };
+
+  const getMetrics = () => {
     const colRect = leftColumn.getBoundingClientRect();
-    const prevHeader = prevPanel.querySelector(".last-window-panel-header");
-    const logHeader = logPanel.querySelector(".log-panel-header");
-    const splitterHeight = splitter.offsetHeight;
-    const minPrev = prevHeader ? prevHeader.offsetHeight : 40;
-    const maxPrev = Math.max(
-      minPrev,
-      colRect.height - (logHeader ? logHeader.offsetHeight : 40) - splitterHeight
-    );
-    return { colRect, minPrev, maxPrev };
+    const settingsHeaderH = settingsHeader.offsetHeight;
+    const prevHeaderH = prevHeader.offsetHeight;
+    const logHeaderH = logHeader.offsetHeight;
+    const chrome = settingsHeaderH + prevHeaderH + logHeaderH;
+    const maxContent = Math.max(0, colRect.height - chrome);
+    return { colRect, settingsHeaderH, prevHeaderH, logHeaderH, chrome, maxContent };
   };
 
-  const setPrevSplit = (pct) => {
-    const { colRect, minPrev, maxPrev } = getBounds();
-    const height = (pct / 100) * colRect.height;
-    const clampedHeight = Math.max(minPrev, Math.min(maxPrev, height));
-    const clampedPct = (clampedHeight / colRect.height) * 100;
-    leftColumn.style.setProperty("--split-prev-pct", String(clampedPct));
-    splitter.setAttribute("aria-valuenow", String(Math.round(clampedPct)));
+  const readHeights = () => ({
+    settings: parseHeight("--settings-content-height", 140),
+    prev: parseHeight("--prev-content-height", 0),
+    log: parseHeight("--log-content-height", 0),
+  });
+
+  const applyHeights = (settings, prev, log) => {
+    const { colRect, chrome } = getMetrics();
+    const s = Math.max(0, settings);
+    const p = Math.max(0, prev);
+    let l = Math.max(0, log);
+
+    leftColumn.style.setProperty("--settings-content-height", `${s}px`);
+    leftColumn.style.setProperty("--prev-content-height", `${p}px`);
+    leftColumn.style.setProperty("--log-content-height", `${l}px`);
+
+    const stackHeight = chrome + s + p + l;
+    const margin = l <= 0 ? Math.max(0, colRect.height - stackHeight) : 0;
+    leftColumn.style.setProperty("--log-margin-top", `${margin}px`);
+
+    prevBody.classList.toggle("is-collapsed", p <= 0);
+    logBody.classList.toggle("is-collapsed", l <= 0);
+    const hasPositionCards = Boolean(prevBody.querySelector(".position-card"));
+    prevBody.classList.toggle("is-scrollable", p > 0 && hasPositionCards);
+    logBody.classList.toggle("is-scrollable", l > 0);
   };
 
-  const updateFromClientY = (clientY) => {
-    const { colRect, minPrev, maxPrev } = getBounds();
-    const prevHeight = clientY - colRect.top;
-    const clampedHeight = Math.max(minPrev, Math.min(maxPrev, prevHeight));
-    const pct = (clampedHeight / colRect.height) * 100;
-    setPrevSplit(pct);
+  const initDefaultHeights = () => {
+    const { maxContent } = getMetrics();
+    applyHeights(maxContent, 0, 0);
+  };
+
+  const clampPrevDrag = (clientY) => {
+    const { colRect, settingsHeaderH, prevHeaderH } = getMetrics();
+    const settingsBottom = colRect.top + settingsHeaderH;
+    const logTop = anchorLogHeaderTop;
+    const minPrevTop = settingsBottom;
+    const maxPrevTop = logTop - prevHeaderH;
+    const prevTop = Math.max(minPrevTop, Math.min(clientY, maxPrevTop));
+    const settings = prevTop - settingsBottom;
+    const prev = logTop - prevTop - prevHeaderH;
+    applyHeights(settings, prev, anchorLogContent);
+  };
+
+  const clampLogDrag = (clientY) => {
+    const { colRect, logHeaderH } = getMetrics();
+    const prevBottom = prevHeader.getBoundingClientRect().bottom;
+    const maxLogTop = colRect.bottom - logHeaderH;
+    let logTop = Math.max(prevBottom, Math.min(clientY, maxLogTop));
+    let prev = logTop - prevBottom;
+    if (prev < 1) {
+      prev = 0;
+      logTop = prevBottom;
+    }
+    const logTopCol = logTop - colRect.top;
+    const log = Math.max(0, colRect.height - logTopCol - logHeaderH);
+    applyHeights(anchorSettingsContent, prev, log);
   };
 
   const stopDragging = () => {
     if (!dragging) return;
     dragging = false;
-    splitter.classList.remove("is-dragging");
+    dragKind = null;
+    activeHandle?.classList.remove("is-dragging");
+    activeHandle = null;
     document.body.classList.remove("is-row-resizing");
   };
 
-  splitter.addEventListener("mousedown", (e) => {
+  const startPrevDrag = (e) => {
     if (e.button !== 0) return;
     dragging = true;
-    splitter.classList.add("is-dragging");
+    dragKind = "prev";
+    activeHandle = prevDragHandle;
+    anchorLogHeaderTop = logHeader.getBoundingClientRect().top;
+    anchorLogContent = readHeights().log;
+    activeHandle.classList.add("is-dragging");
     document.body.classList.add("is-row-resizing");
-    updateFromClientY(e.clientY);
+    clampPrevDrag(e.clientY);
     e.preventDefault();
+  };
+
+  const startLogDrag = (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    dragKind = "log";
+    activeHandle = logDragHandle;
+    anchorSettingsContent = readHeights().settings;
+    activeHandle.classList.add("is-dragging");
+    document.body.classList.add("is-row-resizing");
+    clampLogDrag(e.clientY);
+    e.preventDefault();
+  };
+
+  initDefaultHeights();
+  window.addEventListener("resize", () => {
+    const heights = readHeights();
+    applyHeights(heights.settings, heights.prev, heights.log);
   });
+
+  prevDragHandle.addEventListener("mousedown", startPrevDrag);
+  logDragHandle.addEventListener("mousedown", startLogDrag);
 
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return;
-    updateFromClientY(e.clientY);
+    if (dragKind === "prev") clampPrevDrag(e.clientY);
+    else if (dragKind === "log") clampLogDrag(e.clientY);
   });
 
   window.addEventListener("mouseup", stopDragging);
   window.addEventListener("blur", stopDragging);
-
-  splitter.addEventListener("keydown", (e) => {
-    const { colRect, minPrev, maxPrev } = getBounds();
-    const currentPct = Number(leftColumn.style.getPropertyValue("--split-prev-pct")) || 50;
-    const currentHeight = (currentPct / 100) * colRect.height;
-    const step = 16;
-    if (e.key === "ArrowUp") {
-      setPrevSplit(((currentHeight - step) / colRect.height) * 100);
-      e.preventDefault();
-    } else if (e.key === "ArrowDown") {
-      setPrevSplit(((currentHeight + step) / colRect.height) * 100);
-      e.preventDefault();
-    }
-  });
 }
 
 function initColumnSplitter() {
@@ -529,6 +831,13 @@ function drawPriceChart(state, options = {}) {
   if (options.markers === false) overlayOpts.markers = false;
   if (options.hoverLine !== undefined) overlayOpts.hoverLine = options.hoverLine;
   if (options.dragLine !== undefined) overlayOpts.dragLine = options.dragLine;
+  const trading = state?.trading;
+  if (trading) {
+    overlayOpts.phasesVisible = trading.phasesVisible;
+    overlayOpts.phasesEditable = trading.phasesEditable;
+    if (trading.phaseSetup) overlayOpts.setupOverride = trading.phaseSetup;
+    if (trading.markers?.length) overlayOpts.markersOverride = trading.markers;
+  }
 
   ctx.strokeStyle = "#21262d";
   ctx.lineWidth = 1;
@@ -620,8 +929,6 @@ function drawPriceChart(state, options = {}) {
 }
 
 function updateGraphPanel(state) {
-  const rec = state.recording;
-
   $("graph-ptb").textContent = fmtPrice(state.prevCloseAsset);
   $("graph-current").textContent = fmtPrice(state.assetPrice);
 
@@ -646,40 +953,10 @@ function updateGraphPanel(state) {
     tickEl.className = "sim-value";
   }
 
-  $("graph-crossings").textContent = rec == null ? "—" : String(rec.ptbCrossings ?? 0);
-
-  const rangeTopEl = $("graph-range-top");
-  if (rec?.rangeTop != null && Number.isFinite(rec.rangeTop)) {
-    setSignedValue(rangeTopEl, fmtGap(rec.rangeTop), rec.rangeTop);
-  } else {
-    rangeTopEl.textContent = "—";
-    rangeTopEl.className = "sim-value";
-  }
-
-  const rangeBottomEl = $("graph-range-bottom");
-  if (rec?.rangeBottom != null && Number.isFinite(rec.rangeBottom)) {
-    setSignedValue(rangeBottomEl, fmtPrice(rec.rangeBottom), -1);
-  } else {
-    rangeBottomEl.textContent = "—";
-    rangeBottomEl.className = "sim-value";
-  }
-
-  $("graph-traders").textContent =
-    rec?.uniqueTraders != null && Number.isFinite(rec.uniqueTraders)
-      ? String(rec.uniqueTraders)
-      : "—";
-  $("graph-new-wallets").textContent =
-    rec?.newWallets != null && Number.isFinite(rec.newWallets)
-      ? String(rec.newWallets)
-      : "—";
-  $("graph-known-wallets").textContent =
-    rec?.knownWallets != null && Number.isFinite(rec.knownWallets)
-      ? String(rec.knownWallets)
-      : "—";
-
   if (chartWindowStart !== state.windowStart) {
     chartWindowStart = state.windowStart;
   }
+
   if (!window.Simulator?.isDraggingPhaseLine?.()) {
     drawPriceChart(state);
     if (window.SetupEditor?.refreshChart) window.SetupEditor.refreshChart();
@@ -709,69 +986,87 @@ function fmtTradeLeg(side, shares, price) {
   return `${label} ${shares} @ ${fmtPriceCents(price)}`;
 }
 
-function updateLastWindow(state) {
-  const last = state?.sim?.lastWindow;
-  const outcomeEl = $("sim-last-outcome");
-  const buyEl = $("sim-last-buy");
-  const feesEl = $("sim-last-fees");
-  const sellEl = $("sim-last-sell");
-  const plEl = $("sim-last-pl");
+function positionStatusLabel(status) {
+  if (status === "open") return "Open";
+  if (status === "sold") return "Sold";
+  if (status === "win") return "Win";
+  if (status === "loss") return "Loss";
+  return status || "—";
+}
 
-  if (!outcomeEl) return;
+function renderPositionCard(card) {
+  const sideClass = card.side === "up" ? "is-up" : "is-down";
+  const status = card.status || "open";
+  const buyText = `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`;
+  let detailHtml = `<div class="position-card-row"><span>Buy</span><strong>${buyText}</strong></div>`;
 
-  if (!last) {
-    outcomeEl.textContent = "—";
-    outcomeEl.className = "sim-window-summary-value";
-    buyEl.textContent = "—";
-    feesEl.textContent = "—";
-    sellEl.textContent = "—";
-    plEl.textContent = "—";
-    plEl.className = "sim-window-summary-value";
+  if (status === "sold") {
+    detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${card.shares} @ ${fmtPriceCents(card.sellPrice)}</strong></div>`;
+  } else if (status === "win" || status === "loss") {
+    detailHtml += `<div class="position-card-row"><span>Settlement</span><strong>${(card.outcome || "—").toUpperCase()}</strong></div>`;
+  }
+
+  if (card.pl != null && Number.isFinite(card.pl)) {
+    const plClass = card.pl > 0 ? "is-positive" : card.pl < 0 ? "is-negative" : "";
+    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl ${plClass}">${fmtUsdSigned(card.pl)}</strong></div>`;
+  }
+
+  const sourceNote = card.confirmed ? "Confirmed" : "Pending confirm";
+  return `<article class="position-card is-${status}" data-position-id="${card.id}">
+    <div class="position-card-top">
+      <span class="position-card-side ${sideClass}">${(card.side || "").toUpperCase()}</span>
+      <span class="position-card-status">${positionStatusLabel(status)}</span>
+    </div>
+    ${detailHtml}
+    <div class="position-card-row"><span>Source</span><strong>${sourceNote}</strong></div>
+  </article>`;
+}
+
+let lastPositionsFingerprint = "";
+
+function positionsFingerprint(cards) {
+  if (!Array.isArray(cards) || cards.length === 0) return "";
+  return cards
+    .map((c) => `${c.id}:${c.status}:${c.shares}:${c.buyPrice}:${c.buyCost}:${c.sellPrice ?? ""}:${c.pl ?? ""}:${c.confirmed ? 1 : 0}`)
+    .join("|");
+}
+
+function syncPositionsScrollable() {
+  const body = $("positions-list") || document.querySelector(".positions-body");
+  if (!body) return;
+  const height = parseFloat(getComputedStyle(body).flexBasis) || body.clientHeight;
+  const hasCards = Boolean(body.querySelector(".position-card"));
+  body.classList.toggle("is-scrollable", height > 0 && hasCards);
+}
+
+function updatePositionsPanel(state) {
+  const list = $("positions-cards");
+  const empty = $("positions-empty");
+  if (!list || !empty) return;
+
+  const cards = state?.trading?.positionCards;
+  const fingerprint = positionsFingerprint(cards);
+  if (fingerprint === lastPositionsFingerprint) return;
+  lastPositionsFingerprint = fingerprint;
+
+  if (!Array.isArray(cards) || cards.length === 0) {
+    list.innerHTML = "";
+    empty.hidden = false;
+    syncPositionsScrollable();
     return;
   }
 
-  if (last.outcome === "up") {
-    outcomeEl.textContent = "UP";
-    outcomeEl.className = "sim-window-summary-value sim-window-summary-value-outcome-up";
-  } else if (last.outcome === "down") {
-    outcomeEl.textContent = "DOWN";
-    outcomeEl.className = "sim-window-summary-value sim-window-summary-value-outcome-down";
-  } else {
-    outcomeEl.textContent = "—";
-    outcomeEl.className = "sim-window-summary-value";
-  }
+  empty.hidden = true;
+  list.innerHTML = cards.map(renderPositionCard).join("");
+  syncPositionsScrollable();
+}
 
-  if (last.buyPrice != null && last.side) {
-    buyEl.textContent = fmtTradeLeg(last.side, last.shares, last.buyPrice);
-  } else {
-    buyEl.textContent = last.plLabel === "No trade" ? "No trade" : "—";
-  }
-
-  if (last.buyFees != null && Number.isFinite(last.buyFees) && last.plLabel !== "No trade") {
-    feesEl.textContent = fmtUsdAmount(last.buyFees);
-  } else {
-    feesEl.textContent = "—";
-  }
-
-  if (last.sold && last.sellPrice != null && last.side) {
-    sellEl.textContent = fmtTradeLeg(last.side, last.shares, last.sellPrice);
-  } else if (last.plLabel === "Settlement") {
-    sellEl.textContent = "Held to expiry";
-  } else if (last.plLabel === "No trade") {
-    sellEl.textContent = "—";
-  } else {
-    sellEl.textContent = "—";
-  }
-
-  if (last.plLabel === "No trade") {
-    plEl.textContent = "—";
-    plEl.className = "sim-window-summary-value";
-  } else {
-    plEl.textContent = `${fmtUsdSigned(last.pl)} (${last.plLabel})`;
-    plEl.className = "sim-window-summary-value";
-    if (last.pl > 0) plEl.classList.add("sim-window-summary-value-positive");
-    else if (last.pl < 0) plEl.classList.add("sim-window-summary-value-negative");
-  }
+function syncGraphSaveBtn(state = windowState) {
+  const btn = $("graph-save-btn");
+  if (!btn) return;
+  const visible = Boolean(state?.trading?.phasesEditable);
+  btn.hidden = !visible;
+  btn.setAttribute("aria-hidden", visible ? "false" : "true");
 }
 
 function updateWindowUI(state) {
@@ -780,34 +1075,19 @@ function updateWindowUI(state) {
 
   if (window.Simulator) window.Simulator.syncFromState(state);
 
-  syncLatencyInput(state);
-  updateLastWindow(state);
+  syncLatencyDisplay(state);
+  syncGraphSaveBtn(state);
+  updatePositionsPanel(state);
   updateQuoteBoxes(state);
   updateCountdown(state);
   updateGraphPanel(state);
 }
 
-function syncLatencyInput(state) {
-  const input = $("sim-latency-ms");
-  if (!input || document.activeElement === input) return;
-  const ms = state?.sim?.setup?.latencyMs;
-  input.value = String(Number.isFinite(ms) ? ms : 150);
-}
-
-async function pushLatencyMs(ms) {
-  try {
-    const res = await fetch("/api/sim/setup");
-    if (!res.ok) return;
-    const setup = await res.json();
-    setup.latencyMs = ms;
-    await fetch("/api/sim/setup", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(setup),
-    });
-  } catch {
-    // ignore
-  }
+function syncLatencyDisplay(state) {
+  const el = $("feed-latency-ms");
+  if (!el) return;
+  const ms = state?.feedLatencyMs;
+  el.textContent = Number.isFinite(ms) ? String(Math.round(ms)) : "—";
 }
 
 function updateCountdown(state) {
@@ -828,29 +1108,12 @@ function populateMarketSelect() {
     if (m._id === selectedSeries) opt.selected = true;
     sel.appendChild(opt);
   }
-  const current = markets.find((m) => m._id === selectedSeries);
-  if (current) {
-    $("recording-toggle").checked = current.recordingEnabled;
-  }
-  window.SchedulePlacements?.updateRecordingNowHighlight?.();
 }
 
 async function loadMarkets() {
   const res = await fetch("/api/markets");
   markets = await res.json();
   populateMarketSelect();
-}
-
-async function patchMarket(patch) {
-  const res = await fetch(`/api/markets/${encodeURIComponent(selectedSeries)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) return;
-  const updated = await res.json();
-  const idx = markets.findIndex((m) => m._id === updated._id);
-  if (idx >= 0) markets[idx] = updated;
 }
 
 function connectSSE() {
@@ -866,6 +1129,10 @@ function connectSSE() {
     if (state.series === selectedSeries || !state.series) {
       updateWindowUI(state);
     }
+  });
+
+  es.addEventListener("account", (e) => {
+    renderWalletAccount(JSON.parse(e.data));
   });
 
   es.addEventListener("log-history", (e) => {
@@ -901,28 +1168,8 @@ function connectSSE() {
 
 $("market-select").addEventListener("change", async (e) => {
   selectedSeries = e.target.value;
-  const m = markets.find((x) => x._id === selectedSeries);
-  if (m) {
-    $("recording-toggle").checked = m.recordingEnabled;
-  }
-  window.SchedulePlacements?.updateRecordingNowHighlight?.();
   const res = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
   if (res.ok) updateWindowUI(await res.json());
-  if (window.SchedulePlacements?.refreshAllPlacementStats) {
-    void window.SchedulePlacements.refreshAllPlacementStats();
-  }
-});
-
-$("recording-toggle").addEventListener("change", async (e) => {
-  const enabled = e.target.checked;
-  window.SchedulePlacements?.updateRecordingNowHighlight?.();
-  await patchMarket({ recordingEnabled: enabled });
-});
-
-$("sim-latency-ms").addEventListener("change", async (e) => {
-  const ms = Math.max(0, Math.min(2000, Math.floor(Number(e.target.value) || 0)));
-  e.target.value = String(ms);
-  await pushLatencyMs(ms);
   if (window.SchedulePlacements?.refreshAllPlacementStats) {
     void window.SchedulePlacements.refreshAllPlacementStats();
   }
@@ -1060,12 +1307,10 @@ window.getSetupColorById = getSetupColorById;
 window.getSelectedSeries = () => selectedSeries;
 window.getScheduleSetupById = (setupId) => scheduleSetupsCache.find((s) => s._id === setupId) ?? null;
 window.getSimLatencyMs = () => {
-  const input = $("sim-latency-ms");
-  if (input) {
-    return Math.max(0, Math.min(2000, Math.floor(Number(input.value) || 0)));
-  }
-  const ms = window.windowState?.sim?.setup?.latencyMs;
-  return Number.isFinite(ms) ? ms : 150;
+  const ms = window.windowState?.feedLatencyMs;
+  if (Number.isFinite(ms)) return Math.max(0, Math.round(ms));
+  const setupMs = window.windowState?.sim?.setup?.latencyMs;
+  return Number.isFinite(setupMs) ? setupMs : 150;
 };
 
 function closeSetupMenus() {
@@ -1206,7 +1451,7 @@ async function applySetupToSimulator(setup) {
       windowState.sim.setup = body;
       if (window.Simulator) window.Simulator.syncFromState(windowState);
     }
-    syncLatencyInput(windowState);
+    syncLatencyDisplay(windowState);
     switchToPage("simulator");
     if (windowState) {
       resizeChartCanvas();
@@ -1297,7 +1542,10 @@ function bindSetupListMenus() {
 }
 
 function bindSetupSaveModal() {
-  $("graph-save-btn")?.addEventListener("click", () => openSetupSaveModal());
+  $("graph-save-btn")?.addEventListener("click", () => {
+    if ($("graph-save-btn")?.hidden) return;
+    openSetupSaveModal();
+  });
   $("setup-save-modal-close")?.addEventListener("click", closeSetupSaveModal);
   $("setup-save-cancel")?.addEventListener("click", closeSetupSaveModal);
   $("setup-save-submit")?.addEventListener("click", () => void saveTradingSetup());
@@ -1672,6 +1920,137 @@ function bindScheduleViewToggle() {
   }
 }
 
+function syncWalletControls(config) {
+  const autoTradeOn = Boolean(config?.autoTrade);
+  const sharesField = $("wallet-shares-field");
+  const useScheduleField = $("wallet-use-schedule-field");
+  const startTradingField = $("wallet-start-trading-field");
+  const sharesInput = $("manual-shares");
+
+  if (sharesField) sharesField.hidden = autoTradeOn;
+  if (useScheduleField) useScheduleField.hidden = !autoTradeOn;
+  if (startTradingField) startTradingField.hidden = !autoTradeOn;
+  if (sharesInput && Number.isFinite(config?.manualShares) && !autoTradeOn) {
+    sharesInput.value = String(config.manualShares);
+  }
+}
+
+async function pushTradingConfig(patch) {
+  try {
+    const res = await fetch("/api/trading/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function loadTradingConfig() {
+  try {
+    const res = await fetch("/api/trading/config");
+    if (!res.ok) return;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function buildTradingConfigPatch(overrides = {}) {
+  const autoTradeInput = $("auto-trade");
+  const useScheduleInput = $("use-schedule");
+  const startTradingInput = $("start-trading");
+  const sharesInput = $("manual-shares");
+  return {
+    autoTrade: Boolean(autoTradeInput?.checked),
+    useSchedule: Boolean(useScheduleInput?.checked),
+    startTrading: Boolean(startTradingInput?.checked),
+    manualShares: Math.max(1, Math.floor(Number(sharesInput?.value) || 10)),
+    ...overrides,
+  };
+}
+
+function bindTradeToggles() {
+  const autoTradeInput = $("auto-trade");
+  const useScheduleInput = $("use-schedule");
+  const startTradingInput = $("start-trading");
+  const sharesInput = $("manual-shares");
+  if (!autoTradeInput || !useScheduleInput || !startTradingInput) return;
+
+  const applyConfig = (config) => {
+    if (!config) return;
+    autoTradeInput.checked = Boolean(config.autoTrade);
+    useScheduleInput.checked = Boolean(config.useSchedule);
+    startTradingInput.checked = Boolean(config.startTrading);
+    syncWalletControls(config);
+  };
+
+  void loadTradingConfig().then((config) => {
+    applyConfig(config);
+    syncGraphSaveBtn(windowState);
+  });
+
+  autoTradeInput.addEventListener("change", async () => {
+    if (!autoTradeInput.checked) {
+      useScheduleInput.checked = false;
+      startTradingInput.checked = false;
+    }
+    const config = await pushTradingConfig(buildTradingConfigPatch());
+    applyConfig(config);
+    syncGraphSaveBtn(windowState);
+    if (windowState) drawPriceChart(windowState);
+    appendLogEntry({
+      level: "info",
+      source: "client",
+      message: autoTradeInput.checked ? "Auto Trade enabled" : "Auto Trade disabled",
+    });
+  });
+
+  useScheduleInput.addEventListener("change", async () => {
+    const config = await pushTradingConfig(buildTradingConfigPatch());
+    applyConfig(config);
+    syncGraphSaveBtn(windowState);
+    if (windowState) drawPriceChart(windowState);
+    appendLogEntry({
+      level: "info",
+      source: "client",
+      message: useScheduleInput.checked ? "Use Schedule enabled" : "Use Schedule disabled",
+    });
+  });
+
+  startTradingInput.addEventListener("change", async () => {
+    const config = await pushTradingConfig(buildTradingConfigPatch());
+    applyConfig(config);
+    if (windowState) drawPriceChart(windowState);
+    appendLogEntry({
+      level: "info",
+      source: "client",
+      message: startTradingInput.checked ? "Start Trading enabled" : "Start Trading disabled (preview mode)",
+    });
+  });
+
+  sharesInput?.addEventListener("change", async () => {
+    if (autoTradeInput.checked) return;
+    const manualShares = Math.max(1, Math.min(100000, Math.floor(Number(sharesInput.value) || 10)));
+    sharesInput.value = String(manualShares);
+    await pushTradingConfig(buildTradingConfigPatch({ manualShares }));
+  });
+}
+
+window.getAutoTrade = () => Boolean($("auto-trade")?.checked);
+window.getStartTrading = () => {
+  if (!window.getAutoTrade()) return false;
+  return Boolean($("start-trading")?.checked);
+};
+window.getUseSchedule = () => {
+  if (!window.getAutoTrade()) return false;
+  return Boolean($("use-schedule")?.checked);
+};
+window.getTradingUiState = () => windowState?.trading ?? null;
+
 function bindPageToggle() {
   const simulatorPage = $("page-simulator");
   const schedulePage = $("page-schedule-heatmap");
@@ -1712,12 +2091,16 @@ async function init() {
   initChart();
   initColumnSplitter();
   initLeftRowSplitter();
+  void loadWalletAccount();
+  bindWalletBalanceRefresh();
   initScheduleDaySlots();
   initScheduleUtcColumn();
   initHeatmapLegend();
   if (window.SchedulePlacements) window.SchedulePlacements.init();
   if (window.SetupEditor) window.SetupEditor.init();
   bindPageToggle();
+  bindTradeToggles();
+  bindQuoteBoxes();
   bindScheduleViewToggle();
   bindSetupSaveModal();
   bindSetupListMenus();

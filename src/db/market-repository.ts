@@ -36,7 +36,6 @@ export async function seedMarkets(): Promise<void> {
       _id: seed.series,
       label: seed.label,
       timeframeMinutes: seed.timeframeMinutes,
-      recordingEnabled: existing?.recordingEnabled ?? false,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -64,24 +63,6 @@ export async function listMarkets(): Promise<MarketDocument[]> {
 export async function getMarket(series: string): Promise<MarketDocument | null> {
   const markets = await readMarketsFile();
   return markets[series] ?? null;
-}
-
-export async function updateMarket(
-  series: string,
-  patch: Partial<Pick<MarketDocument, "recordingEnabled">>,
-): Promise<MarketDocument | null> {
-  const markets = await readMarketsFile();
-  const existing = markets[series];
-  if (!existing) return null;
-
-  const updated: MarketDocument = {
-    ...existing,
-    ...patch,
-    updatedAt: new Date().toISOString(),
-  };
-  markets[series] = updated;
-  await writeMarketsFile(markets);
-  return updated;
 }
 
 export { getDataDir };
