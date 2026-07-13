@@ -1,0 +1,31 @@
+{
+  "name": "poly-simulator",
+  "version": "1.0.0",
+  "description": "Passive Polymarket up/down market data recorder",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "backfill:outcomes": "tsx src/scripts/backfill-window-outcomes.ts",
+    "migrate:heatmap-to-windows": "tsx src/scripts/migrate-heatmap-to-windows.ts"
+  },
+  "dependencies": {
+    "@polymarket/clob-client-v2": "^1.0.6",
+    "archiver": "^8.0.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mongodb": "^7.5.0",
+    "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/archiver": "^8.0.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.3",
+    "tsx": "^4.22.4"
+  }
+}
