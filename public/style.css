@@ -2810,9 +2810,24 @@ body.is-column-resizing * {
   font-size: 0.85rem;
 }
 
-.modal-field input:disabled {
+.modal-select {
+  width: 110px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.modal-field input:disabled,
+.modal-select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.modal-field.is-none span {
+  color: var(--muted, #8b949e);
 }
 
 .modal-field-stack {

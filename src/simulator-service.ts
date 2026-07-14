@@ -1,18 +1,10 @@
 import { SimulatorEngine } from "./simulator-engine.js";
 import { clampPhaseSplits } from "./phase-split.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS } from "./taker-fee.js";
-import type { LiveWindowState, SimPhaseConfig, SimPublicState, SimSetup, TradingPhaseSetup } from "./types.js";
+import { defaultPhaseConfig, normalizePhaseConfig } from "./phase-config.js";
+import type { LiveWindowState, SimPublicState, SimSetup, TradingPhaseSetup } from "./types.js";
 
-export function defaultPhaseConfig(): SimPhaseConfig {
-  return {
-    buyEnabled: true,
-    buyShares: 10,
-    buyTrigger: 40,
-    buyOptimize: 5,
-    sellProfitCents: 20,
-    sellOptimize: 5,
-  };
-}
+export { defaultPhaseConfig, normalizePhaseConfig } from "./phase-config.js";
 
 export function defaultSimSetup(): SimSetup {
   return {
@@ -24,14 +16,7 @@ export function defaultSimSetup(): SimSetup {
 }
 
 function normalizeSetup(input: SimSetup, durationSec?: number): SimSetup {
-  const phases = input.phases.map((p) => ({
-    buyEnabled: Boolean(p.buyEnabled),
-    buyShares: Math.max(1, Math.floor(p.buyShares) || 10),
-    buyTrigger: Math.max(1, Math.min(99, Math.floor(p.buyTrigger) || 40)),
-    buyOptimize: Math.max(0, Math.min(50, Math.floor(p.buyOptimize) || 0)),
-    sellProfitCents: Math.max(1, Math.min(99, Math.floor(p.sellProfitCents) || 20)),
-    sellOptimize: Math.max(0, Math.min(50, Math.floor(p.sellOptimize) || 0)),
-  })) as [SimPhaseConfig, SimPhaseConfig, SimPhaseConfig];
+  const phases = input.phases.map((p) => normalizePhaseConfig(p)) as SimSetup["phases"];
 
   const split = clampPhaseSplits(input.phaseSplit[0], input.phaseSplit[1], durationSec);
   const latencyMs = Math.max(0, Math.min(2000, Math.floor(input.latencyMs ?? 150)));

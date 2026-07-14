@@ -10,6 +10,7 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
+import { gapAllowsBuy, priceToCents, SIDES_ORDER } from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -36,24 +37,27 @@ interface Position {
 interface BuyWatch {
   side: Side;
   shares: number;
-  trigger: number;
-  floor: number;
-  bestAsk: number;
-  prevAsk: number;
-  startedAt: number;
+  triggerCents: number;
+  optimize: boolean;
+  /** True after ask has touched the trigger (optimize path). */
+  armed: boolean;
+  /** Gap already validated at arm time. */
+  gapChecked: boolean;
+  stallCents: number | null;
+  stallTicks: number;
+  prevAskCents: number | null;
 }
 
 interface SellWatch {
   target: number;
-  ceiling: number;
-  bestBid: number | null;
-  prevBid: number | null;
 }
 
 interface PendingBuy {
   side: Side;
   shares: number;
   executeAtMs: number;
+  /** Limit price for maker; null = take asks. */
+  limitPrice: number | null;
 }
 
 interface PendingSell {
@@ -372,14 +376,15 @@ export class SimulatorEngine {
     setup: SimSetup,
     simNowMs: number,
     quote: DepthQuote,
+    limitPrice: number | null,
   ): void {
     const latency = this.latencyMs(setup);
     if (latency <= 0) {
-      this.executeBuy(side, shares, nowSec, state, setup, quote);
+      this.executeBuy(side, shares, nowSec, state, setup, quote, limitPrice);
       return;
     }
     if (this.pendingBuy) return;
-    this.pendingBuy = { side, shares, executeAtMs: simNowMs + latency };
+    this.pendingBuy = { side, shares, executeAtMs: simNowMs + latency, limitPrice };
     logService.info(
       "sim",
       `Buy scheduled: ${side} ${shares} sh, latency ${latency} ms (ask ${fmtCents(bestAskForSide(quote, side) ?? 0)})`,
@@ -423,13 +428,21 @@ export class SimulatorEngine {
         if (phase.buyEnabled) {
           const trigger = centsToPrice(phase.buyTrigger);
           const ask = bestAskForSide(quote, pending.side);
-          if (
+          const askOk =
             ask != null &&
             Number.isFinite(ask) &&
             ask <= trigger &&
-            hasBuyLiquidity(quote, pending.side, pending.shares)
-          ) {
-            this.executeBuy(pending.side, pending.shares, nowSec, state, setup, quote);
+            hasBuyLiquidity(quote, pending.side, pending.shares);
+          if (askOk) {
+            this.executeBuy(
+              pending.side,
+              pending.shares,
+              nowSec,
+              state,
+              setup,
+              quote,
+              pending.limitPrice,
+            );
           } else {
             logService.error("sim", `Buy skipped after latency (conditions no longer met)`);
           }
@@ -457,18 +470,19 @@ export class SimulatorEngine {
     state: LiveWindowState,
     setup: SimSetup,
     quote: DepthQuote,
+    limitPrice: number | null,
   ): void {
     if (!hasBuyLiquidity(quote, side, shares)) return;
     if (this.boughtThisWindow || this.position) return;
 
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
-    const limitPrice = centsToPrice(phase.buyTrigger);
-    const isTaker = phase.buyOptimize > 0;
     const feeParams = this.feeParams(setup);
+    const makerLimit = limitPrice ?? centsToPrice(phase.buyTrigger);
+    const isTaker = limitPrice == null;
     const fill = isTaker
       ? walkAsks(asksForSide(quote, side), shares, true, feeParams)
-      : fillMakerLimitBuy(asksForSide(quote, side), shares, limitPrice);
+      : fillMakerLimitBuy(asksForSide(quote, side), shares, makerLimit);
     if (!fill) return;
 
     this.boughtThisWindow = true;
@@ -506,14 +520,8 @@ export class SimulatorEngine {
   private startSellWatch(phase: SimSetup["phases"][number]): void {
     if (!this.position || this.sellWatch) return;
     const target = this.position.buyPrice + centsToPrice(phase.sellProfitCents);
-    const ceiling = target + centsToPrice(phase.sellOptimize);
-    this.sellWatch = {
-      target,
-      ceiling,
-      bestBid: null,
-      prevBid: null,
-    };
-    logService.info("sim", `Sell watch started, target ${fmtCents(target)}`);
+    this.sellWatch = { target };
+    logService.info("sim", `Sell watch started, limit ${fmtCents(target)}`);
   }
 
   private executeSell(
@@ -525,13 +533,11 @@ export class SimulatorEngine {
     if (!this.position || !this.boughtThisWindow) return;
 
     const side = this.position.side;
-    const sellPhase = setup.phases[this.position.phaseIndex];
     const limitPrice = this.sellWatch?.target;
-    const isTaker = sellPhase.sellOptimize > 0;
     const feeParams = this.feeParams(setup);
     const shares = this.position.remainingShares;
     const fill =
-      isTaker || limitPrice == null
+      limitPrice == null
         ? walkBids(bidsForSide(quote, side), shares, true, feeParams)
         : fillMakerLimitSell(bidsForSide(quote, side), shares, limitPrice);
     if (!fill) return;
@@ -578,6 +584,23 @@ export class SimulatorEngine {
     this.sellWatch = null;
   }
 
+  private fireBuy(
+    side: Side,
+    shares: number,
+    nowSec: number,
+    state: LiveWindowState,
+    setup: SimSetup,
+    simNowMs: number,
+    quote: DepthQuote,
+    optimize: boolean,
+  ): void {
+    const limitPrice = optimize ? null : centsToPrice(setup.phases[
+      phaseIndexForFrac(elapsedFrac(state, nowSec), setup)
+    ].buyTrigger);
+    this.buyWatch = null;
+    this.scheduleBuy(side, shares, nowSec, state, setup, simNowMs, quote, limitPrice);
+  }
+
   private tryStartBuyWatch(
     phase: SimSetup["phases"][number],
     quote: DepthQuote,
@@ -589,39 +612,44 @@ export class SimulatorEngine {
     if (!phase.buyEnabled || this.position || this.buyWatch || this.boughtThisWindow) return;
 
     const shares = Math.max(1, phase.buyShares || 1);
-    const trigger = centsToPrice(phase.buyTrigger);
-    const candidates: Array<{ side: Side; ask: number }> = [];
-    if (hasBuyLiquidity(quote, "up", shares)) {
-      const ask = bestAskForSide(quote, "up");
-      if (ask != null && ask <= trigger) candidates.push({ side: "up", ask });
-    }
-    if (hasBuyLiquidity(quote, "down", shares)) {
-      const ask = bestAskForSide(quote, "down");
-      if (ask != null && ask <= trigger) candidates.push({ side: "down", ask });
-    }
-    if (candidates.length === 0) return;
+    const triggerCents = phase.buyTrigger;
+    const assetGap = state.assetGap;
 
-    const pick = candidates.reduce((best, c) => (c.ask < best.ask ? c : best));
-    const floor = centsToPrice(Math.max(1, phase.buyTrigger - phase.buyOptimize));
+    for (const side of SIDES_ORDER) {
+      if (!hasBuyLiquidity(quote, side, shares)) continue;
+      const ask = bestAskForSide(quote, side);
+      if (ask == null || !Number.isFinite(ask)) continue;
+      const askCents = priceToCents(ask);
 
-    if (phase.buyOptimize <= 0 || pick.ask <= floor) {
-      this.scheduleBuy(pick.side, shares, nowSec, state, setup, simNowMs, quote);
+      if (!phase.buyOptimize) {
+        // Limit: fire when ask is at or below trigger; gap checked at arm/fire.
+        if (askCents > triggerCents) continue;
+        if (!gapAllowsBuy(side, phase, assetGap)) continue;
+        this.fireBuy(side, shares, nowSec, state, setup, simNowMs, quote, false);
+        return;
+      }
+
+      // Optimize: must first touch trigger exactly, then hunt ≤.
+      if (askCents !== triggerCents) continue;
+      if (!gapAllowsBuy(side, phase, assetGap)) continue;
+
+      this.buyWatch = {
+        side,
+        shares,
+        triggerCents,
+        optimize: true,
+        armed: true,
+        gapChecked: true,
+        stallCents: null,
+        stallTicks: 0,
+        prevAskCents: askCents,
+      };
+      logService.info(
+        "sim",
+        `Buy optimize armed: ${side} touched ${triggerCents}¢ (gap filter passed)`,
+      );
       return;
     }
-
-    this.buyWatch = {
-      side: pick.side,
-      shares,
-      trigger,
-      floor,
-      bestAsk: pick.ask,
-      prevAsk: pick.ask,
-      startedAt: nowSec,
-    };
-    logService.info(
-      "sim",
-      `Buy watch started: ${pick.side}, trigger ${fmtCents(trigger)}, floor ${fmtCents(floor)}`,
-    );
   }
 
   private tickBuyWatch(
@@ -631,33 +659,58 @@ export class SimulatorEngine {
     setup: SimSetup,
     simNowMs: number,
   ): void {
-    if (!this.buyWatch) return;
+    if (!this.buyWatch?.optimize) return;
     const w = this.buyWatch;
     const ask = bestAskForSide(quote, w.side);
     if (ask == null || !Number.isFinite(ask)) return;
+    const askCents = priceToCents(ask);
 
-    if (ask > w.trigger) {
-      this.buyWatch = null;
+    if (askCents > w.triggerCents) {
+      // Pause until trigger is touched again.
+      w.armed = false;
+      w.stallCents = null;
+      w.stallTicks = 0;
+      w.prevAskCents = askCents;
+      return;
+    }
+
+    if (!w.armed) {
+      if (askCents !== w.triggerCents) {
+        w.prevAskCents = askCents;
+        return;
+      }
+      // Re-touch — gap already validated at first arm.
+      w.armed = true;
+      w.stallCents = null;
+      w.stallTicks = 0;
+      w.prevAskCents = askCents;
+      logService.info("sim", `Buy optimize re-armed: ${w.side} @ ${w.triggerCents}¢`);
       return;
     }
 
     if (!hasBuyLiquidity(quote, w.side, w.shares)) return;
 
-    if (ask < w.bestAsk) w.bestAsk = ask;
+    // Hunting at ≤ trigger.
+    if (askCents <= w.triggerCents) {
+      if (w.prevAskCents != null && askCents > w.prevAskCents) {
+        // Reverse while still ≤ trigger → buy.
+        this.fireBuy(w.side, w.shares, nowSec, state, setup, simNowMs, quote, true);
+        return;
+      }
 
-    if (ask <= w.floor) {
-      this.scheduleBuy(w.side, w.shares, nowSec, state, setup, simNowMs, quote);
-      this.buyWatch = null;
-      return;
+      if (w.stallCents === askCents) {
+        w.stallTicks += 1;
+      } else {
+        w.stallCents = askCents;
+        w.stallTicks = 1;
+      }
+      if (w.stallTicks >= 3) {
+        this.fireBuy(w.side, w.shares, nowSec, state, setup, simNowMs, quote, true);
+        return;
+      }
     }
 
-    if (ask > w.prevAsk && ask <= w.trigger) {
-      this.scheduleBuy(w.side, w.shares, nowSec, state, setup, simNowMs, quote);
-      this.buyWatch = null;
-      return;
-    }
-
-    w.prevAsk = ask;
+    w.prevAskCents = askCents;
   }
 
   private tickSellWatch(
@@ -668,25 +721,10 @@ export class SimulatorEngine {
     simNowMs: number,
   ): void {
     if (!this.position || !this.sellWatch) return;
-    const w = this.sellWatch;
     const bid = bestBidForSide(quote, this.position.side);
     if (bid == null || !Number.isFinite(bid)) return;
-
-    if (bid < w.target) return;
-
-    if (w.bestBid == null || bid > w.bestBid) w.bestBid = bid;
-
-    if (bid >= w.ceiling) {
-      this.scheduleSell(quote, nowSec, state, setup, simNowMs);
-      return;
-    }
-
-    if (w.prevBid != null && bid < w.prevBid && bid >= w.target) {
-      this.scheduleSell(quote, nowSec, state, setup, simNowMs);
-      return;
-    }
-
-    w.prevBid = bid;
+    if (bid < this.sellWatch.target) return;
+    this.scheduleSell(quote, nowSec, state, setup, simNowMs);
   }
 
   tick(state: LiveWindowState, setup: SimSetup, nowMs?: number): void {

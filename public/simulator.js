@@ -28,16 +28,66 @@
     return localSetup || state?.sim?.setup || defaultSetup();
   }
 
+  function defaultPhase() {
+    return {
+      buyEnabled: true,
+      buyShares: 10,
+      buyTrigger: 40,
+      buyOptimize: false,
+      minGap: 0,
+      maxGap: 0,
+      gapVsPtb: "opposite",
+      sellProfitCents: 20,
+    };
+  }
+
+  function normalizePhase(raw) {
+    const base = defaultPhase();
+    if (!raw || typeof raw !== "object") return base;
+    let buyOptimize = false;
+    if (typeof raw.buyOptimize === "boolean") buyOptimize = raw.buyOptimize;
+    else if (typeof raw.buyOptimize === "number") buyOptimize = raw.buyOptimize > 0;
+    const minGap = Number(raw.minGap);
+    const maxGap = Number(raw.maxGap);
+    return {
+      buyEnabled: Boolean(raw.buyEnabled ?? base.buyEnabled),
+      buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
+      buyTrigger: Math.max(1, Math.min(99, Math.floor(Number(raw.buyTrigger)) || base.buyTrigger)),
+      buyOptimize,
+      minGap: Number.isFinite(minGap) && minGap > 0 ? Math.round(minGap * 100) / 100 : 0,
+      maxGap: Number.isFinite(maxGap) && maxGap > 0 ? Math.round(maxGap * 100) / 100 : 0,
+      gapVsPtb: raw.gapVsPtb === "with" ? "with" : "opposite",
+      sellProfitCents: Math.max(
+        1,
+        Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
+      ),
+    };
+  }
+
   function defaultSetup() {
     return {
       phaseSplit: [1 / 3, 2 / 3],
-      phases: [
-        { buyEnabled: true, buyShares: 10, buyTrigger: 40, buyOptimize: 5, sellProfitCents: 20, sellOptimize: 5 },
-        { buyEnabled: true, buyShares: 10, buyTrigger: 40, buyOptimize: 5, sellProfitCents: 20, sellOptimize: 5 },
-        { buyEnabled: true, buyShares: 10, buyTrigger: 40, buyOptimize: 5, sellProfitCents: 20, sellOptimize: 5 },
-      ],
+      phases: [defaultPhase(), defaultPhase(), defaultPhase()],
       latencyMs: 150,
     };
+  }
+
+  function syncGapLabel(kind) {
+    const input = document.getElementById(`phase-${kind}-gap`);
+    const text = document.getElementById(`phase-${kind}-gap-text`);
+    const label = document.getElementById(`phase-${kind}-gap-label`);
+    if (!input || !text || !label) return;
+    const n = Number(input.value);
+    const isNone = !Number.isFinite(n) || n <= 0;
+    text.textContent = isNone
+      ? `${kind === "max" ? "Max" : "Min"} gap ($) None`
+      : `${kind === "max" ? "Max" : "Min"} gap ($)`;
+    label.classList.toggle("is-none", isNone);
+  }
+
+  function syncGapLabels() {
+    syncGapLabel("max");
+    syncGapLabel("min");
   }
 
   function syncFromState(state) {
@@ -48,6 +98,9 @@
     }
     if (state?.sim?.setup && state?.trading?.phasesEditable !== false) {
       localSetup = JSON.parse(JSON.stringify(state.sim.setup));
+      if (Array.isArray(localSetup?.phases)) {
+        localSetup.phases = localSetup.phases.map((p) => normalizePhase(p));
+      }
     }
     if (Array.isArray(state?.trading?.markers)) serverMarkers = state.trading.markers;
     else if (Array.isArray(state?.sim?.markers)) serverMarkers = state.sim.markers;
@@ -421,9 +474,16 @@
     cfg.buyEnabled = document.getElementById("phase-buy-enabled").checked;
     cfg.buyShares = Math.max(1, Number(document.getElementById("phase-buy-shares").value) || 10);
     cfg.buyTrigger = Number(document.getElementById("phase-buy-trigger").value) || 40;
-    cfg.buyOptimize = Number(document.getElementById("phase-buy-optimize").value) || 0;
+    cfg.buyOptimize = document.getElementById("phase-buy-optimize").checked;
+    const maxGap = Number(document.getElementById("phase-max-gap").value);
+    const minGap = Number(document.getElementById("phase-min-gap").value);
+    cfg.maxGap = Number.isFinite(maxGap) && maxGap > 0 ? Math.round(maxGap * 100) / 100 : 0;
+    cfg.minGap = Number.isFinite(minGap) && minGap > 0 ? Math.round(minGap * 100) / 100 : 0;
+    cfg.gapVsPtb =
+      document.getElementById("phase-gap-vs-ptb").value === "with" ? "with" : "opposite";
     cfg.sellProfitCents = Number(document.getElementById("phase-sell-profit").value) || 20;
-    cfg.sellOptimize = Number(document.getElementById("phase-sell-optimize").value) || 0;
+    delete cfg.sellOptimize;
+    setup.phases[phaseIdx] = normalizePhase(cfg);
   }
 
   function syncPhaseModalFooter() {
@@ -443,7 +503,8 @@
         : getSetup(window.windowState));
     activePhaseModal = phaseIdx;
     const modal = document.getElementById("phase-modal");
-    const cfg = setup.phases[phaseIdx];
+    const cfg = normalizePhase(setup.phases[phaseIdx]);
+    setup.phases[phaseIdx] = cfg;
     const readOnly = window.windowState?.trading?.phasesEditable === false;
     const scheduleTitle = window.windowState?.trading?.scheduleTitle;
     document.getElementById("phase-modal-title").textContent = readOnly && scheduleTitle
@@ -452,9 +513,13 @@
     document.getElementById("phase-buy-enabled").checked = cfg.buyEnabled;
     document.getElementById("phase-buy-shares").value = cfg.buyShares;
     document.getElementById("phase-buy-trigger").value = cfg.buyTrigger;
-    document.getElementById("phase-buy-optimize").value = cfg.buyOptimize;
+    document.getElementById("phase-buy-optimize").checked = Boolean(cfg.buyOptimize);
+    document.getElementById("phase-max-gap").value = cfg.maxGap ?? 0;
+    document.getElementById("phase-min-gap").value = cfg.minGap ?? 0;
+    document.getElementById("phase-gap-vs-ptb").value =
+      cfg.gapVsPtb === "with" ? "with" : "opposite";
     document.getElementById("phase-sell-profit").value = cfg.sellProfitCents;
-    document.getElementById("phase-sell-optimize").value = cfg.sellOptimize;
+    syncGapLabels();
     syncPhaseFormDisabled(readOnly);
     if (externalPhaseContext) modal.classList.add("modal-overlay-stacked");
     else modal.classList.remove("modal-overlay-stacked");
@@ -484,8 +549,11 @@
     document.getElementById("phase-buy-shares").disabled = locked || !enabled;
     document.getElementById("phase-buy-trigger").disabled = locked || !enabled;
     document.getElementById("phase-buy-optimize").disabled = locked || !enabled;
+    document.getElementById("phase-max-gap").disabled = locked || !enabled;
+    document.getElementById("phase-min-gap").disabled = locked || !enabled;
+    document.getElementById("phase-gap-vs-ptb").disabled = locked || !enabled;
     document.getElementById("phase-sell-profit").disabled = locked;
-    document.getElementById("phase-sell-optimize").disabled = locked;
+    syncGapLabels();
   }
 
   async function savePhaseModal() {
@@ -596,6 +664,8 @@
 
   function bindModal() {
     document.getElementById("phase-buy-enabled").addEventListener("change", syncPhaseFormDisabled);
+    document.getElementById("phase-max-gap").addEventListener("input", syncGapLabels);
+    document.getElementById("phase-min-gap").addEventListener("input", syncGapLabels);
     document.getElementById("phase-modal-close").addEventListener("click", closePhaseModal);
     document.getElementById("phase-modal-save").addEventListener("click", () => void savePhaseModal());
     document.getElementById("phase-modal").addEventListener("click", (e) => {

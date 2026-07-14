@@ -35,9 +35,36 @@
     return {
       phaseSplit: [1 / 3, 2 / 3],
       phases: [
-        { buyEnabled: true, buyShares: 10, buyTrigger: 40, buyOptimize: 5, sellProfitCents: 20, sellOptimize: 5 },
-        { buyEnabled: true, buyShares: 10, buyTrigger: 40, buyOptimize: 5, sellProfitCents: 20, sellOptimize: 5 },
-        { buyEnabled: true, buyShares: 10, buyTrigger: 40, buyOptimize: 5, sellProfitCents: 20, sellOptimize: 5 },
+        {
+          buyEnabled: true,
+          buyShares: 10,
+          buyTrigger: 40,
+          buyOptimize: false,
+          minGap: 0,
+          maxGap: 0,
+          gapVsPtb: "opposite",
+          sellProfitCents: 20,
+        },
+        {
+          buyEnabled: true,
+          buyShares: 10,
+          buyTrigger: 40,
+          buyOptimize: false,
+          minGap: 0,
+          maxGap: 0,
+          gapVsPtb: "opposite",
+          sellProfitCents: 20,
+        },
+        {
+          buyEnabled: true,
+          buyShares: 10,
+          buyTrigger: 40,
+          buyOptimize: false,
+          minGap: 0,
+          maxGap: 0,
+          gapVsPtb: "opposite",
+          sellProfitCents: 20,
+        },
       ],
     };
   }

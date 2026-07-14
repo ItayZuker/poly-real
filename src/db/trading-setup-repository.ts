@@ -1,5 +1,6 @@
 import type { ObjectId } from "mongodb";
 import type { TradingPhaseSetup, TradingSetupRecord } from "../types.js";
+import { normalizeTradingPhaseSetup } from "../phase-config.js";
 import {
   colorFromId,
   normalizeSetupColor,
@@ -37,11 +38,15 @@ function resolveSetupColor(doc: TradingSetupDoc): string {
 }
 
 function serializeTradingSetup(doc: TradingSetupDoc): TradingSetupListItem {
+  const normalizedSetup = normalizeTradingPhaseSetup({
+    phaseSplit: doc.setup.phaseSplit,
+    phases: doc.setup.phases,
+  });
   const item: TradingSetupListItem = {
     _id: String(doc._id),
     title: doc.title,
     color: resolveSetupColor(doc),
-    setup: doc.setup,
+    setup: normalizedSetup ?? doc.setup,
     createdAt: doc.createdAt instanceof Date ? doc.createdAt.toISOString() : String(doc.createdAt),
     liveScheduleInUse: doc.liveScheduleInUse === true,
     simScheduleInUse: doc.simScheduleInUse === true,
@@ -136,10 +141,7 @@ export interface UpdateTradingSetupInput {
 }
 
 export function normalizePhaseSetup(setup: TradingPhaseSetup): TradingPhaseSetup | null {
-  if (!setup?.phaseSplit || !Array.isArray(setup.phases) || setup.phases.length !== 3) return null;
-  const [a, b] = setup.phaseSplit;
-  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b >= 1 || a >= b) return null;
-  return setup;
+  return normalizeTradingPhaseSetup(setup);
 }
 
 export async function updateTradingSetup(

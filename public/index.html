@@ -11,6 +11,7 @@
     <header class="app-header controls">
       <h1 class="app-title">Poly Real</h1>
       <select id="market-select"></select>
+      <div id="countdown" class="countdown">—</div>
       <label class="header-field header-field--plain">
         <span class="header-field-label">Latency (ms)</span>
         <span id="feed-latency-ms" class="header-field-value">—</span>
@@ -43,7 +44,6 @@
           <button type="button" class="page-toggle-btn is-active" data-page="simulator">Market</button>
           <button type="button" class="page-toggle-btn" data-page="schedule">Schedule / Heatmap</button>
         </div>
-        <div id="countdown" class="countdown">—</div>
       </div>
       <div id="header-stats-progress" class="header-stats-progress" hidden aria-hidden="true">
         <div class="header-stats-progress-bar"></div>
@@ -411,9 +411,27 @@
             <span>Trigger (¢)</span>
             <input type="number" id="phase-buy-trigger" min="1" max="99" step="1" value="40" />
           </label>
+          <label class="modal-toggle">
+            <span>Optimize</span>
+            <span class="switch">
+              <input type="checkbox" id="phase-buy-optimize" />
+              <span class="switch-slider"></span>
+            </span>
+          </label>
+          <label class="modal-field" id="phase-max-gap-label">
+            <span id="phase-max-gap-text">Max gap ($) None</span>
+            <input type="number" id="phase-max-gap" min="0" max="100000" step="0.01" value="0" />
+          </label>
+          <label class="modal-field" id="phase-min-gap-label">
+            <span id="phase-min-gap-text">Min gap ($) None</span>
+            <input type="number" id="phase-min-gap" min="0" max="100000" step="0.01" value="0" />
+          </label>
           <label class="modal-field">
-            <span>Optimize (¢)</span>
-            <input type="number" id="phase-buy-optimize" min="0" max="50" step="1" value="5" />
+            <span>Gap vs PTB</span>
+            <select id="phase-gap-vs-ptb" class="modal-select">
+              <option value="opposite">Opposite</option>
+              <option value="with">With</option>
+            </select>
           </label>
         </section>
         <section class="modal-section">
@@ -421,10 +439,6 @@
           <label class="modal-field">
             <span>Profit from buy (¢)</span>
             <input type="number" id="phase-sell-profit" min="1" max="99" step="1" value="20" />
-          </label>
-          <label class="modal-field">
-            <span>Optimize (¢)</span>
-            <input type="number" id="phase-sell-optimize" min="0" max="50" step="1" value="5" />
           </label>
         </section>
       </div>

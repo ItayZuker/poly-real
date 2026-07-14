@@ -205,14 +205,25 @@ export interface LiveWindowState {
   priceHistory: Array<{ t: number; price: number }>;
 }
 
+export type GapVsPtb = "with" | "opposite";
+
 export interface SimPhaseConfig {
   buyEnabled: boolean;
   buyShares: number;
+  /** Ask touch / limit price in cents (1–99). */
   buyTrigger: number;
-  buyOptimize: number;
+  /** After touching trigger, hunt a better (≤) fill. */
+  buyOptimize: boolean;
+  /** Min |asset−PTB| in $; 0 = ignore. */
+  minGap: number;
+  /** Max |asset−PTB| in $; 0 = ignore. */
+  maxGap: number;
+  /** Gap direction relative to the side being bought. */
+  gapVsPtb: GapVsPtb;
+  /** Sell limit = buy + this many cents. */
   sellProfitCents: number;
-  sellOptimize: number;
 }
+
 
 export interface SimTakerFeeParams {
   feeRate: number;
