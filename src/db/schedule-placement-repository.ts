@@ -2,7 +2,7 @@ import type { ObjectId } from "mongodb";
 import type { ScheduleDayId, SchedulePlacementRecord } from "../types.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
 
-const COLLECTION = "schedual_setups_sim";
+const COLLECTION = "schedual_setups_real";
 
 const VALID_DAYS: ScheduleDayId[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
@@ -194,6 +194,38 @@ export async function updateSchedulePlacement(
     durationHours,
     updatedAt,
   });
+}
+
+export async function getSchedulePlacementById(
+  id: string,
+): Promise<SchedulePlacementListItem | null> {
+  const { ObjectId } = await import("mongodb");
+  let oid: ObjectId;
+  try {
+    oid = new ObjectId(id);
+  } catch {
+    return null;
+  }
+  const mongo = await getMongoClient();
+  const doc = await mongo
+    .db(getMongoDbName())
+    .collection<SchedulePlacementDoc>(COLLECTION)
+    .findOne({ _id: oid });
+  return doc ? serializePlacement(doc) : null;
+}
+
+export async function countPlacementsBySetupId(setupId: string): Promise<number> {
+  const mongo = await getMongoClient();
+  return mongo
+    .db(getMongoDbName())
+    .collection(COLLECTION)
+    .countDocuments({ setupId: String(setupId) });
+}
+
+export async function listDistinctPlacementSetupIds(): Promise<string[]> {
+  const mongo = await getMongoClient();
+  const ids = await mongo.db(getMongoDbName()).collection(COLLECTION).distinct("setupId");
+  return ids.map((id) => String(id)).filter(Boolean);
 }
 
 export async function deleteSchedulePlacement(id: string): Promise<boolean> {

@@ -42,15 +42,15 @@
 
   function syncFromState(state) {
     if (dragLine != null) {
-      if (state?.trading?.markers?.length) serverMarkers = state.trading.markers;
-      else if (state?.sim?.markers) serverMarkers = state.sim.markers;
+      if (Array.isArray(state?.trading?.markers)) serverMarkers = state.trading.markers;
+      else if (Array.isArray(state?.sim?.markers)) serverMarkers = state.sim.markers;
       return;
     }
     if (state?.sim?.setup && state?.trading?.phasesEditable !== false) {
       localSetup = JSON.parse(JSON.stringify(state.sim.setup));
     }
-    if (state?.trading?.markers?.length) serverMarkers = state.trading.markers;
-    else if (state?.sim?.markers) serverMarkers = state.sim.markers;
+    if (Array.isArray(state?.trading?.markers)) serverMarkers = state.trading.markers;
+    else if (Array.isArray(state?.sim?.markers)) serverMarkers = state.sim.markers;
   }
 
   function phasesEditable(state) {
@@ -61,9 +61,15 @@
 
   function phasesVisible(state, options = {}) {
     if (options.phasesVisible === false) return false;
+    if (options.phasesVisible === true) return true;
     const trading = state?.trading;
-    if (trading) return Boolean(trading.phasesVisible);
-    return options.phasesVisible !== false;
+    if (!trading) return options.phasesVisible !== false;
+    if (trading.phasesVisible) return true;
+    const cfg = trading.config;
+    // Auto Trade without schedule should always keep phases on the graph
+    if (cfg?.autoTrade && !cfg.useSchedule) return true;
+    if (cfg?.autoTrade && trading.phaseSetup) return true;
+    return false;
   }
 
   function isDraggingPhaseLine() {
@@ -325,7 +331,7 @@
     const markerList = options.markersOverride ?? serverMarkers;
 
     if (phasesVisible(state, options)) {
-      const splits = setup.phaseSplit;
+      const splits = Array.isArray(setup?.phaseSplit) ? setup.phaseSplit : [1 / 3, 2 / 3];
       const bounds = [0, splits[0], splits[1], 1];
       const hoverLine = options.hoverLine !== undefined ? options.hoverLine : hoveredPhaseLine;
       const activeDragLine = options.dragLine !== undefined ? options.dragLine : dragLine;

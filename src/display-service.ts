@@ -135,8 +135,10 @@ export class DisplayService {
     if (feedLatency != null) {
       this.state.feedLatencyMs = feedLatency;
     }
-    void liveTradingService.tick(this.state, tickMs);
-    this.notify();
+    void (async () => {
+      await liveTradingService.tick(this.state, tickMs);
+      this.notify();
+    })();
   }
 
   private updateAssetFromChainlink(): void {

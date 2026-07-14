@@ -1,4 +1,8 @@
-import { findActiveScheduleContext, type ActiveScheduleContext } from "./schedule-active.js";
+import {
+  findActiveScheduleContext,
+  isScheduleContextActive,
+  type ActiveScheduleContext,
+} from "./schedule-active.js";
 import { placeMarketOrder } from "./order-service.js";
 import { refreshCollateralBalance } from "./trading-client.js";
 import { SimulatorEngine } from "./simulator-engine.js";
@@ -16,6 +20,8 @@ import {
   isValidSharePrice,
   isValidShareSize,
 } from "./polymarket-portfolio.js";
+import { tradingConfigFilePath } from "./db/data-dir.js";
+import { readJsonFile, writeJsonFile } from "./db/file-store.js";
 import type {
   LiveWindowState,
   SimMarker,
@@ -25,6 +31,7 @@ import type {
   TradingPhaseSetup,
   TradingPositionCard,
   TradingPublicState,
+  PlacementLiveStats,
 } from "./types.js";
 
 interface SidePosition {
@@ -56,14 +63,43 @@ function outcomeFromIndex(index?: number, label?: string): "up" | "down" | undef
   return undefined;
 }
 
-/** Live trading — manual orders, phase auto-trade, schedule-driven setup. */
-export class LiveTradingService {
-  private config: TradingConfig = {
+function defaultTradingConfig(): TradingConfig {
+  return {
     autoTrade: false,
     useSchedule: false,
     startTrading: false,
     manualShares: 10,
+    manualOrderUnit: "shares",
   };
+}
+
+function normalizeTradingConfig(raw: Partial<TradingConfig> | null | undefined): TradingConfig {
+  const base = defaultTradingConfig();
+  if (!raw || typeof raw !== "object") return base;
+  const unit = raw.manualOrderUnit === "usdc" ? "usdc" : "shares";
+  const amountRaw = Number(raw.manualShares);
+  const amount =
+    unit === "usdc"
+      ? Math.max(0.01, Math.min(100000, Math.round((Number.isFinite(amountRaw) ? amountRaw : 10) * 100) / 100))
+      : Math.max(1, Math.min(100000, Math.floor(Number.isFinite(amountRaw) ? amountRaw : 10) || 10));
+  const next: TradingConfig = {
+    autoTrade: Boolean(raw.autoTrade),
+    useSchedule: Boolean(raw.useSchedule),
+    startTrading: Boolean(raw.startTrading),
+    manualShares: amount,
+    manualOrderUnit: unit,
+  };
+  if (!next.autoTrade) {
+    next.useSchedule = false;
+    next.startTrading = false;
+  }
+  return next;
+}
+
+/** Live trading — manual orders, phase auto-trade, schedule-driven setup. */
+export class LiveTradingService {
+  private config: TradingConfig = defaultTradingConfig();
+  private persistChain: Promise<void> = Promise.resolve();
 
   private positions: { up: SidePosition | null; down: SidePosition | null } = {
     up: null,
@@ -73,6 +109,8 @@ export class LiveTradingService {
   private quoteLocks: SimQuoteLocks = emptyQuoteLocks();
   private markers: SimMarker[] = [];
   private positionCards: TradingPositionCard[] = [];
+  /** Placement ids that have had schedule auto-trades this session (for live card stats). */
+  private knownPlacementIds = new Set<string>();
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
@@ -100,17 +138,56 @@ export class LiveTradingService {
     return { ...this.config };
   }
 
+  async loadPersistedConfig(): Promise<TradingConfig> {
+    try {
+      const loaded = await readJsonFile<Partial<TradingConfig>>(tradingConfigFilePath());
+      this.config = normalizeTradingConfig(loaded);
+    } catch (err) {
+      logService.warn("trading", `Failed to load trading config: ${String(err)}`);
+      this.config = defaultTradingConfig();
+    }
+    return this.getConfig();
+  }
+
+  private persistConfig(): void {
+    const snapshot = this.getConfig();
+    this.persistChain = this.persistChain
+      .then(() => writeJsonFile(tradingConfigFilePath(), snapshot))
+      .catch((err) => {
+        logService.warn("trading", `Failed to save trading config: ${String(err)}`);
+      });
+  }
+
   setConfig(patch: Partial<TradingConfig>): TradingConfig {
     if (patch.autoTrade != null) this.config.autoTrade = Boolean(patch.autoTrade);
     if (patch.useSchedule != null) this.config.useSchedule = Boolean(patch.useSchedule);
     if (patch.startTrading != null) this.config.startTrading = Boolean(patch.startTrading);
+    if (patch.manualOrderUnit === "shares" || patch.manualOrderUnit === "usdc") {
+      this.config.manualOrderUnit = patch.manualOrderUnit;
+    }
     if (patch.manualShares != null) {
-      this.config.manualShares = Math.max(1, Math.min(100000, Math.floor(patch.manualShares) || 10));
+      const amount = Number(patch.manualShares);
+      if (this.config.manualOrderUnit === "usdc") {
+        this.config.manualShares = Math.max(
+          0.01,
+          Math.min(100000, Math.round((Number.isFinite(amount) ? amount : 10) * 100) / 100),
+        );
+      } else {
+        this.config.manualShares = Math.max(
+          1,
+          Math.min(100000, Math.floor(Number.isFinite(amount) ? amount : 10) || 10),
+        );
+      }
+    }
+    // Re-normalize amount if unit changed after amount in the same patch
+    if (patch.manualOrderUnit != null && patch.manualShares == null) {
+      this.config = normalizeTradingConfig(this.config);
     }
     if (!this.config.autoTrade) {
       this.config.useSchedule = false;
       this.config.startTrading = false;
     }
+    this.persistConfig();
     return this.getConfig();
   }
 
@@ -141,7 +218,8 @@ export class LiveTradingService {
         down: this.positions.down ? { ...this.positions.down } : null,
       },
       positionCards: this.positionCards.map((card) => ({ ...card })),
-      quoteLocks: previewMode ? emptyQuoteLocks() : { ...this.quoteLocks },
+      placementStats: this.getPlacementStatsFromCards(),
+      quoteLocks: previewMode ? this.autoEngine.getQuoteLocks() : { ...this.quoteLocks },
       markers: this.getDisplayMarkers(),
       phaseSetup: phasesVisible ? this.getDisplayPhaseSetup() : null,
       phasesVisible,
@@ -150,6 +228,79 @@ export class LiveTradingService {
       quotesEnabled: this.canExecuteOrders(),
       previewMode,
     };
+  }
+
+  /** Aggregate real-trade outcomes for schedule placement cards. */
+  getPlacementStats(placementIds: string[]): PlacementLiveStats[] {
+    return placementIds.map((id) => this.statsForPlacement(id));
+  }
+
+  private getPlacementStatsFromCards(): PlacementLiveStats[] {
+    return this.getPlacementStats([...this.knownPlacementIds]);
+  }
+
+  private emptyPlacementStats(placementId: string): PlacementLiveStats {
+    return {
+      placementId,
+      hasData: false,
+      green: 0,
+      red: 0,
+      blue: 0,
+      pnl: 0,
+    };
+  }
+
+  private statsForPlacement(placementId: string): PlacementLiveStats {
+    let green = 0;
+    let red = 0;
+    let blue = 0;
+    let pnl = 0;
+    let hasData = false;
+
+    for (const card of this.positionCards) {
+      if (card.placementId !== placementId) continue;
+      if (card.status === "open") continue;
+      hasData = true;
+      const pl = Number(card.pl ?? 0);
+      pnl += Number.isFinite(pl) ? pl : 0;
+      if (card.status === "sold") {
+        if (pl > 0) green += 1;
+        else red += 1;
+      } else if (card.status === "win") {
+        blue += 1;
+      } else if (card.status === "loss") {
+        red += 1;
+      }
+    }
+
+    if (!hasData) return this.emptyPlacementStats(placementId);
+    return { placementId, hasData: true, green, red, blue, pnl };
+  }
+
+  /** Clears trades tied to a removed schedule placement (stats drop with them). */
+  forgetPlacement(placementId: string): void {
+    this.knownPlacementIds.delete(placementId);
+    const before = this.positionCards.length;
+    this.positionCards = this.positionCards.filter((card) => card.placementId !== placementId);
+    if (this.positionCards.length !== before) {
+      this.stopConfirmLoopIfIdle();
+    }
+    this.notify();
+  }
+
+  /** Clears settled/sold history; keeps open cards tied to active holdings. */
+  clearPositionCards(): void {
+    const keepIds = new Set(
+      [this.positions.up?.cardId, this.positions.down?.cardId].filter(Boolean) as string[],
+    );
+    this.positionCards = this.positionCards.filter(
+      (card) => card.status === "open" && keepIds.has(card.id),
+    );
+    this.knownPlacementIds = new Set(
+      this.positionCards.map((c) => c.placementId).filter(Boolean) as string[],
+    );
+    this.stopConfirmLoopIfIdle();
+    this.notify();
   }
 
   private shouldShowPhases(): boolean {
@@ -317,13 +468,34 @@ export class LiveTradingService {
     const now = Date.now();
     if (!force && now - this.scheduleContextFetchedAt < 5000) return;
     this.scheduleContextFetchedAt = now;
+
+    const prevPlacementId = this.scheduleContext?.placementId ?? null;
+    const prevVisible = this.shouldShowPhases();
+
     if (!this.config.autoTrade || !this.config.useSchedule) {
       this.scheduleContext = null;
       this.activePhaseSetup = null;
-      return;
+    } else {
+      try {
+        const next = await findActiveScheduleContext();
+        if (next) {
+          this.scheduleContext = next;
+          this.activePhaseSetup = next.setup;
+        } else if (this.scheduleContext && isScheduleContextActive(this.scheduleContext)) {
+          // Keep last known setup across transient empty lookups (DB flake, brief gaps).
+        } else {
+          this.scheduleContext = null;
+          this.activePhaseSetup = null;
+        }
+      } catch {
+        // Keep previous context on fetch errors so phases don't blink off mid-window.
+      }
     }
-    this.scheduleContext = await findActiveScheduleContext();
-    this.activePhaseSetup = this.scheduleContext?.setup ?? null;
+
+    const nextPlacementId = this.scheduleContext?.placementId ?? null;
+    if (prevVisible !== this.shouldShowPhases() || prevPlacementId !== nextPlacementId) {
+      this.notify();
+    }
   }
 
   private resolveAutoSimSetup(state: LiveWindowState): SimSetup | null {
@@ -339,9 +511,11 @@ export class LiveTradingService {
   }
 
   async tick(state: LiveWindowState, nowMs?: number): Promise<void> {
+    const prevSessionKey = this.sessionKey;
     this.ensureWindow(state);
+    const windowRolled = prevSessionKey != null && prevSessionKey !== this.sessionKey;
     this.rememberSettlementPrices(state);
-    await this.refreshScheduleContext();
+    await this.refreshScheduleContext(windowRolled);
 
     if (!this.config.autoTrade) return;
 
@@ -398,13 +572,15 @@ export class LiveTradingService {
     if (!this.canManualTrade(side, leg)) {
       return { ok: false, error: leg === "buy" ? "Already holding position" : "No position to sell" };
     }
-    const shares =
+    const size =
       leg === "sell" && this.positions[side]
         ? this.positions[side]!.shares
         : this.config.autoTrade
           ? (this.getPhaseBuyShares(state) ?? this.config.manualShares)
           : this.config.manualShares;
-    return this.executeOrder(state, side, leg, shares, "manual");
+    const sizeUnit =
+      leg === "sell" || this.config.autoTrade ? "shares" : this.config.manualOrderUnit;
+    return this.executeOrder(state, side, leg, size, "manual", sizeUnit);
   }
 
   private getPhaseBuyShares(state: LiveWindowState): number | null {
@@ -748,8 +924,9 @@ export class LiveTradingService {
     state: LiveWindowState,
     side: "up" | "down",
     leg: "buy" | "sell",
-    shares: number,
+    size: number,
     source: "manual" | "auto",
+    sizeUnit: "shares" | "usdc" = "shares",
   ): Promise<{ ok: boolean; error?: string }> {
     if (this.orderInFlight) return { ok: false, error: "Order already in progress" };
     this.orderInFlight = true;
@@ -758,7 +935,8 @@ export class LiveTradingService {
         series: state.series,
         side,
         leg,
-        shares,
+        size,
+        sizeUnit: leg === "sell" ? "shares" : sizeUnit,
         state,
       });
       if (!result.success || result.fillPrice == null || result.fillShares == null) {
@@ -795,7 +973,18 @@ export class LiveTradingService {
           conditionId: result.conditionId,
           slug: result.slug,
           confirmed: false,
+          placementId:
+            source === "auto" && this.config.useSchedule
+              ? this.scheduleContext?.placementId
+              : undefined,
         });
+        if (
+          source === "auto" &&
+          this.config.useSchedule &&
+          this.scheduleContext?.placementId
+        ) {
+          this.knownPlacementIds.add(this.scheduleContext.placementId);
+        }
         if (this.positionCards.length > 100) {
           this.positionCards.length = 100;
         }

@@ -9,6 +9,9 @@ export interface ActiveScheduleContext {
   setupId: string;
   title: string;
   setup: TradingPhaseSetup;
+  day: ScheduleDayId;
+  startHour: number;
+  durationHours: number;
 }
 
 export function getUtcScheduleClock(now = new Date()): { day: ScheduleDayId; hour: number } {
@@ -20,6 +23,16 @@ export function getUtcScheduleClock(now = new Date()): { day: ScheduleDayId; hou
     now.getUTCMinutes() / 60 +
     now.getUTCSeconds() / 3600;
   return { day, hour };
+}
+
+export function isScheduleContextActive(
+  ctx: Pick<ActiveScheduleContext, "day" | "startHour" | "durationHours">,
+  now = new Date(),
+): boolean {
+  const { day, hour } = getUtcScheduleClock(now);
+  return (
+    ctx.day === day && hour >= ctx.startHour && hour < ctx.startHour + ctx.durationHours
+  );
 }
 
 export async function findActiveScheduleContext(
@@ -42,5 +55,8 @@ export async function findActiveScheduleContext(
     setupId: placement.setupId,
     title: doc.title,
     setup: doc.setup,
+    day: placement.day,
+    startHour: placement.startHour,
+    durationHours: placement.durationHours,
   };
 }

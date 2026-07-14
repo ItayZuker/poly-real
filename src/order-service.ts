@@ -7,12 +7,15 @@ import type { LiveWindowState } from "./types.js";
 
 export type TradeSide = "up" | "down";
 export type TradeLeg = "buy" | "sell";
+export type OrderSizeUnit = "shares" | "usdc";
 
 export interface PlaceOrderInput {
   series: string;
   side: TradeSide;
   leg: TradeLeg;
-  shares: number;
+  /** Share count or USDC amount depending on sizeUnit (sells are always shares). */
+  size: number;
+  sizeUnit?: OrderSizeUnit;
   state?: LiveWindowState;
 }
 
@@ -94,6 +97,21 @@ function parseFillFromResponse(
   };
 }
 
+function resolveBuyUsdcAmount(size: number, sizeUnit: OrderSizeUnit, refPrice: number): number {
+  if (sizeUnit === "usdc") {
+    return Math.max(0.01, Math.round(size * 100) / 100);
+  }
+  // Shares mode: spend just enough USDC to target ~size shares at the reference ask.
+  const notional = size * refPrice;
+  return Math.max(0.01, Math.round(notional * 100) / 100);
+}
+
+function estimatedSharesFromBuy(size: number, sizeUnit: OrderSizeUnit, refPrice: number, usdcAmount: number): number {
+  if (sizeUnit === "shares") return size;
+  if (refPrice <= 0) return size;
+  return Math.max(1, Math.round((usdcAmount / refPrice) * 1000) / 1000);
+}
+
 export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
   if (!isTradingConfigured()) {
     return { success: false, error: "Trading account not configured" };
@@ -104,10 +122,13 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
     return { success: false, error: "Trading client not initialized" };
   }
 
-  const shares = Math.max(1, Math.floor(input.shares));
-  if (!Number.isFinite(shares) || shares <= 0) {
-    return { success: false, error: "Invalid share amount" };
+  const size = Number(input.size);
+  if (!Number.isFinite(size) || size <= 0) {
+    return { success: false, error: "Invalid order size" };
   }
+
+  const sizeUnit: OrderSizeUnit =
+    input.leg === "sell" ? "shares" : input.sizeUnit === "usdc" ? "usdc" : "shares";
 
   try {
     const pair = await fetchCurrentUpDownMarket(input.series);
@@ -123,10 +144,16 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
     }
 
     const clobSide = input.leg === "buy" ? Side.BUY : Side.SELL;
+    // CLOB market BUY amount = USDC; market SELL amount = shares.
     const amount =
       input.leg === "buy"
-        ? Math.max(1, Math.round(shares * refPrice * 100) / 100)
-        : shares;
+        ? resolveBuyUsdcAmount(size, sizeUnit, refPrice)
+        : Math.max(1, Math.floor(size));
+
+    const requestedShares =
+      input.leg === "buy"
+        ? estimatedSharesFromBuy(size, sizeUnit, refPrice, amount)
+        : amount;
 
     const resp = (await client.createAndPostMarketOrder(
       {
@@ -149,13 +176,14 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
       resp,
       input.leg,
       refPrice,
-      shares,
+      requestedShares,
       input.leg === "buy" ? amount : undefined,
     );
 
     logService.success(
       "trading",
-      `${input.leg.toUpperCase()} ${input.side.toUpperCase()}: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢`,
+      `${input.leg.toUpperCase()} ${input.side.toUpperCase()}: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢` +
+        (input.leg === "buy" ? ` (~$${amount.toFixed(2)} ${sizeUnit === "shares" ? "for " + size + " sh target" : "USDC"})` : ""),
     );
 
     return {

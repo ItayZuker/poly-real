@@ -17,6 +17,7 @@ import { logService } from "./log-service.js";
 import {
   deleteSchedulePlacement,
   deletePlacementsBySetupId,
+  getSchedulePlacementById,
   insertSchedulePlacement,
   listSchedulePlacements,
   replaceAllPlacementsSetup,
@@ -32,13 +33,16 @@ import {
   deleteTradingSetup,
   normalizePhaseSetup,
 } from "./db/trading-setup-repository.js";
+import {
+  reconcileLiveScheduleInUseFlags,
+  syncLiveScheduleInUseForSetup,
+} from "./db/live-schedule-setup-usage.js";
 import { closeMongoClient } from "./db/mongo-client.js";
 import {
   getHeatmapState,
   loadAllHeatmapWindows,
   setHeatmapUpdateListener,
 } from "./heatmap-service.js";
-import { backtestSchedulePlacements } from "./schedule-backtest-service.js";
 import type { EnrichedLiveWindowState, ReplayTickDocument, SimSetup } from "./types.js";
 import { createPublicClient, getClobHost, getChainId } from "./clob-service.js";
 import {
@@ -158,6 +162,16 @@ app.post("/api/trading/order", async (req, res) => {
       res.status(400).json({ error: result.error ?? "Order failed" });
       return;
     }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/trading/positions/clear", (_req, res) => {
+  try {
+    liveTradingService.clearPositionCards();
+    pushWindowState();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -364,12 +378,24 @@ app.delete("/api/trading-setups/:id", async (req, res) => {
       res.status(404).json({ error: "Setup not found" });
       return;
     }
-    await deletePlacementsBySetupId(req.params.id);
-    const ok = await deleteTradingSetup(req.params.id);
+    if (existing.simScheduleInUse) {
+      res.status(409).json({
+        error: "Setup is in use on the sim schedule and cannot be deleted here",
+      });
+      return;
+    }
+    const setupId = String(req.params.id);
+    const linked = (await listSchedulePlacements()).filter((p) => p.setupId === setupId);
+    await deletePlacementsBySetupId(setupId);
+    for (const placement of linked) {
+      liveTradingService.forgetPlacement(placement._id);
+    }
+    const ok = await deleteTradingSetup(setupId);
     if (!ok) {
       res.status(404).json({ error: "Setup not found" });
       return;
     }
+    pushWindowState();
     logService.success("sim", `Trading setup deleted: "${existing.title}"`);
     res.status(204).send();
   } catch (err) {
@@ -413,6 +439,7 @@ app.post("/api/schedule-placements", async (req, res) => {
       startHour: Number(req.body?.startHour),
       durationHours: Number(req.body?.durationHours),
     });
+    await syncLiveScheduleInUseForSetup(saved.setupId);
     res.status(201).json(saved);
   } catch (err) {
     const message = String(err);
@@ -438,6 +465,7 @@ app.post("/api/schedule-placements/apply-setup", async (req, res) => {
       return;
     }
     const placements = await replaceAllPlacementsSetup(setupId, title || setup.title);
+    await reconcileLiveScheduleInUseFlags();
     res.json(placements);
   } catch (err) {
     const message = String(err);
@@ -481,11 +509,18 @@ app.patch("/api/schedule-placements/:id", async (req, res) => {
 
 app.delete("/api/schedule-placements/:id", async (req, res) => {
   try {
-    const ok = await deleteSchedulePlacement(req.params.id);
+    const id = String(req.params.id);
+    const existing = await getSchedulePlacementById(id);
+    const ok = await deleteSchedulePlacement(id);
     if (!ok) {
       res.status(404).json({ error: "Placement not found" });
       return;
     }
+    if (existing?.setupId) {
+      await syncLiveScheduleInUseForSetup(existing.setupId);
+    }
+    liveTradingService.forgetPlacement(id);
+    pushWindowState();
     res.status(204).send();
   } catch (err) {
     const message = String(err);
@@ -499,20 +534,10 @@ app.delete("/api/schedule-placements/:id", async (req, res) => {
 
 app.get("/api/schedule-placement-stats", async (req, res) => {
   try {
-    const series = getDisplaySeries(req);
-    const market = await getMarket(series);
-    if (!market) {
-      res.status(404).json({ error: "Market not found" });
-      return;
-    }
     const allPlacements = await listSchedulePlacements();
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
-    const latencyMs = simulatorService.getSetup().latencyMs;
-    const setupId = typeof req.query.setupId === "string" ? req.query.setupId : undefined;
-    const stats = await backtestSchedulePlacements(market, placements, latencyMs, {
-      recomputeSetupId: setupId,
-    });
+    const stats = liveTradingService.getPlacementStats(placements.map((p) => p._id));
     res.json(stats);
   } catch (err) {
     const message = String(err);
@@ -542,36 +567,19 @@ app.get("/api/schedule-placement-stats/stream", async (req, res) => {
     if (typeof flush === "function") flush.call(res);
   };
 
-  writeEvent("progress", { completed: 0, total: 0, indeterminate: true });
-
   try {
-    const series = getDisplaySeries(req);
-    const market = await getMarket(series);
-    if (!market) {
-      writeEvent("failure", { error: "Market not found" });
-      res.end();
-      return;
-    }
+    writeEvent("progress", { completed: 1, total: 1 });
     const allPlacements = await listSchedulePlacements();
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
-    const latencyMs = simulatorService.getSetup().latencyMs;
-    const setupId = typeof req.query.setupId === "string" ? req.query.setupId : undefined;
-    const stats = await backtestSchedulePlacements(market, placements, latencyMs, {
-      recomputeSetupId: setupId,
-      onProgress: (progress) => writeEvent("progress", progress),
-      shouldAbort: () => closed,
-    });
+    const stats = liveTradingService.getPlacementStats(placements.map((p) => p._id));
     if (!closed) {
       writeEvent("done", stats);
       res.end();
     }
   } catch (err) {
-    const message = String(err);
-    if (!closed) {
-      writeEvent("failure", { error: message.includes("MONGODB_URI") ? message : message });
-      res.end();
-    }
+    writeEvent("failure", { error: String(err) });
+    res.end();
   }
 });
 
@@ -637,6 +645,12 @@ app.get("/api/stream", (req, res) => {
 async function main(): Promise<void> {
   await initStorageAndSeed();
   await ensureAllMarketIndexes();
+  await liveTradingService.loadPersistedConfig();
+  try {
+    await reconcileLiveScheduleInUseFlags();
+  } catch (err) {
+    logService.warn("server", `Failed to reconcile liveScheduleInUse flags: ${String(err)}`);
+  }
 
   logService.onEntry((entry) => {
     broadcastLog(entry);

@@ -3,9 +3,9 @@
   const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
   const DROP_DURATIONS = [2, 1.5, 1];
   const MIN_DURATION = 1;
-  const STATS_CACHE_STORAGE_KEY = "poly-simulator:schedule-placement-stats";
-  /** Bump when sim/backtest rules change so old client caches are ignored. */
-  const STATS_CACHE_VERSION = "6";
+  const STATS_CACHE_STORAGE_KEY = "poly-real:schedule-placement-stats";
+  /** Live real-trade stats — do not reuse sim backtest caches. */
+  const STATS_CACHE_VERSION = "live-1";
 
   let placements = [];
   let placementStats = new Map();
@@ -916,7 +916,6 @@
       for (const stat of stats) {
         placementStats.set(stat.placementId, stat);
       }
-      saveStatsToCache(stats);
       statsPendingIds.clear();
     } catch (err) {
       if (err?.name !== "AbortError") {
@@ -938,20 +937,17 @@
   }
 
   async function scheduleStatsRefresh(options = {}) {
-    const { force = false } = options;
     if (placements.length === 0) {
+      placementStats.clear();
       statsPendingIds.clear();
       statsBatchFetching = false;
       applyCardStatsStates();
       return;
     }
 
+    // Live trade stats: always refetch (no sim backtest cache).
     const idsToLoad = resolveLoadingPlacementIds(options);
-    hydrateStatsFromCache(idsToLoad);
-
-    const needsFetch = force
-      ? idsToLoad.filter((id) => placements.some((p) => p._id === id))
-      : placementIdsNeedingFetch(idsToLoad);
+    const needsFetch = idsToLoad.filter((id) => placements.some((p) => p._id === id));
     applyCardStatsStates();
 
     if (needsFetch.length === 0) {
@@ -967,14 +963,8 @@
       return;
     }
 
-    const toEnqueue = statsPendingEnqueueIds;
+    enqueueStatsFetch(statsPendingEnqueueIds, { force: true });
     statsPendingEnqueueIds = null;
-    statsWaitingForSetups = false;
-    enqueueStatsFetch(toEnqueue, {
-      force,
-      setupId: options.setupId,
-      quiet: options.quiet,
-    });
   }
 
   /** @deprecated Use scheduleStatsRefresh — kept for app.js callers */
@@ -1313,15 +1303,18 @@
 
   function removePlacementFromCache(placementId) {
     removeFromStatsPending(placementId);
+    placementStats.delete(placementId);
     const cache = readStatsCache();
     if (!cache.entries?.[placementId]) return;
     delete cache.entries[placementId];
-    placementStats.delete(placementId);
     writeStatsCache(cache);
   }
 
   async function removePlacement(id) {
     closeMenus();
+    const placement = placements.find((p) => p._id === id);
+    const label = placement?.title ? `"${placement.title}"` : "this schedule card";
+    if (!window.confirm(`Remove ${label} from the live schedule?`)) return;
     try {
       const res = await fetch(`/api/schedule-placements/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -1334,6 +1327,9 @@
       framedPlacementIds.delete(id);
       removePlacementFromCache(id);
       renderPlacements({ reloadStats: false });
+      if (typeof window.refreshScheduleSetupsList === "function") {
+        void window.refreshScheduleSetupsList();
+      }
     } catch (err) {
       console.error(err);
     }
@@ -1563,6 +1559,9 @@
       const created = await res.json();
       placements.push(created);
       renderPlacements({ statsOptions: { placementIds: [created._id] } });
+      if (typeof window.refreshScheduleSetupsList === "function") {
+        void window.refreshScheduleSetupsList();
+      }
     } catch (err) {
       console.error(err);
     }
@@ -1670,6 +1669,15 @@
     bindGlobalPointer();
   }
 
+  function applyLivePlacementStats(statsList) {
+    if (!Array.isArray(statsList)) return;
+    for (const stats of statsList) {
+      if (!stats?.placementId) continue;
+      placementStats.set(stats.placementId, stats);
+    }
+    applyCardStatsStates();
+  }
+
   window.SchedulePlacements = {
     init,
     loadPlacements,
@@ -1677,6 +1685,7 @@
     onSetupsRendered,
     onViewChange,
     onHeatmapUpdated,
+    applyLivePlacementStats,
     getPlacementCountsBySetup,
     refreshPlacementStats: scheduleStatsRefresh,
     refreshAllPlacementStats: (options = {}) =>

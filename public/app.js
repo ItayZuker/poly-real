@@ -174,6 +174,24 @@ function scrollLogToBottom() {
   output.scrollTop = output.scrollHeight;
 }
 
+function scrollPositionsToBottom() {
+  const body = $("positions-list");
+  if (!body) return;
+  body.scrollTop = body.scrollHeight;
+}
+
+async function clearPositions() {
+  try {
+    const res = await fetch("/api/trading/positions/clear", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Clear failed (${res.status})`);
+    }
+  } catch (err) {
+    appendLog(`Positions clear failed: ${err.message || err}`);
+  }
+}
+
 function fmtPrice(v) {
   if (v == null || !Number.isFinite(v)) return "—";
   if (v >= 1000) return `$${v.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
@@ -833,10 +851,21 @@ function drawPriceChart(state, options = {}) {
   if (options.dragLine !== undefined) overlayOpts.dragLine = options.dragLine;
   const trading = state?.trading;
   if (trading) {
-    overlayOpts.phasesVisible = trading.phasesVisible;
+    const cfg = trading.config;
+    let phasesOn = Boolean(trading.phasesVisible);
+    if (!phasesOn && cfg?.autoTrade && !cfg.useSchedule) phasesOn = true;
+    if (!phasesOn && cfg?.autoTrade && trading.phaseSetup) phasesOn = true;
+    // Setup editor passes its own override + canvas; force phases on there.
+    if (options.setupOverride && options.canvas) phasesOn = true;
+    overlayOpts.phasesVisible = phasesOn;
     overlayOpts.phasesEditable = trading.phasesEditable;
-    if (trading.phaseSetup) overlayOpts.setupOverride = trading.phaseSetup;
-    if (trading.markers?.length) overlayOpts.markersOverride = trading.markers;
+    if (!options.setupOverride) {
+      const setup =
+        trading.phaseSetup ||
+        (cfg?.autoTrade && !cfg.useSchedule ? state.sim?.setup : null);
+      if (setup) overlayOpts.setupOverride = setup;
+    }
+    if (Array.isArray(trading.markers)) overlayOpts.markersOverride = trading.markers;
   }
 
   ctx.strokeStyle = "#21262d";
@@ -1129,6 +1158,9 @@ function connectSSE() {
     if (state.series === selectedSeries || !state.series) {
       updateWindowUI(state);
     }
+    if (state.trading?.placementStats && window.SchedulePlacements?.applyLivePlacementStats) {
+      window.SchedulePlacements.applyLivePlacementStats(state.trading.placementStats);
+    }
   });
 
   es.addEventListener("account", (e) => {
@@ -1181,6 +1213,14 @@ $("log-clear").addEventListener("click", () => {
 
 $("log-scroll-bottom").addEventListener("click", () => {
   scrollLogToBottom();
+});
+
+$("positions-clear")?.addEventListener("click", () => {
+  void clearPositions();
+});
+
+$("positions-scroll-bottom")?.addEventListener("click", () => {
+  scrollPositionsToBottom();
 });
 
 function syncSetupSaveSubmitState() {
@@ -1358,11 +1398,23 @@ async function afterTradingSetupChange(updatedSetup) {
 }
 
 window.onTradingSetupUpdated = afterTradingSetupChange;
+window.refreshScheduleSetupsList = () => loadScheduleSetups();
 
 async function deleteTradingSetup(setup) {
   closeSetupMenus();
+  if (setup?.simScheduleInUse === true) {
+    appendLogEntry({
+      level: "warn",
+      source: "sim",
+      message: `Cannot delete "${setup.title}": it is in use on the sim schedule`,
+    });
+    return;
+  }
+  const inLive = setup?.liveScheduleInUse === true;
   const confirmed = window.confirm(
-    `Delete "${setup.title}"? This will remove it from the schedule and cannot be undone.`,
+    inLive
+      ? `Delete "${setup.title}"?\n\nIt is currently placed on the live schedule. This will remove those schedule cards and cannot be undone.`
+      : `Delete "${setup.title}"? This will remove it from the schedule and cannot be undone.`,
   );
   if (!confirmed) return;
 
@@ -1516,6 +1568,7 @@ async function applySetupToSchedule(setup) {
       void window.SchedulePlacements.refreshAllPlacementStats();
     }
     window.updateSetupListPlacementCounts?.();
+    void loadScheduleSetups();
     appendLogEntry({
       level: "success",
       source: "sim",
@@ -1678,10 +1731,16 @@ function renderScheduleSetupsList(setups, errorMessage) {
       deleteBtn.className = "schedule-setup-menu-item schedule-setup-menu-item-danger";
       deleteBtn.setAttribute("role", "menuitem");
       deleteBtn.textContent = "Delete";
-      deleteBtn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        void deleteTradingSetup(setup);
-      });
+      if (setup.simScheduleInUse === true) {
+        deleteBtn.disabled = true;
+        deleteBtn.classList.add("is-disabled");
+        deleteBtn.title = "In use on the sim schedule — remove it there first";
+      } else {
+        deleteBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          void deleteTradingSetup(setup);
+        });
+      }
 
       menu.append(editBtn, duplicateBtn, applyBtn, applyScheduleBtn, deleteBtn);
       document.body.appendChild(menu);
@@ -1926,12 +1985,78 @@ function syncWalletControls(config) {
   const useScheduleField = $("wallet-use-schedule-field");
   const startTradingField = $("wallet-start-trading-field");
   const sharesInput = $("manual-shares");
+  const unitSelect = $("manual-order-unit");
 
   if (sharesField) sharesField.hidden = autoTradeOn;
   if (useScheduleField) useScheduleField.hidden = !autoTradeOn;
   if (startTradingField) startTradingField.hidden = !autoTradeOn;
-  if (sharesInput && Number.isFinite(config?.manualShares) && !autoTradeOn) {
+  if (unitSelect) {
+    unitSelect.value = config?.manualOrderUnit === "usdc" ? "usdc" : "shares";
+    syncManualAmountInputAttrs(unitSelect.value);
+  }
+  if (sharesInput && Number.isFinite(config?.manualShares)) {
     sharesInput.value = String(config.manualShares);
+  }
+}
+
+function syncManualAmountInputAttrs(unit) {
+  const sharesInput = $("manual-shares");
+  if (!sharesInput) return;
+  if (unit === "usdc") {
+    sharesInput.min = "0.01";
+    sharesInput.step = "0.01";
+  } else {
+    sharesInput.min = "1";
+    sharesInput.step = "1";
+  }
+}
+
+function normalizeManualAmount(value, unit) {
+  const n = Number(value);
+  if (unit === "usdc") {
+    return Math.max(0.01, Math.min(100000, Math.round((Number.isFinite(n) ? n : 10) * 100) / 100));
+  }
+  return Math.max(1, Math.min(100000, Math.floor(Number.isFinite(n) ? n : 10) || 10));
+}
+
+const TRADING_CONFIG_STORAGE_KEY = "poly-trading-config";
+
+function readLocalTradingConfig() {
+  try {
+    const raw = localStorage.getItem(TRADING_CONFIG_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const autoTrade = Boolean(parsed.autoTrade);
+    const manualOrderUnit = parsed.manualOrderUnit === "usdc" ? "usdc" : "shares";
+    return {
+      autoTrade,
+      useSchedule: autoTrade && Boolean(parsed.useSchedule),
+      startTrading: autoTrade && Boolean(parsed.startTrading),
+      manualOrderUnit,
+      manualShares: normalizeManualAmount(parsed.manualShares, manualOrderUnit),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalTradingConfig(config) {
+  if (!config) return;
+  try {
+    const manualOrderUnit = config.manualOrderUnit === "usdc" ? "usdc" : "shares";
+    localStorage.setItem(
+      TRADING_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        autoTrade: Boolean(config.autoTrade),
+        useSchedule: Boolean(config.useSchedule),
+        startTrading: Boolean(config.startTrading),
+        manualOrderUnit,
+        manualShares: normalizeManualAmount(config.manualShares, manualOrderUnit),
+      }),
+    );
+  } catch {
+    // ignore quota / private mode
   }
 }
 
@@ -1943,7 +2068,9 @@ async function pushTradingConfig(patch) {
       body: JSON.stringify(patch),
     });
     if (!res.ok) return null;
-    return await res.json();
+    const config = await res.json();
+    writeLocalTradingConfig(config);
+    return config;
   } catch {
     return null;
   }
@@ -1952,8 +2079,10 @@ async function pushTradingConfig(patch) {
 async function loadTradingConfig() {
   try {
     const res = await fetch("/api/trading/config");
-    if (!res.ok) return;
-    return await res.json();
+    if (!res.ok) return null;
+    const config = await res.json();
+    writeLocalTradingConfig(config);
+    return config;
   } catch {
     return null;
   }
@@ -1964,11 +2093,14 @@ function buildTradingConfigPatch(overrides = {}) {
   const useScheduleInput = $("use-schedule");
   const startTradingInput = $("start-trading");
   const sharesInput = $("manual-shares");
+  const unitSelect = $("manual-order-unit");
+  const manualOrderUnit = unitSelect?.value === "usdc" ? "usdc" : "shares";
   return {
     autoTrade: Boolean(autoTradeInput?.checked),
     useSchedule: Boolean(useScheduleInput?.checked),
     startTrading: Boolean(startTradingInput?.checked),
-    manualShares: Math.max(1, Math.floor(Number(sharesInput?.value) || 10)),
+    manualOrderUnit,
+    manualShares: normalizeManualAmount(sharesInput?.value, manualOrderUnit),
     ...overrides,
   };
 }
@@ -1978,6 +2110,7 @@ function bindTradeToggles() {
   const useScheduleInput = $("use-schedule");
   const startTradingInput = $("start-trading");
   const sharesInput = $("manual-shares");
+  const unitSelect = $("manual-order-unit");
   if (!autoTradeInput || !useScheduleInput || !startTradingInput) return;
 
   const applyConfig = (config) => {
@@ -1988,9 +2121,12 @@ function bindTradeToggles() {
     syncWalletControls(config);
   };
 
+  // Restore immediately from localStorage, then sync from server
+  applyConfig(readLocalTradingConfig());
   void loadTradingConfig().then((config) => {
     applyConfig(config);
     syncGraphSaveBtn(windowState);
+    if (windowState) drawPriceChart(windowState);
   });
 
   autoTradeInput.addEventListener("change", async () => {
@@ -1998,8 +2134,9 @@ function bindTradeToggles() {
       useScheduleInput.checked = false;
       startTradingInput.checked = false;
     }
+    writeLocalTradingConfig(buildTradingConfigPatch());
     const config = await pushTradingConfig(buildTradingConfigPatch());
-    applyConfig(config);
+    applyConfig(config ?? buildTradingConfigPatch());
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
@@ -2010,8 +2147,9 @@ function bindTradeToggles() {
   });
 
   useScheduleInput.addEventListener("change", async () => {
+    writeLocalTradingConfig(buildTradingConfigPatch());
     const config = await pushTradingConfig(buildTradingConfigPatch());
-    applyConfig(config);
+    applyConfig(config ?? buildTradingConfigPatch());
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
@@ -2022,8 +2160,9 @@ function bindTradeToggles() {
   });
 
   startTradingInput.addEventListener("change", async () => {
+    writeLocalTradingConfig(buildTradingConfigPatch());
     const config = await pushTradingConfig(buildTradingConfigPatch());
-    applyConfig(config);
+    applyConfig(config ?? buildTradingConfigPatch());
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
       level: "info",
@@ -2032,11 +2171,23 @@ function bindTradeToggles() {
     });
   });
 
+  unitSelect?.addEventListener("change", async () => {
+    if (autoTradeInput.checked) return;
+    const manualOrderUnit = unitSelect.value === "usdc" ? "usdc" : "shares";
+    syncManualAmountInputAttrs(manualOrderUnit);
+    const manualShares = normalizeManualAmount(sharesInput?.value, manualOrderUnit);
+    if (sharesInput) sharesInput.value = String(manualShares);
+    writeLocalTradingConfig(buildTradingConfigPatch({ manualOrderUnit, manualShares }));
+    await pushTradingConfig(buildTradingConfigPatch({ manualOrderUnit, manualShares }));
+  });
+
   sharesInput?.addEventListener("change", async () => {
     if (autoTradeInput.checked) return;
-    const manualShares = Math.max(1, Math.min(100000, Math.floor(Number(sharesInput.value) || 10)));
+    const manualOrderUnit = unitSelect?.value === "usdc" ? "usdc" : "shares";
+    const manualShares = normalizeManualAmount(sharesInput.value, manualOrderUnit);
     sharesInput.value = String(manualShares);
-    await pushTradingConfig(buildTradingConfigPatch({ manualShares }));
+    writeLocalTradingConfig(buildTradingConfigPatch({ manualShares, manualOrderUnit }));
+    await pushTradingConfig(buildTradingConfigPatch({ manualShares, manualOrderUnit }));
   });
 }
 

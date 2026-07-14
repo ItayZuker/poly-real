@@ -240,6 +240,16 @@ export interface TradingSetupRecord {
   color?: string;
   setup: TradingPhaseSetup;
   createdAt: Date;
+  /**
+   * True while at least one card using this setup is on the live schedule
+   * (`schedual_setups_real`). Sim apps should refuse to delete when set.
+   */
+  liveScheduleInUse?: boolean;
+  /**
+   * True while at least one card using this setup is on the sim schedule
+   * (`schedual_setups_sim`). Real app disables delete when set.
+   */
+  simScheduleInUse?: boolean;
 }
 
 export type ScheduleDayId = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -310,7 +320,9 @@ export interface TradingConfig {
   autoTrade: boolean;
   useSchedule: boolean;
   startTrading: boolean;
+  /** Manual buy size (share count or USDC, depending on manualOrderUnit). */
   manualShares: number;
+  manualOrderUnit: "shares" | "usdc";
 }
 
 export interface LiveSidePosition {
@@ -343,12 +355,25 @@ export interface TradingPositionCard {
   slug?: string;
   /** Whether buy/sell/P/L numbers were confirmed from Polymarket Data API */
   confirmed?: boolean;
+  /** Schedule placement that auto-triggered this trade (real schedule only). */
+  placementId?: string;
+}
+
+/** Live real-trade aggregates for a schedule placement card. */
+export interface PlacementLiveStats {
+  placementId: string;
+  hasData: boolean;
+  green: number;
+  red: number;
+  blue: number;
+  pnl: number;
 }
 
 export interface TradingPublicState {
   config: TradingConfig;
   positions: { up: LiveSidePosition | null; down: LiveSidePosition | null };
   positionCards: TradingPositionCard[];
+  placementStats: PlacementLiveStats[];
   quoteLocks: SimQuoteLocks;
   markers: SimMarker[];
   phaseSetup: TradingPhaseSetup | null;

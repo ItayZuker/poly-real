@@ -22,6 +22,10 @@ export interface TradingSetupListItem {
   color: string;
   setup: TradingPhaseSetup;
   createdAt: string;
+  /** True while placed on the live (real) schedule. */
+  liveScheduleInUse: boolean;
+  /** True while placed on the sim schedule. */
+  simScheduleInUse: boolean;
 }
 
 type TradingSetupDoc = TradingSetupRecord & { _id: ObjectId };
@@ -39,9 +43,34 @@ function serializeTradingSetup(doc: TradingSetupDoc): TradingSetupListItem {
     color: resolveSetupColor(doc),
     setup: doc.setup,
     createdAt: doc.createdAt instanceof Date ? doc.createdAt.toISOString() : String(doc.createdAt),
+    liveScheduleInUse: doc.liveScheduleInUse === true,
+    simScheduleInUse: doc.simScheduleInUse === true,
   };
   if (doc.description) item.description = doc.description;
   return item;
+}
+
+/** Marks whether a setup is referenced by any live schedule placement. */
+export async function setLiveScheduleInUse(setupId: string, inUse: boolean): Promise<void> {
+  const { ObjectId } = await import("mongodb");
+  let oid: ObjectId;
+  try {
+    oid = new ObjectId(setupId);
+  } catch {
+    return;
+  }
+  const mongo = await getMongoClient();
+  if (inUse) {
+    await mongo
+      .db(getMongoDbName())
+      .collection<TradingSetupDoc>(COLLECTION)
+      .updateOne({ _id: oid }, { $set: { liveScheduleInUse: true } });
+    return;
+  }
+  await mongo
+    .db(getMongoDbName())
+    .collection<TradingSetupDoc>(COLLECTION)
+    .updateOne({ _id: oid }, { $unset: { liveScheduleInUse: "" } });
 }
 
 export async function listTradingSetups(): Promise<TradingSetupListItem[]> {

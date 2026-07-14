@@ -25,6 +25,10 @@ export function walletsFilePath(): string {
   return path.join(getDataDir(), "wallets.json");
 }
 
+export function tradingConfigFilePath(): string {
+  return path.join(getDataDir(), "trading-config.json");
+}
+
 export function marketDir(series: string): string {
   return path.join(getDataDir(), series.replace(/-/g, "_"));
 }
