@@ -174,24 +174,6 @@ function scrollLogToBottom() {
   output.scrollTop = output.scrollHeight;
 }
 
-function scrollPositionsToBottom() {
-  const body = $("positions-list");
-  if (!body) return;
-  body.scrollTop = body.scrollHeight;
-}
-
-async function clearPositions() {
-  try {
-    const res = await fetch("/api/trading/positions/clear", { method: "POST" });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `Clear failed (${res.status})`);
-    }
-  } catch (err) {
-    appendLog(`Positions clear failed: ${err.message || err}`);
-  }
-}
-
 function fmtPrice(v) {
   if (v == null || !Number.isFinite(v)) return "—";
   if (v >= 1000) return `$${v.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
@@ -515,8 +497,13 @@ function initChart() {
 
 window.drawPriceChart = drawPriceChart;
 
-const MIN_COLUMN_PCT = 25;
-const MAX_COLUMN_PCT = 75;
+const MIN_COLUMN_PCT = 0;
+const MAX_COLUMN_PCT = 100;
+const LEFT_COVERED_PCT = 0.5;
+const RIGHT_COVERED_PCT = 99.5;
+
+/** Row-split helpers filled by initLeftRowSplitter. */
+let leftColumnLayout = null;
 
 function setColumnSplit(pct) {
   const page = $("page-simulator");
@@ -525,6 +512,268 @@ function setColumnSplit(pct) {
   const clamped = Math.max(MIN_COLUMN_PCT, Math.min(MAX_COLUMN_PCT, pct));
   page.style.setProperty("--split-left-pct", String(clamped));
   if (splitter) splitter.setAttribute("aria-valuenow", String(Math.round(clamped)));
+  syncLeftColumnRail();
+  syncMarketColumnRail();
+}
+
+function syncLeftColumnRail() {
+  const page = $("page-simulator");
+  const rail = $("left-column-rail");
+  const leftColumn = document.querySelector(".left-column");
+  if (!page || !rail || !leftColumn) return;
+  const pct = Number(page.style.getPropertyValue("--split-left-pct"));
+  const splitPct = Number.isFinite(pct) ? pct : 50;
+  const covered = splitPct <= LEFT_COVERED_PCT || leftColumn.getBoundingClientRect().width < 8;
+  rail.hidden = !covered;
+  page.classList.toggle("is-left-covered", covered);
+  if (covered) clampLeftColumnRailTop();
+}
+
+function syncMarketColumnRail() {
+  const page = $("page-simulator");
+  const rail = $("market-column-rail");
+  const marketPanel = document.querySelector(".simulator-panel");
+  if (!page || !rail || !marketPanel) return;
+  const pct = Number(page.style.getPropertyValue("--split-left-pct"));
+  const splitPct = Number.isFinite(pct) ? pct : 50;
+  const covered = splitPct >= RIGHT_COVERED_PCT || marketPanel.getBoundingClientRect().width < 8;
+  rail.hidden = !covered;
+  page.classList.toggle("is-market-covered", covered);
+  syncMarketRailLivePulse();
+  if (covered) clampMarketColumnRailTop();
+}
+
+function syncMarketRailLivePulse() {
+  const rail = $("market-column-rail");
+  if (!rail) return;
+  const live = Boolean($("start-trading")?.checked);
+  rail.classList.toggle("is-live-trading", live);
+}
+
+const LEFT_RAIL_TOP_KEY = "poly-real:left-rail-top";
+
+function loadLeftColumnRailTop() {
+  try {
+    const raw = localStorage.getItem(LEFT_RAIL_TOP_KEY);
+    const n = raw != null ? Number(raw) : Number.NaN;
+    return Number.isFinite(n) ? n : 72;
+  } catch {
+    return 72;
+  }
+}
+
+function saveLeftColumnRailTop(top) {
+  try {
+    localStorage.setItem(LEFT_RAIL_TOP_KEY, String(Math.round(top)));
+  } catch {
+    // ignore
+  }
+}
+
+function clampLeftColumnRailTop(preferredTop) {
+  const page = $("page-simulator");
+  const rail = $("left-column-rail");
+  if (!page || !rail || rail.hidden) return;
+  const pageRect = page.getBoundingClientRect();
+  const railH = rail.offsetHeight || 0;
+  const pad = 8;
+  const maxTop = Math.max(pad, pageRect.height - railH - pad);
+  const base =
+    preferredTop != null && Number.isFinite(preferredTop)
+      ? preferredTop
+      : rail.offsetTop || loadLeftColumnRailTop();
+  const next = Math.max(pad, Math.min(maxTop, base));
+  page.style.setProperty("--left-rail-top", `${Math.round(next)}px`);
+  rail.style.top = `${Math.round(next)}px`;
+  return next;
+}
+
+function openLeftSection(section) {
+  setColumnSplit(50);
+  // Two frames so --split-left-pct layout is settled before measuring.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      leftColumnLayout?.maximizeSection?.(section);
+      syncLeftColumnRail();
+    });
+  });
+}
+
+function bindLeftColumnRail() {
+  const rail = $("left-column-rail");
+  const page = $("page-simulator");
+  if (!rail || !page || rail.dataset.bound === "1") return;
+  rail.dataset.bound = "1";
+
+  clampLeftColumnRailTop(loadLeftColumnRailTop());
+
+  rail.querySelectorAll("[data-left-section]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      openLeftSection(btn.dataset.leftSection);
+    });
+  });
+
+  let dragging = false;
+  let startY = 0;
+  let startTop = 0;
+  const handle = rail.querySelector(".left-column-rail-handle");
+
+  const onPointerMove = (e) => {
+    if (!dragging) return;
+    clampLeftColumnRailTop(startTop + (e.clientY - startY));
+  };
+
+  const onPointerUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    rail.classList.remove("is-dragging");
+    try {
+      (handle || rail).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerUp);
+    const top = clampLeftColumnRailTop(rail.offsetTop);
+    if (top != null) saveLeftColumnRailTop(top);
+  };
+
+  const onHandleDown = (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    startY = e.clientY;
+    startTop = rail.offsetTop;
+    rail.classList.add("is-dragging");
+    try {
+      (handle || rail).setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    e.preventDefault();
+  };
+
+  if (handle) handle.addEventListener("pointerdown", onHandleDown);
+
+  window.addEventListener("resize", () => {
+    clampLeftColumnRailTop();
+  });
+}
+
+const MARKET_RAIL_TOP_KEY = "poly-real:market-rail-top";
+
+function loadMarketColumnRailTop() {
+  try {
+    const raw = localStorage.getItem(MARKET_RAIL_TOP_KEY);
+    const n = raw != null ? Number(raw) : Number.NaN;
+    return Number.isFinite(n) ? n : 72;
+  } catch {
+    return 72;
+  }
+}
+
+function saveMarketColumnRailTop(top) {
+  try {
+    localStorage.setItem(MARKET_RAIL_TOP_KEY, String(Math.round(top)));
+  } catch {
+    // ignore
+  }
+}
+
+function clampMarketColumnRailTop(preferredTop) {
+  const page = $("page-simulator");
+  const rail = $("market-column-rail");
+  if (!page || !rail || rail.hidden) return;
+  const pageRect = page.getBoundingClientRect();
+  const railH = rail.offsetHeight || 0;
+  const pad = 8;
+  const maxTop = Math.max(pad, pageRect.height - railH - pad);
+  const base =
+    preferredTop != null && Number.isFinite(preferredTop)
+      ? preferredTop
+      : rail.offsetTop || loadMarketColumnRailTop();
+  const next = Math.max(pad, Math.min(maxTop, base));
+  page.style.setProperty("--market-rail-top", `${Math.round(next)}px`);
+  rail.style.top = `${Math.round(next)}px`;
+  return next;
+}
+
+function openMarketColumn() {
+  setColumnSplit(50);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      syncMarketColumnRail();
+      syncLeftColumnRail();
+    });
+  });
+}
+
+function bindMarketColumnRail() {
+  const rail = $("market-column-rail");
+  const page = $("page-simulator");
+  if (!rail || !page || rail.dataset.bound === "1") return;
+  rail.dataset.bound = "1";
+
+  clampMarketColumnRailTop(loadMarketColumnRailTop());
+
+  const openBtn = $("market-rail-open");
+  if (openBtn) {
+    openBtn.addEventListener("click", () => {
+      openMarketColumn();
+    });
+  }
+
+  let dragging = false;
+  let startY = 0;
+  let startTop = 0;
+  const handle = rail.querySelector(".left-column-rail-handle");
+
+  const onPointerMove = (e) => {
+    if (!dragging) return;
+    clampMarketColumnRailTop(startTop + (e.clientY - startY));
+  };
+
+  const onPointerUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    rail.classList.remove("is-dragging");
+    try {
+      (handle || rail).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerUp);
+    const top = clampMarketColumnRailTop(rail.offsetTop);
+    if (top != null) saveMarketColumnRailTop(top);
+  };
+
+  const onHandleDown = (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    startY = e.clientY;
+    startTop = rail.offsetTop;
+    rail.classList.add("is-dragging");
+    try {
+      (handle || rail).setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    e.preventDefault();
+  };
+
+  if (handle) handle.addEventListener("pointerdown", onHandleDown);
+
+  window.addEventListener("resize", () => {
+    clampMarketColumnRailTop();
+  });
 }
 
 function initLeftRowSplitter() {
@@ -599,6 +848,21 @@ function initLeftRowSplitter() {
     logBody.classList.toggle("is-scrollable", l > 0);
   };
 
+  const maximizeSection = (section) => {
+    const { maxContent } = getMetrics();
+    if (section === "positions") {
+      applyHeights(0, maxContent, 0);
+      return;
+    }
+    if (section === "log") {
+      applyHeights(0, 0, maxContent);
+      return;
+    }
+    applyHeights(maxContent, 0, 0);
+  };
+
+  leftColumnLayout = { applyHeights, maximizeSection, readHeights, getMetrics };
+
   const initDefaultHeights = () => {
     const { maxContent } = getMetrics();
     applyHeights(maxContent, 0, 0);
@@ -649,6 +913,11 @@ function initLeftRowSplitter() {
     anchorLogContent = readHeights().log;
     activeHandle.classList.add("is-dragging");
     document.body.classList.add("is-row-resizing");
+    try {
+      prevDragHandle.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
     clampPrevDrag(e.clientY);
     e.preventDefault();
   };
@@ -661,6 +930,11 @@ function initLeftRowSplitter() {
     anchorSettingsContent = readHeights().settings;
     activeHandle.classList.add("is-dragging");
     document.body.classList.add("is-row-resizing");
+    try {
+      logDragHandle.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
     clampLogDrag(e.clientY);
     e.preventDefault();
   };
@@ -669,18 +943,26 @@ function initLeftRowSplitter() {
   window.addEventListener("resize", () => {
     const heights = readHeights();
     applyHeights(heights.settings, heights.prev, heights.log);
+    syncLeftColumnRail();
+    syncMarketColumnRail();
   });
 
-  prevDragHandle.addEventListener("mousedown", startPrevDrag);
-  logDragHandle.addEventListener("mousedown", startLogDrag);
-
-  window.addEventListener("mousemove", (e) => {
+  const onPointerMove = (e) => {
     if (!dragging) return;
     if (dragKind === "prev") clampPrevDrag(e.clientY);
     else if (dragKind === "log") clampLogDrag(e.clientY);
-  });
+  };
 
-  window.addEventListener("mouseup", stopDragging);
+  prevDragHandle.addEventListener("pointerdown", startPrevDrag);
+  logDragHandle.addEventListener("pointerdown", startLogDrag);
+  prevDragHandle.addEventListener("pointermove", onPointerMove);
+  logDragHandle.addEventListener("pointermove", onPointerMove);
+  prevDragHandle.addEventListener("pointerup", stopDragging);
+  logDragHandle.addEventListener("pointerup", stopDragging);
+  prevDragHandle.addEventListener("pointercancel", stopDragging);
+  logDragHandle.addEventListener("pointercancel", stopDragging);
+  prevDragHandle.addEventListener("lostpointercapture", stopDragging);
+  logDragHandle.addEventListener("lostpointercapture", stopDragging);
   window.addEventListener("blur", stopDragging);
 }
 
@@ -1046,8 +1328,9 @@ function renderPositionCard(card) {
     detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl ${plClass}">${fmtUsdSigned(card.pl)}</strong></div>`;
   }
 
-  const sourceNote = card.confirmed ? "Confirmed" : "Pending confirm";
-  return `<article class="position-card is-${status}" data-position-id="${card.id}">
+  const isDemo = card.demo === true || String(card.id || "").startsWith("demo:");
+  const sourceNote = isDemo ? "Demo" : card.confirmed ? "Confirmed" : "Pending confirm";
+  return `<article class="position-card is-${status}${isDemo ? " is-demo" : ""}" data-position-id="${card.id}">
     <div class="position-card-top">
       <span class="position-card-side ${sideClass}">${(card.side || "").toUpperCase()}</span>
       <span class="position-card-status">${positionStatusLabel(status)}</span>
@@ -1057,11 +1340,185 @@ function renderPositionCard(card) {
   </article>`;
 }
 
+const DEMO_POSITION_CARDS_KEY = "poly-real:demo-position-cards";
+const POSITIONS_VIEW_KEY = "poly-real:positions-view";
+
+let positionsView = "live";
+let demoPositionCards = [];
 let lastPositionsFingerprint = "";
+let lastDemoLastWindowKey = null;
+
+function loadPositionsViewPref() {
+  try {
+    const saved = localStorage.getItem(POSITIONS_VIEW_KEY);
+    if (saved === "live" || saved === "demo") positionsView = saved;
+  } catch {
+    // ignore
+  }
+}
+
+function savePositionsViewPref() {
+  try {
+    localStorage.setItem(POSITIONS_VIEW_KEY, positionsView);
+  } catch {
+    // ignore
+  }
+}
+
+function loadDemoPositionCards() {
+  try {
+    const raw = localStorage.getItem(DEMO_POSITION_CARDS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistDemoPositionCards() {
+  try {
+    localStorage.setItem(DEMO_POSITION_CARDS_KEY, JSON.stringify(demoPositionCards.slice(0, 100)));
+  } catch {
+    // ignore
+  }
+}
+
+function clearDemoPositionCards() {
+  demoPositionCards = [];
+  lastDemoLastWindowKey = null;
+  try {
+    localStorage.removeItem(DEMO_POSITION_CARDS_KEY);
+  } catch {
+    // ignore
+  }
+  lastPositionsFingerprint = "";
+  if (positionsView === "demo") updatePositionsPanel(windowState);
+}
+
+window.clearDemoPositionCards = clearDemoPositionCards;
+
+function demoCardId(windowKey, side) {
+  return `demo:${windowKey}:${side}`;
+}
+
+function shouldUpdateDemoPositionCards(trading) {
+  const cfg = trading?.config;
+  return Boolean(cfg?.autoTrade && !cfg.startTrading);
+}
+
+function upsertDemoPositionCard(card) {
+  if (!card?.id) return;
+  const idx = demoPositionCards.findIndex((c) => c.id === card.id);
+  if (idx >= 0) {
+    demoPositionCards[idx] = { ...demoPositionCards[idx], ...card, demo: true };
+  } else {
+    demoPositionCards.unshift({ ...card, demo: true });
+  }
+  if (demoPositionCards.length > 100) demoPositionCards.length = 100;
+  persistDemoPositionCards();
+}
+
+function syncDemoCardsFromMarkers(trading, state) {
+  if (!shouldUpdateDemoPositionCards(trading)) return;
+  const markers = Array.isArray(trading?.markers) ? trading.markers : [];
+  const buys = markers.filter((m) => m.type === "buy");
+  if (buys.length === 0) return;
+
+  for (const buy of buys) {
+    const windowKey = buy.windowKey || `${state?.series || ""}:${state?.windowStart || ""}`;
+    if (!windowKey || !buy.side) continue;
+    const id = demoCardId(windowKey, buy.side);
+    const existing = demoPositionCards.find((c) => c.id === id);
+    if (existing && existing.status !== "open") continue;
+
+    const sell = markers.find((m) => m.type === "sell" && m.side === buy.side);
+    if (sell) {
+      upsertDemoPositionCard({
+        id,
+        windowKey,
+        series: state?.series,
+        side: buy.side,
+        shares: sell.shares ?? buy.shares,
+        buyPrice: buy.price,
+        buyCost: buy.cost ?? (buy.shares || 0) * (buy.price || 0),
+        buyFees: buy.fees ?? 0,
+        buyAt: buy.t,
+        status: "sold",
+        sellPrice: sell.price,
+        sellProceeds: sell.proceeds ?? (sell.shares || 0) * (sell.price || 0),
+        sellFees: sell.fees ?? 0,
+        soldAt: sell.t,
+        pl: sell.profit ?? null,
+        confirmed: true,
+        demo: true,
+      });
+    } else {
+      upsertDemoPositionCard({
+        id,
+        windowKey,
+        series: state?.series,
+        side: buy.side,
+        shares: buy.shares,
+        buyPrice: buy.price,
+        buyCost: buy.cost ?? (buy.shares || 0) * (buy.price || 0),
+        buyFees: buy.fees ?? 0,
+        buyAt: buy.t,
+        status: "open",
+        confirmed: true,
+        demo: true,
+      });
+    }
+  }
+}
+
+function syncDemoCardsFromLastWindow(lastWindow) {
+  if (!lastWindow?.windowKey || lastWindow.plLabel === "No trade") return;
+  if (!lastWindow.side) return;
+  if (lastDemoLastWindowKey === lastWindow.windowKey) {
+    // Still refresh fields if card exists (P/L corrections)
+  }
+  lastDemoLastWindowKey = lastWindow.windowKey;
+
+  const id = demoCardId(lastWindow.windowKey, lastWindow.side);
+  let status = "sold";
+  if (!lastWindow.sold) {
+    status = lastWindow.positionWon === true ? "win" : "loss";
+  }
+
+  upsertDemoPositionCard({
+    id,
+    windowKey: lastWindow.windowKey,
+    series: String(lastWindow.windowKey).split(":")[0],
+    side: lastWindow.side,
+    shares: lastWindow.shares,
+    buyPrice: lastWindow.buyPrice,
+    buyCost: lastWindow.buyCost,
+    buyFees: lastWindow.buyFees ?? 0,
+    buyAt: lastWindow.windowStart,
+    status,
+    sellPrice: lastWindow.sellPrice,
+    sellProceeds: lastWindow.sellProceeds,
+    soldAt: lastWindow.sold ? lastWindow.windowEnd : undefined,
+    outcome: lastWindow.outcome,
+    pl: lastWindow.pl,
+    confirmed: true,
+    demo: true,
+  });
+}
+
+function ingestDemoPositionCards(state) {
+  const trading = state?.trading;
+  if (!trading) return;
+  syncDemoCardsFromMarkers(trading, state);
+  if (shouldUpdateDemoPositionCards(trading) && trading.demoLastWindow) {
+    syncDemoCardsFromLastWindow(trading.demoLastWindow);
+  }
+}
 
 function positionsFingerprint(cards) {
-  if (!Array.isArray(cards) || cards.length === 0) return "";
-  return cards
+  if (!Array.isArray(cards) || cards.length === 0) return `${positionsView}:`;
+  return `${positionsView}:` + cards
     .map((c) => `${c.id}:${c.status}:${c.shares}:${c.buyPrice}:${c.buyCost}:${c.sellPrice ?? ""}:${c.pl ?? ""}:${c.confirmed ? 1 : 0}`)
     .join("|");
 }
@@ -1079,7 +1536,13 @@ function updatePositionsPanel(state) {
   const empty = $("positions-empty");
   if (!list || !empty) return;
 
-  const cards = state?.trading?.positionCards;
+  ingestDemoPositionCards(state);
+
+  const cards =
+    positionsView === "demo"
+      ? demoPositionCards
+      : state?.trading?.positionCards;
+
   const fingerprint = positionsFingerprint(cards);
   if (fingerprint === lastPositionsFingerprint) return;
   lastPositionsFingerprint = fingerprint;
@@ -1087,6 +1550,7 @@ function updatePositionsPanel(state) {
   if (!Array.isArray(cards) || cards.length === 0) {
     list.innerHTML = "";
     empty.hidden = false;
+    empty.textContent = positionsView === "demo" ? "No demo positions yet" : "No positions yet";
     syncPositionsScrollable();
     return;
   }
@@ -1094,6 +1558,30 @@ function updatePositionsPanel(state) {
   empty.hidden = true;
   list.innerHTML = cards.map(renderPositionCard).join("");
   syncPositionsScrollable();
+}
+
+function syncPositionsViewControls() {
+  document.querySelectorAll(".positions-view-toggle-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.positionsView === positionsView);
+  });
+}
+
+function bindPositionsViewSelect() {
+  const buttons = document.querySelectorAll(".positions-view-toggle-btn");
+  if (buttons.length === 0) return;
+  if (buttons[0].dataset.bound === "1") return;
+  buttons.forEach((btn) => {
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const next = btn.dataset.positionsView === "demo" ? "demo" : "live";
+      if (next === positionsView) return;
+      positionsView = next;
+      savePositionsViewPref();
+      syncPositionsViewControls();
+      lastPositionsFingerprint = "";
+      updatePositionsPanel(windowState);
+    });
+  });
 }
 
 function syncGraphSaveBtn(state = windowState) {
@@ -1116,6 +1604,15 @@ function updateWindowUI(state) {
   updateQuoteBoxes(state);
   updateCountdown(state);
   updateGraphPanel(state);
+
+  if (state?.trading && window.SchedulePlacements?.applyLivePlacementStats) {
+    window.SchedulePlacements.applyLivePlacementStats(
+      state.trading.placementStats,
+      state.trading.sessionTotals,
+      state.trading.demoLastWindow,
+      state.trading,
+    );
+  }
 }
 
 function syncLatencyDisplay(state) {
@@ -1163,9 +1660,14 @@ function connectSSE() {
     const state = JSON.parse(e.data);
     if (state.series === selectedSeries || !state.series) {
       updateWindowUI(state);
-    }
-    if (state.trading?.placementStats && window.SchedulePlacements?.applyLivePlacementStats) {
-      window.SchedulePlacements.applyLivePlacementStats(state.trading.placementStats);
+    } else if (state.trading && window.SchedulePlacements?.applyLivePlacementStats) {
+      // Keep header/placement stats current even when viewing another series.
+      window.SchedulePlacements.applyLivePlacementStats(
+        state.trading.placementStats,
+        state.trading.sessionTotals,
+        state.trading.demoLastWindow,
+        state.trading,
+      );
     }
   });
 
@@ -1219,14 +1721,6 @@ $("log-clear").addEventListener("click", () => {
 
 $("log-scroll-bottom").addEventListener("click", () => {
   scrollLogToBottom();
-});
-
-$("positions-clear")?.addEventListener("click", () => {
-  void clearPositions();
-});
-
-$("positions-scroll-bottom")?.addEventListener("click", () => {
-  scrollPositionsToBottom();
 });
 
 function syncSetupSaveSubmitState() {
@@ -2009,6 +2503,10 @@ function syncWalletControls(config) {
   if (sharesInput && Number.isFinite(config?.manualShares)) {
     sharesInput.value = String(config.manualShares);
   }
+  window.SchedulePlacements?.syncHeaderSummaryControls?.({
+    allowTrade: Boolean(config?.startTrading),
+  });
+  syncMarketRailLivePulse();
 }
 
 function syncManualAmountInputAttrs(unit) {
@@ -2160,8 +2658,18 @@ function bindTradeToggles() {
 
   useScheduleInput.addEventListener("change", async () => {
     writeLocalTradingConfig(buildTradingConfigPatch());
+    const turningOff = !useScheduleInput.checked;
+    // Snapshot schedule bars before config flips — otherwise SSE reloads the old sim setup.
+    if (turningOff && windowState && window.Simulator?.keepDisplayedSetupAsEditable) {
+      window.Simulator.keepDisplayedSetupAsEditable(windowState);
+    }
     const config = await pushTradingConfig(buildTradingConfigPatch());
     applyConfig(config ?? buildTradingConfigPatch());
+    if (useScheduleInput.checked && windowState && window.Simulator?.forceSyncSetupFromState) {
+      window.Simulator.forceSyncSetupFromState(windowState);
+    } else if (turningOff && window.Simulator?.pushSetupToServer) {
+      await window.Simulator.pushSetupToServer();
+    }
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
@@ -2253,10 +2761,18 @@ function bindPageToggle() {
 }
 
 async function init() {
+  loadPositionsViewPref();
+  demoPositionCards = loadDemoPositionCards();
+  bindPositionsViewSelect();
+  syncPositionsViewControls();
   initSimulatorBoxScrollbars();
   initChart();
   initColumnSplitter();
   initLeftRowSplitter();
+  bindLeftColumnRail();
+  bindMarketColumnRail();
+  syncLeftColumnRail();
+  syncMarketColumnRail();
   void loadWalletAccount();
   bindWalletBalanceRefresh();
   initScheduleDaySlots();

@@ -725,15 +725,176 @@
   }
 
   const SUMMARY_RANGE_STORAGE_KEY = "poly-real:header-stats-range";
+  const DEMO_HITS_STORAGE_KEY = "poly-real:demo-hits";
 
   let headerSummaryRange = "week";
   let headerSummaryFetchTimer = null;
   let headerSummaryRequestId = 0;
+  /** Full Live-range totals (every real outcome since reset), not just schedule cards. */
+  let liveSessionTotals = { hasData: false, green: 0, red: 0, blue: 0, pnl: 0 };
+  /** Local-only auto-engine hits (survive page refresh; cleared by reset). */
+  let demoHitsStore = { byWindow: {}, totals: { hasData: false, green: 0, red: 0, blue: 0, pnl: 0 } };
+
+  function emptyTotals() {
+    return { hasData: false, green: 0, red: 0, blue: 0, pnl: 0 };
+  }
+
+  function normalizeSessionTotals(totals) {
+    return {
+      hasData: totals?.hasData === true || totals?.hasBalance === true,
+      green: totals?.green ?? 0,
+      red: totals?.red ?? 0,
+      blue: totals?.blue ?? 0,
+      pnl: totals?.pnl ?? 0,
+    };
+  }
+
+  function recomputeDemoTotals(byWindow) {
+    let green = 0;
+    let red = 0;
+    let blue = 0;
+    let pnl = 0;
+    let hasAny = false;
+    for (const hit of Object.values(byWindow)) {
+      if (!hit) continue;
+      hasAny = true;
+      green += hit.green ?? 0;
+      red += hit.red ?? 0;
+      blue += hit.blue ?? 0;
+      pnl += hit.pnl ?? 0;
+    }
+    return { hasData: hasAny, green, red, blue, pnl };
+  }
+
+  function loadDemoHitsStore() {
+    try {
+      const raw = localStorage.getItem(DEMO_HITS_STORAGE_KEY);
+      if (!raw) return { byWindow: {}, totals: emptyTotals() };
+      const parsed = JSON.parse(raw);
+      const byWindow =
+        parsed?.byWindow && typeof parsed.byWindow === "object" ? parsed.byWindow : {};
+      return { byWindow, totals: recomputeDemoTotals(byWindow) };
+    } catch {
+      return { byWindow: {}, totals: emptyTotals() };
+    }
+  }
+
+  function persistDemoHitsStore() {
+    try {
+      localStorage.setItem(
+        DEMO_HITS_STORAGE_KEY,
+        JSON.stringify({ byWindow: demoHitsStore.byWindow }),
+      );
+    } catch {
+      // ignore quota / private mode
+    }
+  }
+
+  function classifyDemoLastWindow(lastWindow) {
+    if (!lastWindow || lastWindow.plLabel === "No trade") return null;
+    const pl = Number(lastWindow.pl) || 0;
+    let green = 0;
+    let red = 0;
+    let blue = 0;
+    if (lastWindow.sold) {
+      if (pl > 0) green = 1;
+      else red = 1;
+    } else if (lastWindow.positionWon === true) {
+      blue = 1;
+    } else if (lastWindow.positionWon === false) {
+      red = 1;
+    } else {
+      return null;
+    }
+    return { green, red, blue, pnl: pl };
+  }
+
+  function shouldCollectDemoHits(trading) {
+    const cfg = trading?.config;
+    if (!cfg?.autoTrade) return false;
+    if (cfg.startTrading) return false;
+    if (cfg.useSchedule) return true;
+    // Auto Trade without schedule uses the graph phase setup.
+    return Boolean(trading?.phaseSetup || trading?.phasesVisible);
+  }
+
+  function ingestDemoLastWindow(lastWindow, trading) {
+    if (!shouldCollectDemoHits(trading)) return false;
+    const hit = classifyDemoLastWindow(lastWindow);
+    if (!hit || !lastWindow?.windowKey) return false;
+    if (demoHitsStore.byWindow[lastWindow.windowKey]) return false;
+    demoHitsStore.byWindow[lastWindow.windowKey] = hit;
+    demoHitsStore.totals = recomputeDemoTotals(demoHitsStore.byWindow);
+    persistDemoHitsStore();
+    return true;
+  }
+
+  function clearDemoHitsStore() {
+    demoHitsStore = { byWindow: {}, totals: emptyTotals() };
+    try {
+      localStorage.removeItem(DEMO_HITS_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    if (typeof window.clearDemoPositionCards === "function") {
+      window.clearDemoPositionCards();
+    }
+  }
+
+  function scheduleTotals() {
+    return weekTotals();
+  }
+
+  function applyLiveSessionTotals(totals) {
+    if (!totals) return;
+    liveSessionTotals = normalizeSessionTotals(totals);
+    if (headerSummaryRange === "live") {
+      renderHeaderSummaryTotals(liveSessionTotals);
+    } else if (headerSummaryRange === "schedule") {
+      renderHeaderSummaryTotals(scheduleTotals());
+    } else if (headerSummaryRange !== "demo") {
+      scheduleHeaderSummaryRefresh();
+    }
+  }
+
+  function applyDemoLastWindow(lastWindow, trading) {
+    ingestDemoLastWindow(lastWindow, trading);
+    if (headerSummaryRange === "demo") {
+      renderHeaderSummaryTotals(demoHitsStore.totals);
+    }
+  }
+
+  function applyLivePlacementStats(statsList, sessionTotals, demoLastWindow, trading) {
+    if (sessionTotals) {
+      liveSessionTotals = normalizeSessionTotals(sessionTotals);
+    }
+    if (demoLastWindow !== undefined) {
+      ingestDemoLastWindow(demoLastWindow, trading);
+    }
+    if (Array.isArray(statsList)) {
+      for (const stats of statsList) {
+        if (!stats?.placementId) continue;
+        placementStats.set(stats.placementId, stats);
+      }
+      applyCardStatsStates();
+      return;
+    }
+    if (sessionTotals) applyLiveSessionTotals(sessionTotals);
+    else if (headerSummaryRange === "demo") {
+      renderHeaderSummaryTotals(demoHitsStore.totals);
+    }
+  }
 
   function loadHeaderSummaryPrefs() {
     try {
       const savedRange = localStorage.getItem(SUMMARY_RANGE_STORAGE_KEY);
-      if (savedRange === "live" || savedRange === "week" || savedRange === "all") {
+      if (
+        savedRange === "live" ||
+        savedRange === "demo" ||
+        savedRange === "schedule" ||
+        savedRange === "week" ||
+        savedRange === "all"
+      ) {
         headerSummaryRange = savedRange;
       } else if (savedRange === "timeframe") {
         headerSummaryRange = "week";
@@ -752,7 +913,7 @@
   }
 
   function liveWeekTotals() {
-    return weekTotals();
+    return liveSessionTotals;
   }
 
   function renderHeaderSummaryTotals(totals) {
@@ -785,9 +946,17 @@
     const mode = headerSummaryRange;
 
     if (mode === "live") {
-      const live = liveWeekTotals();
-      if (requestId === headerSummaryRequestId) renderHeaderSummaryTotals(live);
-      return live;
+      renderHeaderSummaryTotals(liveSessionTotals);
+      return liveSessionTotals;
+    }
+    if (mode === "demo") {
+      renderHeaderSummaryTotals(demoHitsStore.totals);
+      return demoHitsStore.totals;
+    }
+    if (mode === "schedule") {
+      const totals = scheduleTotals();
+      renderHeaderSummaryTotals(totals);
+      return totals;
     }
 
     const params = new URLSearchParams({ mode });
@@ -800,18 +969,19 @@
       }
       const data = await res.json();
       if (requestId !== headerSummaryRequestId) return data;
-      renderHeaderSummaryTotals({
+      const totals = normalizeSessionTotals({
         hasData: data.hasData === true,
         green: data.green ?? 0,
         red: data.red ?? 0,
         blue: data.blue ?? 0,
         pnl: data.pnl ?? 0,
       });
+      renderHeaderSummaryTotals(totals);
       return data;
     } catch (err) {
       console.warn("Header summary fetch failed:", err);
       if (requestId === headerSummaryRequestId) {
-        renderHeaderSummaryTotals(liveWeekTotals());
+        renderHeaderSummaryTotals(weekTotals());
       }
       return null;
     }
@@ -827,15 +997,45 @@
 
   function updateWeekHeaderSummary() {
     if (headerSummaryRange === "live") {
-      renderHeaderSummaryTotals(liveWeekTotals());
+      renderHeaderSummaryTotals(liveSessionTotals);
+      return;
+    }
+    if (headerSummaryRange === "demo") {
+      renderHeaderSummaryTotals(demoHitsStore.totals);
+      return;
+    }
+    if (headerSummaryRange === "schedule") {
+      renderHeaderSummaryTotals(scheduleTotals());
       return;
     }
     scheduleHeaderSummaryRefresh();
   }
 
-  function syncHeaderSummaryControls() {
+  function syncHeaderSummaryControls(options = {}) {
     const select = document.getElementById("schedule-summary-range");
-    if (select) select.value = headerSummaryRange;
+    if (!select) return;
+
+    const allowTrade =
+      options.allowTrade != null
+        ? Boolean(options.allowTrade)
+        : Boolean(document.getElementById("start-trading")?.checked);
+
+    const liveOpt = select.querySelector('option[value="live"]');
+    const demoOpt = select.querySelector('option[value="demo"]');
+    if (liveOpt) liveOpt.disabled = allowTrade === false;
+    if (demoOpt) demoOpt.disabled = allowTrade === true;
+
+    let next = headerSummaryRange;
+    if (allowTrade && next === "demo") next = "live";
+    if (!allowTrade && next === "live") next = "demo";
+
+    if (next !== headerSummaryRange) {
+      headerSummaryRange = next;
+      saveHeaderSummaryPrefs();
+      void fetchHeaderSummaryTotals();
+    }
+
+    select.value = headerSummaryRange;
   }
 
   function emptyLiveStats(placementId) {
@@ -861,6 +1061,8 @@
       return;
     }
 
+    liveSessionTotals = emptyTotals();
+    clearDemoHitsStore();
     for (const placement of placements) {
       placementStats.set(placement._id, emptyLiveStats(placement._id));
     }
@@ -1850,6 +2052,7 @@
   }
 
   function init() {
+    demoHitsStore = loadDemoHitsStore();
     loadHeaderSummaryPrefs();
     initPlacementLayers();
     bindUtcRowHover();
@@ -1858,17 +2061,9 @@
     bindHeaderSummaryRange();
     bindGlobalPointer();
     syncNowHighlights();
+    syncHeaderSummaryControls();
     void fetchHeaderSummaryTotals();
     window.setInterval(syncNowHighlights, 15_000);
-  }
-
-  function applyLivePlacementStats(statsList) {
-    if (!Array.isArray(statsList)) return;
-    for (const stats of statsList) {
-      if (!stats?.placementId) continue;
-      placementStats.set(stats.placementId, stats);
-    }
-    applyCardStatsStates();
   }
 
   window.SchedulePlacements = {
@@ -1879,6 +2074,9 @@
     onViewChange,
     onHeatmapUpdated,
     applyLivePlacementStats,
+    applyLiveSessionTotals,
+    applyDemoLastWindow,
+    syncHeaderSummaryControls,
     getPlacementCountsBySetup,
     refreshPlacementStats: scheduleStatsRefresh,
     refreshAllPlacementStats: (options = {}) =>

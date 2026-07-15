@@ -41,6 +41,8 @@
           <label class="schedule-summary-range-label" for="schedule-summary-range">
             <select id="schedule-summary-range" class="schedule-summary-range" aria-label="Stats range">
               <option value="live">Live update</option>
+              <option value="demo">Demo update</option>
+              <option value="schedule">Schedule</option>
               <option value="week" selected>Week</option>
               <option value="all">All time</option>
             </select>
@@ -55,7 +57,7 @@
             id="schedule-week-reset"
             class="schedule-summary-action-btn"
             aria-label="Reset live counts"
-            title="Reset live counts (Week / All time keep history)"
+            title="Reset live counts and Demo update (Week / All time keep history)"
           >
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path
@@ -88,7 +90,28 @@
 
     <div class="app-body">
       <div id="page-simulator" class="app-page app-page-simulator">
+      <aside id="left-column-rail" class="left-column-rail" hidden aria-label="Left panels">
+        <div class="left-column-rail-handle" title="Drag" aria-hidden="true">
+          <span></span><span></span>
+        </div>
+        <button type="button" class="left-column-rail-btn" data-left-section="wallet" title="Wallet" aria-label="Open Wallet">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M2.5 4.5h11v8H2.5zM2.5 4.5l1.2-2h8.6l1.2 2M10 8.5h3.5" />
+          </svg>
+        </button>
+        <button type="button" class="left-column-rail-btn" data-left-section="positions" title="Positions" aria-label="Open Positions">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M3 4.5h10M3 8h10M3 11.5h7" />
+          </svg>
+        </button>
+        <button type="button" class="left-column-rail-btn" data-left-section="log" title="Log" aria-label="Open Log">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M3.5 3h9v10h-9zM6 6h4M6 8.5h4M6 11h2.5" />
+          </svg>
+        </button>
+      </aside>
       <div class="left-column">
+        <div class="left-column-inner">
         <section class="panel settings-panel" aria-label="Wallet">
           <div class="settings-panel-header">
             <button
@@ -196,18 +219,10 @@
             <div class="panel-header-main">
               <h2 class="positions-panel-title">Positions</h2>
               <div class="positions-panel-actions">
-                <button type="button" id="positions-clear" class="log-clear-btn">Clear</button>
-                <button
-                  type="button"
-                  id="positions-scroll-bottom"
-                  class="log-clear-btn log-scroll-bottom-btn"
-                  aria-label="Scroll to bottom"
-                  title="Scroll to bottom"
-                >
-                  <svg viewBox="0 0 12 8" aria-hidden="true">
-                    <path fill="currentColor" d="M6 8 0 0h12z" />
-                  </svg>
-                </button>
+                <div class="positions-view-toggle" role="group" aria-label="Positions list">
+                  <button type="button" class="positions-view-toggle-btn is-active" data-positions-view="live">Live</button>
+                  <button type="button" class="positions-view-toggle-btn" data-positions-view="demo">Demo</button>
+                </div>
               </div>
             </div>
           </div>
@@ -247,6 +262,7 @@
           </div>
           <div id="log-output" class="log-output is-collapsed" role="log" aria-live="polite"></div>
         </section>
+        </div>
       </div>
 
       <div
@@ -254,12 +270,15 @@
         class="column-splitter"
         role="separator"
         aria-orientation="vertical"
+        aria-valuemin="0"
+        aria-valuemax="100"
         aria-valuenow="50"
         aria-label="Resize columns"
         tabindex="0"
       ></div>
 
       <section class="panel simulator-panel" aria-label="Simulator">
+        <div class="simulator-panel-inner">
         <div class="simulator-box-scroll">
         <div class="sim-row">
           <div class="sim-box">
@@ -341,8 +360,19 @@
             </svg>
           </button>
         </div>
-
+        </div>
       </section>
+
+      <aside id="market-column-rail" class="market-column-rail" hidden aria-label="Market panel">
+        <div class="left-column-rail-handle" title="Drag" aria-hidden="true">
+          <span></span><span></span>
+        </div>
+        <button type="button" class="left-column-rail-btn market-rail-btn" id="market-rail-open" title="Market" aria-label="Open Market">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M2.5 12.5V8.5M6 12.5V5.5M9.5 12.5V7M13 12.5V3.5" />
+          </svg>
+        </button>
+      </aside>
       </div>
 
       <div id="page-schedule-heatmap" class="app-page app-page-schedule" hidden>
@@ -479,6 +509,9 @@
         </section>
       </div>
       <div class="modal-footer">
+        <p id="phase-modal-schedule-hint" class="phase-modal-schedule-hint" hidden>
+          To change settings turn off &quot;Use Schedule&quot;
+        </p>
         <button type="button" id="phase-modal-save" class="modal-btn-primary">Save</button>
       </div>
     </div>

@@ -186,6 +186,20 @@ export class SimulatorEngine {
     return this.getWindowResult();
   }
 
+  /**
+   * Commit the prior window result and reset runtime when the live window
+   * changes — even if we lack a setup to tick (e.g. between schedule slots).
+   */
+  rollWindowIfNeeded(state: LiveWindowState): SimLastWindow | null {
+    if (!state.windowStart || !state.windowEnd) return this.getLastWindow();
+    const key = sessionKeyFor(state);
+    if (this.sessionKey !== null && this.sessionKey !== key) {
+      this.commitLastWindow();
+    }
+    this.resetRuntime(state);
+    return this.getLastWindow();
+  }
+
   finalizeWindow(settlement?: {
     outcome?: "up" | "down";
     assetPrice?: number;
@@ -730,11 +744,7 @@ export class SimulatorEngine {
   tick(state: LiveWindowState, setup: SimSetup, nowMs?: number): void {
     if (!state.windowStart || !state.windowEnd) return;
 
-    const key = sessionKeyFor(state);
-    if (this.sessionKey !== null && this.sessionKey !== key) {
-      this.commitLastWindow();
-    }
-    this.resetRuntime(state);
+    this.rollWindowIfNeeded(state);
 
     const simNowMs = nowMs ?? state.lastTickMs ?? Date.now();
     const nowSec = Math.floor(simNowMs / 1000);

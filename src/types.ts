@@ -389,6 +389,19 @@ export interface TradingPublicState {
   positions: { up: LiveSidePosition | null; down: LiveSidePosition | null };
   positionCards: TradingPositionCard[];
   placementStats: PlacementLiveStats[];
+  /** All settled real outcomes since Live reset (includes trades without a schedule card). */
+  sessionTotals: {
+    green: number;
+    red: number;
+    blue: number;
+    pnl: number;
+    hasData: boolean;
+  };
+  /**
+   * Latest finished auto-engine window (preview or mirrored) — client accumulates
+   * into local "Demo update". Null when Auto Trade is off.
+   */
+  demoLastWindow: SimLastWindow | null;
   quoteLocks: SimQuoteLocks;
   markers: SimMarker[];
   phaseSetup: TradingPhaseSetup | null;

@@ -8,7 +8,10 @@ import {
 } from "../setup-colors.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
 
-const COLLECTION = "trading_setups";
+/** Real-app setups only — never read/write `trading_setups_sim`. */
+const COLLECTION = "trading_setups_real";
+/** Shared legacy name — migration source only; not deleted. */
+const LEGACY_COLLECTION = "trading_setups";
 
 export interface CreateTradingSetupInput {
   title: string;
@@ -30,6 +33,47 @@ export interface TradingSetupListItem {
 }
 
 type TradingSetupDoc = TradingSetupRecord & { _id: ObjectId };
+
+let migratePromise: Promise<void> | null = null;
+
+/**
+ * One-time: if `trading_setups_real` is empty and legacy `trading_setups` has
+ * docs, copy them preserving `_id` so schedule placements keep working.
+ */
+async function ensureTradingSetupsMigrated(): Promise<void> {
+  if (!migratePromise) {
+    migratePromise = (async () => {
+      const mongo = await getMongoClient();
+      const db = mongo.db(getMongoDbName());
+      const real = db.collection(COLLECTION);
+      const legacy = db.collection(LEGACY_COLLECTION);
+
+      const realCount = await real.countDocuments({}, { limit: 1 });
+      if (realCount > 0) return;
+
+      const legacyDocs = await legacy.find({}).toArray();
+      if (legacyDocs.length === 0) return;
+
+      try {
+        await real.insertMany(legacyDocs, { ordered: false });
+        console.log(
+          `[trading-setups] Migrated ${legacyDocs.length} doc(s) from ${LEGACY_COLLECTION} → ${COLLECTION}`,
+        );
+      } catch (err) {
+        // Partial insert (e.g. rerun) — ignore duplicate _id; fail only if real stayed empty.
+        const after = await real.countDocuments({}, { limit: 1 });
+        if (after === 0) throw err;
+        console.warn(
+          `[trading-setups] Migration from ${LEGACY_COLLECTION} completed with some duplicates: ${String(err)}`,
+        );
+      }
+    })().catch((err) => {
+      migratePromise = null;
+      throw err;
+    });
+  }
+  await migratePromise;
+}
 
 function resolveSetupColor(doc: TradingSetupDoc): string {
   const normalized = doc.color ? normalizeSetupColor(doc.color) : null;
@@ -57,6 +101,7 @@ function serializeTradingSetup(doc: TradingSetupDoc): TradingSetupListItem {
 
 /** Marks whether a setup is referenced by any live schedule placement. */
 export async function setLiveScheduleInUse(setupId: string, inUse: boolean): Promise<void> {
+  await ensureTradingSetupsMigrated();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -79,6 +124,7 @@ export async function setLiveScheduleInUse(setupId: string, inUse: boolean): Pro
 }
 
 export async function listTradingSetups(): Promise<TradingSetupListItem[]> {
+  await ensureTradingSetupsMigrated();
   const mongo = await getMongoClient();
   const docs = await mongo
     .db(getMongoDbName())
@@ -90,6 +136,7 @@ export async function listTradingSetups(): Promise<TradingSetupListItem[]> {
 }
 
 export async function insertTradingSetup(input: CreateTradingSetupInput): Promise<TradingSetupListItem> {
+  await ensureTradingSetupsMigrated();
   const mongo = await getMongoClient();
   const existing = await mongo
     .db(getMongoDbName())
@@ -118,6 +165,7 @@ export async function insertTradingSetup(input: CreateTradingSetupInput): Promis
 }
 
 export async function getTradingSetupById(id: string): Promise<TradingSetupListItem | null> {
+  await ensureTradingSetupsMigrated();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -148,6 +196,7 @@ export async function updateTradingSetup(
   id: string,
   input: UpdateTradingSetupInput,
 ): Promise<TradingSetupListItem | null> {
+  await ensureTradingSetupsMigrated();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -209,6 +258,7 @@ export async function updateTradingSetup(
 }
 
 export async function deleteTradingSetup(id: string): Promise<boolean> {
+  await ensureTradingSetupsMigrated();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {

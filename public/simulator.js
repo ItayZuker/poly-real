@@ -245,6 +245,21 @@
     else if (Array.isArray(state?.sim?.markers)) serverMarkers = state.sim.markers;
   }
 
+  /** Keep graph bars where they are and treat them as the editable sim setup. */
+  function keepDisplayedSetupAsEditable(state) {
+    const trading = state?.trading;
+    const source = trading?.phaseSetup || localSetup || state?.sim?.setup;
+    if (!source) return;
+    dragLine = null;
+    suppressScheduleTitle = false;
+    localSetup = setupFromPhaseSetup(
+      source,
+      source.latencyMs ?? state?.sim?.setup?.latencyMs ?? localSetup?.latencyMs ?? 150,
+    );
+    localSetupDirty = true;
+    mirrorLocalSetupToWindowState();
+  }
+
   function phasesEditable(state) {
     const trading = state?.trading;
     if (trading) return Boolean(trading.phasesEditable);
@@ -662,10 +677,14 @@
   function syncPhaseModalFooter() {
     const footer = document.querySelector("#phase-modal .modal-footer");
     const saveBtn = document.getElementById("phase-modal-save");
+    const hint = document.getElementById("phase-modal-schedule-hint");
+    const modal = document.getElementById("phase-modal");
     const external = !!externalPhaseContext;
-    const readOnly = window.windowState?.trading?.phasesEditable === false;
+    const readOnly = !external && window.windowState?.trading?.phasesEditable === false;
     if (saveBtn) saveBtn.hidden = external || readOnly;
-    if (footer) footer.hidden = external || readOnly;
+    if (hint) hint.hidden = external || !readOnly;
+    if (footer) footer.hidden = external;
+    if (modal) modal.classList.toggle("is-view-only", readOnly);
   }
 
   function openPhaseModal(phaseIdx) {
@@ -678,7 +697,7 @@
     const modal = document.getElementById("phase-modal");
     const cfg = normalizePhase(setup.phases[phaseIdx]);
     setup.phases[phaseIdx] = cfg;
-    const readOnly = window.windowState?.trading?.phasesEditable === false;
+    const readOnly = !externalPhaseContext && window.windowState?.trading?.phasesEditable === false;
     document.getElementById("phase-modal-title").textContent = phaseModalTitle(phaseIdx);
     document.getElementById("phase-buy-enabled").checked = cfg.buyEnabled;
     document.getElementById("phase-buy-shares").value = cfg.buyShares;
@@ -714,7 +733,9 @@
 
   function syncPhaseFormDisabled(readOnly = false) {
     const enabled = document.getElementById("phase-buy-enabled").checked;
-    const locked = readOnly || window.windowState?.trading?.phasesEditable === false;
+    const locked =
+      readOnly ||
+      (!externalPhaseContext && window.windowState?.trading?.phasesEditable === false);
     document.getElementById("phase-buy-enabled").disabled = locked;
     document.getElementById("phase-buy-shares").disabled = locked || !enabled;
     document.getElementById("phase-buy-trigger").disabled = locked || !enabled;
@@ -728,6 +749,7 @@
 
   async function savePhaseModal() {
     if (activePhaseModal == null || externalPhaseContext) return;
+    if (window.windowState?.trading?.phasesEditable === false) return;
     const setup = getSetup(window.windowState);
     readPhaseFormIntoSetup(setup, activePhaseModal);
     markLocalSetupDirty(setup);
@@ -892,6 +914,9 @@
     },
     forceSyncSetupFromState(state) {
       forceSyncSetupFromState(state);
+    },
+    keepDisplayedSetupAsEditable(state) {
+      keepDisplayedSetupAsEditable(state);
     },
     getLocalSetup() {
       return localSetup;

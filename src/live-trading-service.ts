@@ -489,6 +489,7 @@ export class LiveTradingService {
   getPublicState(): TradingPublicState {
     const phasesVisible = this.shouldShowPhases();
     const previewMode = this.isPreviewMode();
+    const live = this.getLiveSessionTotals();
     return {
       config: this.getConfig(),
       positions: {
@@ -497,12 +498,20 @@ export class LiveTradingService {
       },
       positionCards: this.positionCards.map((card) => ({ ...card })),
       placementStats: this.getPlacementStatsFromCards(),
+      sessionTotals: {
+        green: live.green,
+        red: live.red,
+        blue: live.blue,
+        pnl: live.pnl,
+        hasData: live.hasBalance,
+      },
+      demoLastWindow: this.config.autoTrade ? this.autoEngine.getLastWindow() : null,
       quoteLocks: previewMode ? this.autoEngine.getQuoteLocks() : { ...this.quoteLocks },
       markers: this.getDisplayMarkers(),
       phaseSetup: phasesVisible ? this.getDisplayPhaseSetup() : null,
       phasesVisible,
-      // Schedule overlays stay editable so phase bars can be dragged; saves go to the setup doc.
-      phasesEditable: phasesVisible && this.config.autoTrade,
+      // Schedule mode: bars follow the active card only (view/click, no drag-edit).
+      phasesEditable: phasesVisible && this.config.autoTrade && !this.config.useSchedule,
       scheduleTitle: this.config.useSchedule && this.scheduleContext ? this.scheduleContext.title : null,
       scheduleSetupId:
         this.config.useSchedule && this.scheduleContext ? this.scheduleContext.setupId : null,
@@ -931,7 +940,11 @@ export class LiveTradingService {
     if (!this.config.autoTrade) return;
 
     const autoSetup = this.resolveAutoSimSetup(state);
-    if (!autoSetup) return;
+    if (!autoSetup) {
+      // Still commit the prior window's demo result when leaving a schedule slot.
+      this.autoEngine.rollWindowIfNeeded(state);
+      return;
+    }
 
     const key = sessionKey(state);
     const prevMarkerCount = this.autoEngine.getMarkers().filter((m) => m.windowKey === key).length;
