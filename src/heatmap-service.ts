@@ -1,8 +1,9 @@
+import { getWindowDataVersion } from "./db/recorded-window-repository.js";
 import {
-  getWindowDataVersion,
-  listRecordedWindows,
-} from "./db/recorded-window-repository.js";
-import { listMarkets } from "./db/market-repository.js";
+  listRecordedWindowsSince,
+  type HeatmapRecordedWindow,
+} from "./db/recorded-window-mongo-repository.js";
+import { logService } from "./log-service.js";
 import type { RecordedWindowDocument } from "./types.js";
 
 export type HeatmapDayId = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -72,7 +73,12 @@ function bucketKey(day: HeatmapDayId, hour: number): string {
   return `${day}:${hour}`;
 }
 
-function metricsFromWindow(window: RecordedWindowDocument): HeatmapCellValues {
+type HeatmapMetricSource = Pick<
+  HeatmapRecordedWindow,
+  "ptbCrossings" | "rangeTop" | "rangeBottom" | "uniqueTraders" | "newWallets"
+>;
+
+function metricsFromWindow(window: HeatmapMetricSource): HeatmapCellValues {
   return {
     crossings: window.ptbCrossings ?? 0,
     range: (window.rangeTop ?? 0) + (window.rangeBottom ?? 0),
@@ -93,7 +99,10 @@ function isInRollingWindow(windowStart: number, cutoffUtc: number): boolean {
   return windowStart >= cutoffUtc;
 }
 
-function toStoredWindow(series: string, window: RecordedWindowDocument): StoredHeatmapWindow {
+function toStoredWindow(
+  series: string,
+  window: HeatmapMetricSource & { windowStart: number; savedAt?: string },
+): StoredHeatmapWindow {
   const { day, hour } = dayHourFromWindowStart(window.windowStart);
   return {
     series,
@@ -206,22 +215,24 @@ export function ingestRecordedWindow(
 export const ingestHeatmapWindow = ingestRecordedWindow;
 
 export async function loadAllHeatmapWindows(): Promise<HeatmapPublicState> {
-  windowStore.clear();
-  const markets = await listMarkets();
   const cutoffUtc = getRollingCutoffUtcSec();
-
-  await Promise.all(
-    markets.map(async (market) => {
-      const windows = await listRecordedWindows(market);
-      for (const window of windows) {
-        if (!isInRollingWindow(window.windowStart, cutoffUtc)) continue;
-        windowStore.set(
-          windowKey(market._id, window.windowStart),
-          toStoredWindow(market._id, window),
-        );
-      }
-    }),
-  );
+  try {
+    const windows = await listRecordedWindowsSince(cutoffUtc);
+    windowStore.clear();
+    for (const window of windows) {
+      if (!isInRollingWindow(window.windowStart, cutoffUtc)) continue;
+      windowStore.set(
+        windowKey(window.series, window.windowStart),
+        toStoredWindow(window.series, window),
+      );
+    }
+    logService.info("heatmap", `Loaded ${windowStore.size} recorded windows from Mongo (since ${cutoffUtc})`);
+  } catch (err) {
+    logService.warn(
+      "heatmap",
+      `Failed to load recorded_windows from Mongo — keeping previous cache (${windowStore.size} windows): ${String(err)}`,
+    );
+  }
 
   const state = rebuildState();
   updateListener?.(state);

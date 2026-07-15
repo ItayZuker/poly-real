@@ -17,12 +17,13 @@
         <span id="feed-latency-ms" class="header-field-value">—</span>
       </label>
       <div id="schedule-highlighted-summary" class="schedule-highlighted-summary" hidden>
+        <span class="schedule-summary-label">Custom</span>
         <div class="schedule-highlighted-stats-dots"></div>
         <span class="schedule-highlighted-pnl">—</span>
         <button
           type="button"
           id="schedule-highlighted-clear"
-          class="schedule-highlighted-clear-btn"
+          class="schedule-summary-action-btn"
           aria-label="Clear highlighted cards"
           title="Clear highlights"
         >
@@ -36,9 +37,44 @@
         </button>
       </div>
       <div class="header-right">
-        <div id="schedule-week-summary" class="schedule-week-summary" hidden>
+        <div id="schedule-week-summary" class="schedule-week-summary" title="Trading session totals">
+          <label class="schedule-summary-range-label" for="schedule-summary-range">
+            <select id="schedule-summary-range" class="schedule-summary-range" aria-label="Stats range">
+              <option value="live">Live update</option>
+              <option value="week" selected>Week</option>
+              <option value="all">All time</option>
+            </select>
+            <svg class="schedule-summary-range-caret" viewBox="0 0 8 8" aria-hidden="true" focusable="false">
+              <path d="M1.5 2.75L4 5.25L6.5 2.75" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </label>
           <div class="schedule-week-stats-dots"></div>
           <span class="schedule-week-pnl">—</span>
+          <button
+            type="button"
+            id="schedule-week-reset"
+            class="schedule-summary-action-btn"
+            aria-label="Reset live counts"
+            title="Reset live counts (Week / All time keep history)"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M2.5 3.5v3h3M13.5 12.5v-3h-3"
+              />
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                d="M3.2 9.2A5 5 0 0 0 12.5 11M12.8 6.8A5 5 0 0 0 3.5 5"
+              />
+            </svg>
+          </button>
         </div>
         <div class="page-toggle" role="group" aria-label="Page">
           <button type="button" class="page-toggle-btn is-active" data-page="simulator">Market</button>
@@ -136,7 +172,7 @@
                   </span>
                 </label>
                 <label id="wallet-start-trading-field" class="wallet-control-field wallet-control-field--toggle" for="start-trading" hidden>
-                  <span class="wallet-control-label">Start Trading</span>
+                  <span class="wallet-control-label">Allow trade</span>
                   <span class="switch">
                     <input type="checkbox" id="start-trading" />
                     <span class="switch-slider"></span>

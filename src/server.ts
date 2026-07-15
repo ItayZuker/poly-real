@@ -37,6 +37,7 @@ import {
   reconcileLiveScheduleInUseFlags,
   syncLiveScheduleInUseForSetup,
 } from "./db/live-schedule-setup-usage.js";
+import { sumTradingSessionMemory } from "./db/trading-session-memory-repository.js";
 import { closeMongoClient } from "./db/mongo-client.js";
 import {
   getHeatmapState,
@@ -56,6 +57,8 @@ import { liveTradingService } from "./live-trading-service.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3848;
+/** Sparse Mongo → RAM heatmap refresh (sim upserts windows elsewhere). */
+const HEATMAP_REFRESH_MS = 10 * 60 * 1000;
 
 const app = express();
 app.use(express.json());
@@ -168,13 +171,72 @@ app.post("/api/trading/order", async (req, res) => {
   }
 });
 
-app.post("/api/trading/positions/clear", (_req, res) => {
+app.post("/api/trading/positions/clear", async (_req, res) => {
   try {
+    // Reset Live counters only — history stays in Mongo for Week / All time.
     liveTradingService.clearPositionCards();
     pushWindowState();
-    res.json({ ok: true });
+    res.json({ ok: true, archived: false });
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/trading/session-memory", async (req, res) => {
+  try {
+    const mode = String(req.query.mode ?? "live").toLowerCase();
+    const live = liveTradingService.getLiveSessionTotals();
+    const liveTotals = {
+      green: live.green,
+      red: live.red,
+      blue: live.blue,
+      pnl: live.pnl,
+      hasData: live.hasBalance,
+      sessionCount: live.hasBalance ? 1 : 0,
+    };
+
+    if (mode === "live") {
+      res.json({ mode, ...liveTotals, live: liveTotals });
+      return;
+    }
+
+    let fromMs: number | undefined;
+    let toMs: number | undefined;
+    const now = Date.now();
+
+    if (mode === "week") {
+      fromMs = now - 7 * 24 * 60 * 60 * 1000;
+      toMs = now;
+    } else if (mode === "all" || mode === "alltime" || mode === "all-time") {
+      fromMs = undefined;
+      toMs = undefined;
+    } else {
+      res.status(400).json({ error: "mode must be live, week, or all" });
+      return;
+    }
+
+    // Events are written on each settled-stat update — do not add live again (would double-count).
+    const archived = await sumTradingSessionMemory({ fromMs, toMs });
+
+    res.json({
+      mode: mode === "alltime" || mode === "all-time" ? "all" : mode,
+      green: archived.green,
+      red: archived.red,
+      blue: archived.blue,
+      pnl: archived.pnl,
+      sessionCount: archived.sessionCount,
+      hasData: archived.hasData,
+      archived,
+      live: liveTotals,
+      includeLive: false,
+    });
+  } catch (err) {
+    const message = String(err);
+    if (message.includes("MONGODB_URI")) {
+      res.status(503).json({ error: message });
+      return;
+    }
+    res.status(500).json({ error: message });
   }
 });
 
@@ -354,6 +416,10 @@ app.patch("/api/trading-setups/:id", async (req, res) => {
     }
     if (req.body?.title != null) {
       await updatePlacementTitlesBySetupId(req.params.id, updated.title);
+    }
+    if (req.body?.setup != null) {
+      await liveTradingService.refreshScheduleContext(true);
+      pushWindowState();
     }
     logService.success("sim", `Trading setup updated: "${updated.title}"`);
     res.json(updated);
@@ -668,6 +734,12 @@ async function main(): Promise<void> {
     broadcast("heatmap", state);
   });
   await loadAllHeatmapWindows();
+  const heatmapRefreshTimer = setInterval(() => {
+    void loadAllHeatmapWindows().catch((err) => {
+      logService.warn("heatmap", `Periodic recorded_windows refresh failed: ${String(err)}`);
+    });
+  }, HEATMAP_REFRESH_MS);
+  heatmapRefreshTimer.unref?.();
 
   if (isTradingConfigured()) {
     await initTradingClient();
@@ -695,6 +767,7 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async () => {
+    clearInterval(heatmapRefreshTimer);
     displayService.stop();
     clobMarketFeed.stop();
     chainlinkPriceFeed.stop();

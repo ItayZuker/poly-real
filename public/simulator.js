@@ -6,7 +6,7 @@
   const LINE_COLOR_HOVER = "#58a6ff";
   const MIN_PHASE_SECONDS = 10;
   const DEFAULT_WINDOW_DURATION_SEC = 300;
-  const LINE_HIT_PX = 10;
+  const LINE_HIT_PX = 14;
   const MARKER_HIT_PX = 10;
   const PHASE_COLOR = "rgba(110, 118, 129, 0.08)";
   const PHASE_HOVER_COLOR = "rgba(88, 166, 255, 0.16)";
@@ -20,12 +20,106 @@
   let hoveredMarker = null;
   let lastHoverCanvasX = null;
   let localSetup = null;
+  let localSetupDirty = false;
+  let suppressScheduleTitle = false;
+  let scheduleTitleContextKey = null;
   let hoveredPhaseLine = null;
   let serverMarkers = [];
   let externalPhaseContext = null;
 
+  function scheduleContextKey(state) {
+    const trading = state?.trading;
+    if (!trading?.config?.useSchedule) return null;
+    return trading.scheduleSetupId || trading.scheduleTitle || null;
+  }
+
+  function syncScheduleTitleContext(state) {
+    const key = scheduleContextKey(state);
+    if (key !== scheduleTitleContextKey) {
+      scheduleTitleContextKey = key;
+      suppressScheduleTitle = false;
+    }
+  }
+
+  function phaseModalTitle(phaseIdx) {
+    const trading = window.windowState?.trading;
+    const scheduleTitle =
+      !suppressScheduleTitle && trading?.config?.useSchedule ? trading.scheduleTitle : null;
+    return scheduleTitle
+      ? `Phase ${phaseIdx + 1} — ${scheduleTitle}`
+      : `Phase ${phaseIdx + 1} setup`;
+  }
+
+  function setupFromPhaseSetup(phaseSetup, latencyMs) {
+    return {
+      phaseSplit: [...phaseSetup.phaseSplit],
+      phases: Array.isArray(phaseSetup.phases)
+        ? phaseSetup.phases.map((p) => normalizePhase(p))
+        : [defaultPhase(), defaultPhase(), defaultPhase()],
+      latencyMs: latencyMs ?? 150,
+    };
+  }
+
+  function phaseSplitsClose(a, b) {
+    if (!a || !b || a.length < 2 || b.length < 2) return false;
+    return Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6;
+  }
+
+  function phaseSetupFingerprint(setup) {
+    if (!setup?.phaseSplit || !Array.isArray(setup.phases)) return "";
+    return JSON.stringify({
+      phaseSplit: setup.phaseSplit,
+      phases: setup.phases,
+    });
+  }
+
+  function remotePhaseSetup(state) {
+    const trading = state?.trading;
+    if (trading?.config?.useSchedule && trading.phaseSetup) return trading.phaseSetup;
+    const sim = state?.sim?.setup;
+    if (!sim) return null;
+    return { phaseSplit: sim.phaseSplit, phases: sim.phases };
+  }
+
+  function mirrorLocalSetupToWindowState() {
+    if (!localSetup || !window.windowState) return;
+    const state = window.windowState;
+    if (state.trading) {
+      state.trading.phaseSetup = {
+        phaseSplit: [...localSetup.phaseSplit],
+        phases: localSetup.phases.map((p) => ({ ...p })),
+      };
+    }
+    if (state.sim) {
+      state.sim.setup = {
+        ...state.sim.setup,
+        phaseSplit: [...localSetup.phaseSplit],
+        phases: localSetup.phases.map((p) => ({ ...p })),
+        latencyMs: localSetup.latencyMs ?? state.sim.setup?.latencyMs ?? 150,
+      };
+    }
+  }
+
+  function markLocalSetupDirty(setup) {
+    localSetup = setup;
+    localSetupDirty = true;
+    // Bars / phase edits diverge from the named schedule card — drop its title on all phases.
+    if (window.windowState?.trading?.config?.useSchedule) {
+      suppressScheduleTitle = true;
+    }
+    mirrorLocalSetupToWindowState();
+  }
+
   function getSetup(state) {
-    return localSetup || state?.sim?.setup || defaultSetup();
+    if (localSetup) return localSetup;
+    const trading = state?.trading;
+    if (trading?.phaseSetup) {
+      return setupFromPhaseSetup(
+        trading.phaseSetup,
+        state?.sim?.setup?.latencyMs ?? 150,
+      );
+    }
+    return state?.sim?.setup || defaultSetup();
   }
 
   function defaultPhase() {
@@ -91,12 +185,57 @@
   }
 
   function syncFromState(state) {
-    if (dragLine != null) {
-      if (Array.isArray(state?.trading?.markers)) serverMarkers = state.trading.markers;
-      else if (Array.isArray(state?.sim?.markers)) serverMarkers = state.sim.markers;
+    syncScheduleTitleContext(state);
+    if (Array.isArray(state?.trading?.markers)) serverMarkers = state.trading.markers;
+    else if (Array.isArray(state?.sim?.markers)) serverMarkers = state.sim.markers;
+
+    // While dragging or waiting for save ack, keep the local bar position — otherwise SSE
+    // with the pre-drag setup snaps the line back before the write lands.
+    if (dragLine != null || localSetupDirty) {
+      if (localSetupDirty) {
+        const remote = remotePhaseSetup(state);
+        if (
+          remote &&
+          phaseSetupFingerprint(remote) === phaseSetupFingerprint(localSetup)
+        ) {
+          localSetupDirty = false;
+        } else {
+          mirrorLocalSetupToWindowState();
+        }
+      }
       return;
     }
-    if (state?.sim?.setup && state?.trading?.phasesEditable !== false) {
+
+    const trading = state?.trading;
+    const useSchedule = Boolean(trading?.config?.useSchedule);
+    // Keep the in-graph draft aligned with whatever setup is drawn (schedule or sim).
+    if (useSchedule && trading?.phaseSetup) {
+      localSetup = setupFromPhaseSetup(
+        trading.phaseSetup,
+        state?.sim?.setup?.latencyMs ?? localSetup?.latencyMs ?? 150,
+      );
+    } else if (state?.sim?.setup) {
+      localSetup = JSON.parse(JSON.stringify(state.sim.setup));
+      if (Array.isArray(localSetup?.phases)) {
+        localSetup.phases = localSetup.phases.map((p) => normalizePhase(p));
+      }
+    }
+  }
+
+  function forceSyncSetupFromState(state) {
+    localSetupDirty = false;
+    dragLine = null;
+    syncScheduleTitleContext(state);
+    // Applying a fresh setup from the card restores the named title until edited again.
+    if (scheduleContextKey(state)) suppressScheduleTitle = false;
+    const trading = state?.trading;
+    const useSchedule = Boolean(trading?.config?.useSchedule);
+    if (useSchedule && trading?.phaseSetup) {
+      localSetup = setupFromPhaseSetup(
+        trading.phaseSetup,
+        state?.sim?.setup?.latencyMs ?? 150,
+      );
+    } else if (state?.sim?.setup) {
       localSetup = JSON.parse(JSON.stringify(state.sim.setup));
       if (Array.isArray(localSetup?.phases)) {
         localSetup.phases = localSetup.phases.map((p) => normalizePhase(p));
@@ -131,15 +270,43 @@
 
   async function pushSetupToServer() {
     if (!localSetup) return;
+    const trading = window.windowState?.trading;
+    const scheduleSetupId = trading?.scheduleSetupId;
+    mirrorLocalSetupToWindowState();
     try {
+      if (trading?.config?.useSchedule && scheduleSetupId) {
+        const res = await fetch(`/api/trading-setups/${encodeURIComponent(scheduleSetupId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            setup: {
+              phaseSplit: localSetup.phaseSplit,
+              phases: localSetup.phases,
+            },
+          }),
+        });
+        if (res.ok) {
+          const doc = await res.json();
+          if (doc?.setup) {
+            localSetup = setupFromPhaseSetup(doc.setup, localSetup.latencyMs);
+            mirrorLocalSetupToWindowState();
+          }
+          // Keep dirty until a sync's remote splits match — avoids a stale SSE snap-back.
+        }
+        return;
+      }
       const res = await fetch("/api/sim/setup", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(localSetup),
       });
-      if (res.ok) localSetup = await res.json();
+      if (res.ok) {
+        localSetup = await res.json();
+        mirrorLocalSetupToWindowState();
+        // Keep dirty until remote state matches (see syncFromState).
+      }
     } catch {
-      // keep local copy
+      // keep local dirty copy until a later sync matches
     }
   }
 
@@ -382,14 +549,18 @@
     const setup = options.setupOverride ?? getSetup(state);
     const key = sessionKeyFor(state);
     const markerList = options.markersOverride ?? serverMarkers;
+    const showPhases = phasesVisible(state, options);
+    let splits = null;
+    let lineState = null;
 
-    if (phasesVisible(state, options)) {
-      const splits = Array.isArray(setup?.phaseSplit) ? setup.phaseSplit : [1 / 3, 2 / 3];
+    if (showPhases) {
+      splits = Array.isArray(setup?.phaseSplit) ? setup.phaseSplit : [1 / 3, 2 / 3];
       const bounds = [0, splits[0], splits[1], 1];
       const hoverLine = options.hoverLine !== undefined ? options.hoverLine : hoveredPhaseLine;
       const activeDragLine = options.dragLine !== undefined ? options.dragLine : dragLine;
-      const lineState = { hoverLine, dragLine: activeDragLine };
+      lineState = { hoverLine, dragLine: activeDragLine };
 
+      // Bands sit behind markers; split lines are drawn last so they stay grabable.
       for (let i = 0; i < 3; i += 1) {
         const x0 = fracToX(bounds[i], layout);
         const x1 = fracToX(bounds[i + 1], layout);
@@ -401,34 +572,36 @@
         ctx.textBaseline = "top";
         ctx.fillText(`P${i + 1}`, (x0 + x1) / 2, padding.top + 4);
       }
+    }
 
-      for (let i = 0; i < 2; i += 1) {
-        drawPhaseSplitLine(ctx, fracToX(splits[i], layout), layout, splits[i], i, lineState);
+    if (options.markers !== false) {
+      for (const m of markerList) {
+        if (!state?.windowStart) continue;
+        if (m.windowKey && m.windowKey !== key) continue;
+        const x = xAt(m.t);
+        let y = padding.top + plotH / 2;
+        if (m.y != null && Number.isFinite(m.y) && layout.yAt) {
+          y = layout.yAt(m.y);
+        }
+        const color = sideColor(m.side);
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        if (m.type === "buy") {
+          ctx.fillStyle = color;
+          ctx.fill();
+        } else {
+          ctx.fillStyle = "rgba(13, 17, 23, 0.85)";
+          ctx.fill();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
       }
     }
 
-    if (options.markers === false) return;
-
-    for (const m of markerList) {
-      if (!state?.windowStart) continue;
-      if (m.windowKey && m.windowKey !== key) continue;
-      const x = xAt(m.t);
-      let y = padding.top + plotH / 2;
-      if (m.y != null && Number.isFinite(m.y) && layout.yAt) {
-        y = layout.yAt(m.y);
-      }
-      const color = sideColor(m.side);
-      ctx.beginPath();
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
-      if (m.type === "buy") {
-        ctx.fillStyle = color;
-        ctx.fill();
-      } else {
-        ctx.fillStyle = "rgba(13, 17, 23, 0.85)";
-        ctx.fill();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.stroke();
+    if (showPhases && splits && lineState) {
+      for (let i = 0; i < 2; i += 1) {
+        drawPhaseSplitLine(ctx, fracToX(splits[i], layout), layout, splits[i], i, lineState);
       }
     }
   }
@@ -506,10 +679,7 @@
     const cfg = normalizePhase(setup.phases[phaseIdx]);
     setup.phases[phaseIdx] = cfg;
     const readOnly = window.windowState?.trading?.phasesEditable === false;
-    const scheduleTitle = window.windowState?.trading?.scheduleTitle;
-    document.getElementById("phase-modal-title").textContent = readOnly && scheduleTitle
-      ? `Phase ${phaseIdx + 1} — ${scheduleTitle}`
-      : `Phase ${phaseIdx + 1} setup`;
+    document.getElementById("phase-modal-title").textContent = phaseModalTitle(phaseIdx);
     document.getElementById("phase-buy-enabled").checked = cfg.buyEnabled;
     document.getElementById("phase-buy-shares").value = cfg.buyShares;
     document.getElementById("phase-buy-trigger").value = cfg.buyTrigger;
@@ -560,12 +730,75 @@
     if (activePhaseModal == null || externalPhaseContext) return;
     const setup = getSetup(window.windowState);
     readPhaseFormIntoSetup(setup, activePhaseModal);
-    localSetup = setup;
+    markLocalSetupDirty(setup);
     closePhaseModal();
     await pushSetupToServer();
   }
 
   function bindChartInteraction(canvas) {
+    async function endPhaseDrag(options = {}) {
+      const { openPhase = false, clientX = null } = options;
+      const state = window.windowState;
+      const setup = getSetup(state);
+      const editable = phasesEditable(state);
+      const showPhases = phasesVisible(state);
+      const wasDragging = dragLine != null;
+      const moved = dragMoved;
+
+      dragLine = null;
+      dragMoved = false;
+      setHoveredPhaseLine(null);
+      hideMarkerTooltip();
+      hidePhaseHover();
+      canvas.style.cursor = "pointer";
+      if (window.drawPriceChart && window.windowState) window.drawPriceChart(window.windowState);
+
+      if (wasDragging && moved && editable) {
+        await pushSetupToServer();
+        return;
+      }
+
+      if (
+        openPhase &&
+        !wasDragging &&
+        !moved &&
+        chartLayout &&
+        showPhases &&
+        clientX != null
+      ) {
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        if (!nearLine(x, chartLayout, 0, setup) && !nearLine(x, chartLayout, 1, setup)) {
+          openPhaseModal(phaseFromClick(x, chartLayout, setup));
+        }
+      }
+    }
+
+    function onWindowMouseMove(e) {
+      if (dragLine == null || !chartLayout) return;
+      const state = window.windowState;
+      if (!phasesEditable(state)) return;
+      const setup = getSetup(state);
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      dragMoved = true;
+      hideMarkerTooltip();
+      hidePhaseHover();
+      const frac = xToFrac(x, chartLayout);
+      const splits = [...setup.phaseSplit];
+      splits[dragLine] = frac;
+      setup.phaseSplit = clampSplits(splits[0], splits[1], chartLayout.duration);
+      markLocalSetupDirty(setup);
+      canvas.style.cursor = "col-resize";
+      if (window.drawPriceChart && window.windowState) window.drawPriceChart(window.windowState);
+    }
+
+    function onWindowMouseUp(e) {
+      window.removeEventListener("mousemove", onWindowMouseMove);
+      window.removeEventListener("mouseup", onWindowMouseUp);
+      void endPhaseDrag({ openPhase: true, clientX: e.clientX });
+    }
+
     canvas.addEventListener("mousedown", (e) => {
       if (!chartLayout) return;
       const state = window.windowState;
@@ -577,33 +810,24 @@
       if (nearLine(x, chartLayout, 0, setup)) dragLine = 0;
       else if (nearLine(x, chartLayout, 1, setup)) dragLine = 1;
       else dragLine = null;
-      if (dragLine != null) canvas.style.cursor = "col-resize";
+      if (dragLine != null) {
+        canvas.style.cursor = "col-resize";
+        window.addEventListener("mousemove", onWindowMouseMove);
+        window.addEventListener("mouseup", onWindowMouseUp);
+      }
     });
 
     canvas.addEventListener("mousemove", (e) => {
-      if (!chartLayout) return;
+      if (!chartLayout || dragLine != null) return;
       const state = window.windowState;
       const setup = getSetup(state);
       const editable = phasesEditable(state);
       const showPhases = phasesVisible(state);
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      if (dragLine != null) {
-        if (!editable) return;
-        dragMoved = true;
-        hideMarkerTooltip();
-        hidePhaseHover();
-        const frac = xToFrac(x, chartLayout);
-        const splits = [...setup.phaseSplit];
-        splits[dragLine] = frac;
-        setup.phaseSplit = clampSplits(splits[0], splits[1], chartLayout.duration);
-        localSetup = setup;
-        if (window.drawPriceChart && window.windowState) window.drawPriceChart(window.windowState);
-        return;
-      }
       const onLine = editable && (nearLine(x, chartLayout, 0, setup) || nearLine(x, chartLayout, 1, setup));
       const y = e.clientY - rect.top;
-      const marker = markerAt(x, y, chartLayout);
+      const marker = !onLine ? markerAt(x, y, chartLayout) : null;
 
       if (showPhases && !onLine) {
         if (setHoveredPhaseLine(null) && window.drawPriceChart && window.windowState) {
@@ -620,40 +844,29 @@
         }
       }
 
+      // Phase bars win over markers so drag stays available where they overlap.
+      if (onLine) {
+        hideMarkerTooltip();
+        canvas.style.cursor = "col-resize";
+        return;
+      }
       if (marker) {
         canvas.style.cursor = "pointer";
         updateMarkerHover(canvas, e.clientX, e.clientY);
         return;
       }
       hideMarkerTooltip();
-      canvas.style.cursor = onLine ? "col-resize" : "pointer";
-    });
-
-    canvas.addEventListener("mouseup", async (e) => {
-      const state = window.windowState;
-      const setup = getSetup(state);
-      const editable = phasesEditable(state);
-      const showPhases = phasesVisible(state);
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      if (dragLine != null) {
-        if (editable) await pushSetupToServer();
-      } else if (!dragMoved && chartLayout && showPhases) {
-        const idx = phaseFromClick(x, chartLayout, setup);
-        if (!nearLine(x, chartLayout, 0, setup) && !nearLine(x, chartLayout, 1, setup)) {
-          openPhaseModal(idx);
-        }
-      }
-      dragLine = null;
       canvas.style.cursor = "pointer";
     });
 
+    canvas.addEventListener("mouseup", (e) => {
+      // Non-drag clicks (open phase modal) when no window listener was armed.
+      if (dragLine != null) return;
+      void endPhaseDrag({ openPhase: true, clientX: e.clientX });
+    });
+
     canvas.addEventListener("mouseleave", () => {
-      if (dragLine != null && dragMoved) {
-        void pushSetupToServer();
-      }
-      dragLine = null;
-      dragMoved = false;
+      if (dragLine != null) return;
       setHoveredPhaseLine(null);
       hideMarkerTooltip();
       hidePhaseHover();
@@ -676,6 +889,12 @@
   window.Simulator = {
     syncFromState(state) {
       syncFromState(state);
+    },
+    forceSyncSetupFromState(state) {
+      forceSyncSetupFromState(state);
+    },
+    getLocalSetup() {
+      return localSetup;
     },
     async pushSetupToServer() {
       await pushSetupToServer();

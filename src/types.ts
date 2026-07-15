@@ -353,10 +353,14 @@ export interface TradingPositionCard {
   shares: number;
   buyPrice: number;
   buyCost: number;
+  /** Estimated Polymarket taker fee paid on the buy (USDC). */
+  buyFees?: number;
   buyAt: number;
   status: TradingPositionCardStatus;
   sellPrice?: number;
   sellProceeds?: number;
+  /** Estimated Polymarket taker fee paid on the sell (USDC). */
+  sellFees?: number;
   soldAt?: number;
   pl?: number;
   outcome?: "up" | "down";
@@ -391,6 +395,7 @@ export interface TradingPublicState {
   phasesVisible: boolean;
   phasesEditable: boolean;
   scheduleTitle: string | null;
+  scheduleSetupId: string | null;
   quotesEnabled: boolean;
   previewMode: boolean;
 }

@@ -234,6 +234,50 @@
 
   function bindCanvas() {
     if (!canvas) return;
+
+    function endPhaseDrag(options = {}) {
+      const { openPhase = false, clientX = null } = options;
+      const wasDragging = dragLine != null;
+      const moved = dragMoved;
+      dragLine = null;
+      dragMoved = false;
+      hoveredPhaseLine = null;
+      hidePhaseHover();
+      canvas.style.cursor = "pointer";
+      drawChart();
+
+      if (openPhase && !wasDragging && !moved && chartLayout && draft?.setup && clientX != null) {
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        if (!nearLine(x, chartLayout, 0, draft.setup) && !nearLine(x, chartLayout, 1, draft.setup)) {
+          const idx = phaseIndexForFrac(xToFrac(x, chartLayout), draft.setup);
+          if (window.Simulator?.openPhaseModalExternal) {
+            window.Simulator.openPhaseModalExternal(idx);
+          }
+        }
+      }
+    }
+
+    function onWindowMouseMove(e) {
+      if (dragLine == null || !chartLayout || !draft?.setup) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      dragMoved = true;
+      hidePhaseHover();
+      const frac = xToFrac(x, chartLayout);
+      const splits = [...draft.setup.phaseSplit];
+      splits[dragLine] = frac;
+      draft.setup.phaseSplit = clampSplits(splits[0], splits[1], chartLayout.duration);
+      canvas.style.cursor = "col-resize";
+      onDraftChange();
+    }
+
+    function onWindowMouseUp(e) {
+      window.removeEventListener("mousemove", onWindowMouseMove);
+      window.removeEventListener("mouseup", onWindowMouseUp);
+      endPhaseDrag({ openPhase: true, clientX: e.clientX });
+    }
+
     canvas.addEventListener("mousedown", (e) => {
       if (!chartLayout || !draft?.setup) return;
       const rect = canvas.getBoundingClientRect();
@@ -242,23 +286,17 @@
       if (nearLine(x, chartLayout, 0, draft.setup)) dragLine = 0;
       else if (nearLine(x, chartLayout, 1, draft.setup)) dragLine = 1;
       else dragLine = null;
-      if (dragLine != null) canvas.style.cursor = "col-resize";
+      if (dragLine != null) {
+        canvas.style.cursor = "col-resize";
+        window.addEventListener("mousemove", onWindowMouseMove);
+        window.addEventListener("mouseup", onWindowMouseUp);
+      }
     });
 
     canvas.addEventListener("mousemove", (e) => {
-      if (!chartLayout || !draft?.setup) return;
+      if (!chartLayout || !draft?.setup || dragLine != null) return;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      if (dragLine != null) {
-        dragMoved = true;
-        hidePhaseHover();
-        const frac = xToFrac(x, chartLayout);
-        const splits = [...draft.setup.phaseSplit];
-        splits[dragLine] = frac;
-        draft.setup.phaseSplit = clampSplits(splits[0], splits[1], chartLayout.duration);
-        onDraftChange();
-        return;
-      }
       const onLine = nearLine(x, chartLayout, 0, draft.setup) || nearLine(x, chartLayout, 1, draft.setup);
       let nextHover = null;
       if (onLine) {
@@ -275,23 +313,12 @@
     });
 
     canvas.addEventListener("mouseup", (e) => {
-      if (!chartLayout || !draft?.setup) return;
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      if (dragLine == null && !dragMoved) {
-        if (!nearLine(x, chartLayout, 0, draft.setup) && !nearLine(x, chartLayout, 1, draft.setup)) {
-          const idx = phaseIndexForFrac(xToFrac(x, chartLayout), draft.setup);
-          if (window.Simulator?.openPhaseModalExternal) {
-            window.Simulator.openPhaseModalExternal(idx);
-          }
-        }
-      }
-      dragLine = null;
-      canvas.style.cursor = "pointer";
+      if (dragLine != null) return;
+      endPhaseDrag({ openPhase: true, clientX: e.clientX });
     });
 
     canvas.addEventListener("mouseleave", () => {
-      dragLine = null;
+      if (dragLine != null) return;
       hoveredPhaseLine = null;
       hidePhaseHover();
       drawChart();

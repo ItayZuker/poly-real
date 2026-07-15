@@ -9,6 +9,13 @@ import { marketWindowsDir } from "./data-dir.js";
 import { deleteWindowFilesBefore, listWindowFiles, readJsonFile, writeJsonFile } from "./file-store.js";
 import path from "path";
 
+/**
+ * Local JSON window files under data/{series}/windows.
+ * Heatmap loading uses Mongo (recorded-window-mongo-repository) instead.
+ * Schedule backtest / scripts that need tick-adjacent window files may still
+ * call these helpers; they degrade to empty when no files exist.
+ */
+
 function windowFilePath(market: MarketDocument, windowStart: number): string {
   return path.join(marketWindowsDir(market._id), `${windowStart}.json`);
 }

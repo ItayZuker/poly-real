@@ -4,7 +4,7 @@ import {
   type ActiveScheduleContext,
 } from "./schedule-active.js";
 import { placeMarketOrder } from "./order-service.js";
-import { refreshCollateralBalance } from "./trading-client.js";
+import { getTradingClient, refreshCollateralBalance } from "./trading-client.js";
 import { SimulatorEngine } from "./simulator-engine.js";
 import { simulatorService, phaseSetupToSimSetup } from "./simulator-service.js";
 import { logService } from "./log-service.js";
@@ -20,8 +20,21 @@ import {
   isValidSharePrice,
   isValidShareSize,
 } from "./polymarket-portfolio.js";
+import {
+  DEFAULT_CRYPTO_TAKER_FEE_PARAMS,
+  estimateTakerFeeUsd,
+  resolveTakerFeeParams,
+} from "./taker-fee.js";
 import { tradingConfigFilePath } from "./db/data-dir.js";
 import { readJsonFile, writeJsonFile } from "./db/file-store.js";
+import {
+  addActivatedPlacementId,
+  listActivatedPlacementIds,
+  listTradingStatEvents,
+  markLiveReset,
+  upsertTradingStatEvent,
+  type TradingStatEvent,
+} from "./db/trading-session-memory-repository.js";
 import type {
   LiveWindowState,
   SimMarker,
@@ -34,10 +47,19 @@ import type {
   PlacementLiveStats,
 } from "./types.js";
 
+type SettledStatContribution = {
+  green: number;
+  red: number;
+  blue: number;
+  pnl: number;
+  status: Exclude<TradingPositionCard["status"], "open">;
+};
+
 interface SidePosition {
   shares: number;
   avgPrice: number;
   cost: number;
+  buyFees: number;
   cardId: string;
   asset?: string;
   conditionId?: string;
@@ -47,6 +69,145 @@ type UpdateListener = () => void;
 
 function sessionKey(state: LiveWindowState): string {
   return `${state.series || ""}:${state.windowStart || ""}`;
+}
+
+function contributionFromCard(card: TradingPositionCard): SettledStatContribution | null {
+  if (card.status === "open") return null;
+  const pl = Number(card.pl);
+  if (!Number.isFinite(pl)) return null;
+
+  let green = 0;
+  let red = 0;
+  let blue = 0;
+  if (card.status === "sold") {
+    if (pl > 0) green = 1;
+    else red = 1;
+  } else if (card.status === "win") {
+    blue = 1;
+  } else if (card.status === "loss") {
+    red = 1;
+  } else {
+    return null;
+  }
+  return { green, red, blue, pnl: pl, status: card.status };
+}
+
+function totalTradeFees(card: Pick<TradingPositionCard, "buyFees" | "sellFees">): number {
+  return (card.buyFees ?? 0) + (card.sellFees ?? 0);
+}
+
+/** Gross Polymarket position P/L minus estimated taker fees (wallet-closer). */
+function feeAwarePlFromGross(
+  grossPl: number,
+  card: Pick<TradingPositionCard, "buyFees" | "sellFees">,
+): number {
+  return grossPl - totalTradeFees(card);
+}
+
+function feeAwarePlHeld(card: TradingPositionCard, won: boolean): number {
+  const payout = won ? card.shares : 0;
+  return payout - card.buyCost - (card.buyFees ?? 0);
+}
+
+function feeAwarePlSold(card: TradingPositionCard): number {
+  const proceeds = Number(card.sellProceeds ?? 0);
+  return proceeds - (card.sellFees ?? 0) - card.buyCost - (card.buyFees ?? 0);
+}
+
+async function estimateLiveTakerFee(
+  tokenId: string | undefined,
+  shares: number,
+  price: number,
+): Promise<number> {
+  if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(price) || price <= 0 || price >= 1) {
+    return 0;
+  }
+  const client = getTradingClient();
+  const params =
+    tokenId && client
+      ? await resolveTakerFeeParams(client, tokenId)
+      : DEFAULT_CRYPTO_TAKER_FEE_PARAMS;
+  return estimateTakerFeeUsd(shares, price, params);
+}
+
+function eventFingerprint(
+  event: Pick<TradingStatEvent, "status" | "green" | "red" | "blue" | "pnl" | "placementId" | "card">,
+): string {
+  const card = event.card;
+  return [
+    event.status,
+    event.green,
+    event.red,
+    event.blue,
+    event.pnl,
+    event.placementId ?? "",
+    card?.shares ?? "",
+    card?.buyPrice ?? "",
+    card?.pl ?? "",
+    card?.buyFees ?? "",
+    card?.sellFees ?? "",
+    card?.confirmed ? 1 : 0,
+  ].join("|");
+}
+
+function cardSnapshotFromPosition(card: TradingPositionCard): TradingStatEvent["card"] {
+  if (card.status === "open") return undefined;
+  const snap: NonNullable<TradingStatEvent["card"]> = {
+    windowKey: card.windowKey,
+    series: card.series,
+    side: card.side,
+    shares: card.shares,
+    buyPrice: card.buyPrice,
+    buyCost: card.buyCost,
+    buyAt: card.buyAt,
+    status: card.status,
+    confirmed: card.confirmed === true,
+  };
+  if (card.pl != null) snap.pl = card.pl;
+  if (card.outcome) snap.outcome = card.outcome;
+  if (card.asset) snap.asset = card.asset;
+  if (card.conditionId) snap.conditionId = card.conditionId;
+  if (card.slug) snap.slug = card.slug;
+  if (card.placementId) snap.placementId = card.placementId;
+  if (card.buyFees != null) snap.buyFees = card.buyFees;
+  if (card.sellPrice != null) snap.sellPrice = card.sellPrice;
+  if (card.sellProceeds != null) snap.sellProceeds = card.sellProceeds;
+  if (card.sellFees != null) snap.sellFees = card.sellFees;
+  if (card.soldAt != null) snap.soldAt = card.soldAt;
+  return snap;
+}
+
+function positionCardFromEvent(event: TradingStatEvent): TradingPositionCard | null {
+  const snap = event.card;
+  if (!snap) return null;
+  if (snap.status === "open") return null;
+  const card: TradingPositionCard = {
+    id: event.cardId,
+    windowKey: snap.windowKey,
+    series: snap.series,
+    side: snap.side,
+    shares: snap.shares,
+    buyPrice: snap.buyPrice,
+    buyCost: snap.buyCost,
+    buyAt: snap.buyAt,
+    status: snap.status,
+    confirmed: snap.confirmed === true,
+  };
+  if (snap.pl != null) card.pl = snap.pl;
+  else card.pl = event.pnl;
+  if (snap.outcome) card.outcome = snap.outcome;
+  if (snap.asset) card.asset = snap.asset;
+  if (snap.conditionId) card.conditionId = snap.conditionId;
+  if (snap.slug) card.slug = snap.slug;
+  if (snap.buyFees != null) card.buyFees = snap.buyFees;
+  if (snap.placementId || event.placementId) {
+    card.placementId = snap.placementId ?? event.placementId;
+  }
+  if (snap.sellPrice != null) card.sellPrice = snap.sellPrice;
+  if (snap.sellProceeds != null) card.sellProceeds = snap.sellProceeds;
+  if (snap.sellFees != null) card.sellFees = snap.sellFees;
+  if (snap.soldAt != null) card.soldAt = snap.soldAt;
+  return card;
 }
 
 function emptyQuoteLocks(): SimQuoteLocks {
@@ -100,6 +261,7 @@ function normalizeTradingConfig(raw: Partial<TradingConfig> | null | undefined):
 export class LiveTradingService {
   private config: TradingConfig = defaultTradingConfig();
   private persistChain: Promise<void> = Promise.resolve();
+  private statsPersistChain: Promise<void> = Promise.resolve();
 
   private positions: { up: SidePosition | null; down: SidePosition | null } = {
     up: null,
@@ -111,6 +273,13 @@ export class LiveTradingService {
   private positionCards: TradingPositionCard[] = [];
   /** Placement ids that have had schedule auto-trades this session (for live card stats). */
   private knownPlacementIds = new Set<string>();
+  /**
+   * Settled contributions for Live range (RAM cards + Mongo hydrate after restart).
+   * Keyed by cardId — survives restart until Live reset.
+   */
+  private liveStatLedger = new Map<string, TradingStatEvent>();
+  /** Last written fingerprints — skip identical Mongo upserts. */
+  private lastPersistedStatFingerprint = new Map<string, string>();
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
@@ -146,7 +315,109 @@ export class LiveTradingService {
       logService.warn("trading", `Failed to load trading config: ${String(err)}`);
       this.config = defaultTradingConfig();
     }
+    await this.hydrateLiveStatsFromMongo();
     return this.getConfig();
+  }
+
+  /** Reload Live-range settled events from Mongo (after boot / reset). */
+  async hydrateLiveStatsFromMongo(): Promise<void> {
+    try {
+      const events = await listTradingStatEvents({ afterLiveReset: true });
+      const activated = await listActivatedPlacementIds();
+      this.liveStatLedger.clear();
+      this.lastPersistedStatFingerprint.clear();
+      this.knownPlacementIds.clear();
+
+      const openCards = this.positionCards.filter((c) => c.status === "open");
+      const restored: TradingPositionCard[] = [];
+
+      for (const id of activated) {
+        this.knownPlacementIds.add(id);
+      }
+
+      for (const event of events) {
+        this.liveStatLedger.set(event.cardId, event);
+        this.lastPersistedStatFingerprint.set(event.cardId, eventFingerprint(event));
+        if (event.placementId) this.knownPlacementIds.add(event.placementId);
+        const card = positionCardFromEvent(event);
+        if (card) {
+          restored.push(card);
+          if (card.placementId) this.knownPlacementIds.add(card.placementId);
+        }
+      }
+
+      restored.sort((a, b) => (b.buyAt ?? 0) - (a.buyAt ?? 0));
+      this.positionCards = [...openCards, ...restored].slice(0, 100);
+      logService.info(
+        "trading",
+        `Hydrated ${events.length} live stat event(s) from Mongo (${restored.length} position card(s), ${this.knownPlacementIds.size} placement(s))`,
+      );
+    } catch (err) {
+      logService.warn("trading", `Failed to hydrate live stats from Mongo: ${String(err)}`);
+    }
+  }
+
+  /** Mark a schedule placement as live this session so cards show 0/0/0 until the first fill. */
+  private rememberActivatedPlacement(placementId: string | undefined): void {
+    if (!placementId || this.knownPlacementIds.has(placementId)) return;
+    this.knownPlacementIds.add(placementId);
+    this.statsPersistChain = this.statsPersistChain
+      .then(() => addActivatedPlacementId(placementId))
+      .catch((err) => {
+        logService.warn(
+          "trading",
+          `Failed to persist activated placement ${placementId}: ${String(err)}`,
+        );
+      });
+    this.notify();
+  }
+
+  private persistCardStat(card: TradingPositionCard): void {
+    const contrib = contributionFromCard(card);
+    if (!contrib) return;
+
+    const event: TradingStatEvent = {
+      cardId: card.id,
+      status: contrib.status,
+      green: contrib.green,
+      red: contrib.red,
+      blue: contrib.blue,
+      pnl: contrib.pnl,
+      settledAt: new Date(
+        (card.soldAt ?? card.buyAt ?? Math.floor(Date.now() / 1000)) * 1000,
+      ).toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (card.placementId) event.placementId = card.placementId;
+    const snap = cardSnapshotFromPosition(card);
+    if (snap) event.card = snap;
+
+    const fingerprint = eventFingerprint(event);
+    if (this.lastPersistedStatFingerprint.get(card.id) === fingerprint) return;
+
+    this.liveStatLedger.set(card.id, event);
+    this.lastPersistedStatFingerprint.set(card.id, fingerprint);
+    if (card.placementId) this.knownPlacementIds.add(card.placementId);
+
+    this.statsPersistChain = this.statsPersistChain
+      .then(async () => {
+        await upsertTradingStatEvent({
+          cardId: event.cardId,
+          placementId: event.placementId,
+          status: event.status,
+          green: event.green,
+          red: event.red,
+          blue: event.blue,
+          pnl: event.pnl,
+          settledAt: event.settledAt,
+          card: event.card,
+        });
+      })
+      .catch((err) => {
+        // Allow retry on next change
+        this.lastPersistedStatFingerprint.delete(card.id);
+        logService.warn("trading", `Failed to persist stat event ${card.id}: ${String(err)}`);
+      });
   }
 
   private persistConfig(): void {
@@ -159,6 +430,8 @@ export class LiveTradingService {
   }
 
   setConfig(patch: Partial<TradingConfig>): TradingConfig {
+    const wasLive =
+      this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
     if (patch.autoTrade != null) this.config.autoTrade = Boolean(patch.autoTrade);
     if (patch.useSchedule != null) this.config.useSchedule = Boolean(patch.useSchedule);
     if (patch.startTrading != null) this.config.startTrading = Boolean(patch.startTrading);
@@ -188,6 +461,11 @@ export class LiveTradingService {
       this.config.startTrading = false;
     }
     this.persistConfig();
+    const isLive =
+      this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
+    if (isLive && (!wasLive || patch.startTrading === true || patch.useSchedule === true)) {
+      void this.refreshScheduleContext(true);
+    }
     return this.getConfig();
   }
 
@@ -223,8 +501,11 @@ export class LiveTradingService {
       markers: this.getDisplayMarkers(),
       phaseSetup: phasesVisible ? this.getDisplayPhaseSetup() : null,
       phasesVisible,
-      phasesEditable: phasesVisible && this.config.autoTrade && !this.config.useSchedule,
+      // Schedule overlays stay editable so phase bars can be dragged; saves go to the setup doc.
+      phasesEditable: phasesVisible && this.config.autoTrade,
       scheduleTitle: this.config.useSchedule && this.scheduleContext ? this.scheduleContext.title : null,
+      scheduleSetupId:
+        this.config.useSchedule && this.scheduleContext ? this.scheduleContext.setupId : null,
       quotesEnabled: this.canExecuteOrders(),
       previewMode,
     };
@@ -236,7 +517,14 @@ export class LiveTradingService {
   }
 
   private getPlacementStatsFromCards(): PlacementLiveStats[] {
-    return this.getPlacementStats([...this.knownPlacementIds]);
+    const ids = new Set(this.knownPlacementIds);
+    for (const event of this.liveStatLedger.values()) {
+      if (event.placementId) ids.add(event.placementId);
+    }
+    for (const card of this.positionCards) {
+      if (card.placementId) ids.add(card.placementId);
+    }
+    return this.getPlacementStats([...ids]);
   }
 
   private emptyPlacementStats(placementId: string): PlacementLiveStats {
@@ -250,30 +538,54 @@ export class LiveTradingService {
     };
   }
 
+  /** Live-armed placement with no fills yet — match demo “0 cards” zeros, not dashes. */
+  private zeroPlacementStats(placementId: string): PlacementLiveStats {
+    return {
+      placementId,
+      hasData: true,
+      green: 0,
+      red: 0,
+      blue: 0,
+      pnl: 0,
+    };
+  }
+
   private statsForPlacement(placementId: string): PlacementLiveStats {
     let green = 0;
     let red = 0;
     let blue = 0;
     let pnl = 0;
     let hasData = false;
+    const cardIdsFromRam = new Set<string>();
 
     for (const card of this.positionCards) {
       if (card.placementId !== placementId) continue;
       if (card.status === "open") continue;
+      const contrib = contributionFromCard(card);
+      if (!contrib) continue;
+      cardIdsFromRam.add(card.id);
       hasData = true;
-      const pl = Number(card.pl ?? 0);
-      pnl += Number.isFinite(pl) ? pl : 0;
-      if (card.status === "sold") {
-        if (pl > 0) green += 1;
-        else red += 1;
-      } else if (card.status === "win") {
-        blue += 1;
-      } else if (card.status === "loss") {
-        red += 1;
-      }
+      green += contrib.green;
+      red += contrib.red;
+      blue += contrib.blue;
+      pnl += contrib.pnl;
     }
 
-    if (!hasData) return this.emptyPlacementStats(placementId);
+    for (const event of this.liveStatLedger.values()) {
+      if (event.placementId !== placementId) continue;
+      if (cardIdsFromRam.has(event.cardId)) continue;
+      hasData = true;
+      green += event.green ?? 0;
+      red += event.red ?? 0;
+      blue += event.blue ?? 0;
+      pnl += event.pnl ?? 0;
+    }
+
+    if (!hasData) {
+      return this.knownPlacementIds.has(placementId)
+        ? this.zeroPlacementStats(placementId)
+        : this.emptyPlacementStats(placementId);
+    }
     return { placementId, hasData: true, green, red, blue, pnl };
   }
 
@@ -282,13 +594,86 @@ export class LiveTradingService {
     this.knownPlacementIds.delete(placementId);
     const before = this.positionCards.length;
     this.positionCards = this.positionCards.filter((card) => card.placementId !== placementId);
+    for (const [cardId, event] of this.liveStatLedger) {
+      if (event.placementId === placementId) {
+        this.liveStatLedger.delete(cardId);
+        this.lastPersistedStatFingerprint.delete(cardId);
+      }
+    }
     if (this.positionCards.length !== before) {
       this.stopConfirmLoopIfIdle();
     }
     this.notify();
   }
 
-  /** Clears settled/sold history; keeps open cards tied to active holdings. */
+  /** Snapshot of settled live counters (Live range: RAM + hydrated Mongo since reset). */
+  getLiveSessionTotals(): {
+    green: number;
+    red: number;
+    blue: number;
+    pnl: number;
+    hasBalance: boolean;
+    placementStats: PlacementLiveStats[];
+    startedAt?: string;
+  } {
+    const placementStats = this.getPlacementStatsFromCards();
+    let green = 0;
+    let red = 0;
+    let blue = 0;
+    let pnl = 0;
+    const seen = new Set<string>();
+    let earliestBuyAt: number | null = null;
+
+    for (const card of this.positionCards) {
+      if (card.status === "open") continue;
+      const contrib = contributionFromCard(card);
+      if (!contrib) continue;
+      seen.add(card.id);
+      green += contrib.green;
+      red += contrib.red;
+      blue += contrib.blue;
+      pnl += contrib.pnl;
+      if (card.buyAt != null && Number.isFinite(card.buyAt)) {
+        if (earliestBuyAt == null || card.buyAt < earliestBuyAt) earliestBuyAt = card.buyAt;
+      }
+    }
+
+    for (const event of this.liveStatLedger.values()) {
+      if (seen.has(event.cardId)) continue;
+      green += event.green ?? 0;
+      red += event.red ?? 0;
+      blue += event.blue ?? 0;
+      pnl += event.pnl ?? 0;
+      const settled = Date.parse(event.settledAt);
+      if (Number.isFinite(settled)) {
+        const buyAtSec = Math.floor(settled / 1000);
+        if (earliestBuyAt == null || buyAtSec < earliestBuyAt) earliestBuyAt = buyAtSec;
+      }
+    }
+
+    const hasData = green + red + blue > 0 || pnl !== 0;
+    const hasBalance = hasData;
+    const out: {
+      green: number;
+      red: number;
+      blue: number;
+      pnl: number;
+      hasBalance: boolean;
+      placementStats: PlacementLiveStats[];
+      startedAt?: string;
+    } = {
+      green,
+      red,
+      blue,
+      pnl,
+      hasBalance,
+      placementStats,
+    };
+    if (earliestBuyAt != null) out.startedAt = new Date(earliestBuyAt * 1000).toISOString();
+    return out;
+  }
+
+  /** Clears settled/sold history for Live; Week/All keep Mongo events. */
   clearPositionCards(): void {
     const keepIds = new Set(
       [this.positions.up?.cardId, this.positions.down?.cardId].filter(Boolean) as string[],
@@ -299,6 +684,13 @@ export class LiveTradingService {
     this.knownPlacementIds = new Set(
       this.positionCards.map((c) => c.placementId).filter(Boolean) as string[],
     );
+    this.liveStatLedger.clear();
+    this.lastPersistedStatFingerprint.clear();
+    this.statsPersistChain = this.statsPersistChain
+      .then(() => markLiveReset())
+      .catch((err) => {
+        logService.warn("trading", `Failed to mark live stats reset: ${String(err)}`);
+      });
     this.stopConfirmLoopIfIdle();
     this.notify();
   }
@@ -352,8 +744,7 @@ export class LiveTradingService {
       );
 
       if (closed) {
-        const pl = Number(closed.realizedPnl);
-        card.pl = pl;
+        const grossPl = Number(closed.realizedPnl);
         card.confirmed = true;
         if (closed.avgPrice != null && Number.isFinite(Number(closed.avgPrice))) {
           card.buyPrice = Number(closed.avgPrice);
@@ -362,11 +753,15 @@ export class LiveTradingService {
           card.shares = Number(closed.totalBought);
           card.buyCost = card.shares * card.buyPrice;
         }
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
         const marketOutcome = outcomeFromIndex(closed.outcomeIndex, closed.outcome);
         // Position outcome token that won if curPrice ~ 1
-        const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : pl >= 0;
+        const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome = marketOutcome ?? (won ? card.side : card.side === "up" ? "down" : "up");
+        card.pl = Number.isFinite(grossPl)
+          ? feeAwarePlFromGross(grossPl, card)
+          : feeAwarePlHeld(card, won);
         continue;
       }
 
@@ -391,19 +786,22 @@ export class LiveTradingService {
       );
 
       if (openPos) {
-        const pl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
-        card.pl = pl;
+        const grossPl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
         card.confirmed = true;
         if (openPos.avgPrice != null) card.buyPrice = Number(openPos.avgPrice);
         if (openPos.size != null) {
           card.shares = Number(openPos.size);
           card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
         }
-        const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : pl >= 0;
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome =
           outcomeFromIndex(openPos.outcomeIndex, openPos.outcome) ??
           (won ? card.side : card.side === "up" ? "down" : "up");
+        card.pl = Number.isFinite(grossPl)
+          ? feeAwarePlFromGross(grossPl, card)
+          : feeAwarePlHeld(card, won);
         continue;
       }
 
@@ -415,14 +813,19 @@ export class LiveTradingService {
       );
       if (!outcome) continue;
       const won = card.side === outcome;
-      const payout = won ? card.shares : 0;
       card.status = won ? "win" : "loss";
       card.outcome = outcome;
-      card.pl = payout - card.buyCost;
+      if (card.buyFees == null) {
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+      }
+      card.pl = feeAwarePlHeld(card, won);
       card.confirmed = false;
     }
 
     logService.info("trading", `Settled ${openCards.length} open position(s) for prior window`);
+    for (const card of openCards) {
+      this.persistCardStat(card);
+    }
     this.notify();
     this.ensureConfirmLoop();
   }
@@ -493,6 +896,14 @@ export class LiveTradingService {
     }
 
     const nextPlacementId = this.scheduleContext?.placementId ?? null;
+    if (
+      this.config.startTrading &&
+      this.config.autoTrade &&
+      this.config.useSchedule &&
+      nextPlacementId
+    ) {
+      this.rememberActivatedPlacement(nextPlacementId);
+    }
     if (prevVisible !== this.shouldShowPhases() || prevPlacementId !== nextPlacementId) {
       this.notify();
     }
@@ -567,7 +978,7 @@ export class LiveTradingService {
   ): Promise<{ ok: boolean; error?: string }> {
     this.ensureWindow(state);
     if (!this.canExecuteOrders()) {
-      return { ok: false, error: "Start Trading to place orders" };
+      return { ok: false, error: "Allow trade to place orders" };
     }
     if (!this.canManualTrade(side, leg)) {
       return { ok: false, error: leg === "buy" ? "Already holding position" : "No position to sell" };
@@ -671,6 +1082,7 @@ export class LiveTradingService {
           card.status !== before.status
         ) {
           changed = true;
+          this.persistCardStat(card);
         }
       }
       if (changed) this.notify();
@@ -719,6 +1131,7 @@ export class LiveTradingService {
         card.shares = size;
         card.buyPrice = price;
         card.buyCost = size * price;
+        card.buyFees = await estimateLiveTakerFee(card.asset ?? trade.asset, size, price);
         card.asset = card.asset ?? trade.asset;
         card.conditionId = card.conditionId ?? trade.conditionId;
         card.slug = card.slug ?? trade.slug;
@@ -737,6 +1150,11 @@ export class LiveTradingService {
           card.shares = Number(pos.size);
           card.buyPrice = Number(pos.avgPrice);
           card.buyCost = Number(pos.initialValue ?? card.shares * card.buyPrice);
+          card.buyFees = await estimateLiveTakerFee(
+            card.asset ?? pos.asset,
+            card.shares,
+            card.buyPrice,
+          );
           card.asset = card.asset ?? pos.asset;
           card.conditionId = card.conditionId ?? pos.conditionId;
           card.slug = card.slug ?? pos.slug;
@@ -752,8 +1170,28 @@ export class LiveTradingService {
       sidePos.shares = card.shares;
       sidePos.avgPrice = card.buyPrice;
       sidePos.cost = card.buyCost;
+      sidePos.buyFees = card.buyFees ?? 0;
       sidePos.asset = card.asset;
       sidePos.conditionId = card.conditionId;
+    }
+    if (card.confirmed) this.syncBuyMarkerFromCard(card);
+  }
+
+  private syncBuyMarkerFromCard(card: TradingPositionCard): void {
+    for (let i = this.markers.length - 1; i >= 0; i -= 1) {
+      const marker = this.markers[i];
+      if (
+        marker.type === "buy" &&
+        marker.windowKey === card.windowKey &&
+        marker.side === card.side
+      ) {
+        marker.shares = card.shares;
+        marker.price = card.buyPrice;
+        marker.cost = card.buyCost;
+        marker.fees = card.buyFees ?? 0;
+        marker.total = card.buyCost + (card.buyFees ?? 0);
+        break;
+      }
     }
   }
 
@@ -792,11 +1230,13 @@ export class LiveTradingService {
         card.sellPrice = price;
         card.sellProceeds = size * price;
         card.buyCost = size * card.buyPrice;
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.sellFees = await estimateLiveTakerFee(card.asset ?? trade.asset, size, price);
         card.asset = card.asset ?? trade.asset;
         card.conditionId = card.conditionId ?? trade.conditionId;
         card.slug = card.slug ?? trade.slug;
         if (trade.timestamp != null) card.soldAt = Number(trade.timestamp);
-        card.pl = card.sellProceeds - card.buyCost;
+        card.pl = feeAwarePlSold(card);
         if (isValidSharePrice(card.buyPrice)) {
           card.confirmed = true;
         }
@@ -813,7 +1253,6 @@ export class LiveTradingService {
       });
 
       if (closed?.realizedPnl != null && Number.isFinite(Number(closed.realizedPnl))) {
-        card.pl = Number(closed.realizedPnl);
         if (closed.avgPrice != null && isValidSharePrice(closed.avgPrice)) {
           card.buyPrice = Number(closed.avgPrice);
         }
@@ -825,9 +1264,14 @@ export class LiveTradingService {
             card.sellProceeds = bought * card.sellPrice;
           }
         }
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        if (card.sellPrice != null) {
+          card.sellFees = await estimateLiveTakerFee(card.asset, card.shares, card.sellPrice);
+        }
         card.asset = card.asset ?? closed.asset;
         card.conditionId = card.conditionId ?? closed.conditionId;
         card.slug = card.slug ?? closed.slug;
+        card.pl = feeAwarePlFromGross(Number(closed.realizedPnl), card);
         if (isValidSharePrice(card.buyPrice) && isValidShareSize(card.shares)) {
           card.confirmed = true;
         }
@@ -851,8 +1295,7 @@ export class LiveTradingService {
         afterTs: card.buyAt - 30,
       });
       if (closed?.realizedPnl != null && Number.isFinite(Number(closed.realizedPnl))) {
-        const pl = Number(closed.realizedPnl);
-        card.pl = pl;
+        const grossPl = Number(closed.realizedPnl);
         if (closed.avgPrice != null && isValidSharePrice(closed.avgPrice)) {
           card.buyPrice = Number(closed.avgPrice);
         }
@@ -860,11 +1303,13 @@ export class LiveTradingService {
           card.shares = Number(closed.totalBought);
           card.buyCost = card.shares * card.buyPrice;
         }
-        const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : pl >= 0;
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome =
           outcomeFromIndex(closed.outcomeIndex, closed.outcome) ??
           (won ? card.side : card.side === "up" ? "down" : "up");
+        card.pl = feeAwarePlFromGross(grossPl, card);
         if (isValidSharePrice(card.buyPrice) && isValidShareSize(card.shares)) {
           card.confirmed = true;
         }
@@ -887,16 +1332,19 @@ export class LiveTradingService {
           (openPos.curPrice != null &&
             (Number(openPos.curPrice) <= 0.02 || Number(openPos.curPrice) >= 0.98)))
       ) {
-        const pl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
-        card.pl = pl;
+        const grossPl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
         card.buyPrice = Number(openPos.avgPrice);
         card.shares = Number(openPos.size);
         card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
-        const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : pl >= 0;
+        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome =
           outcomeFromIndex(openPos.outcomeIndex, openPos.outcome) ??
           (won ? card.side : card.side === "up" ? "down" : "up");
+        card.pl = Number.isFinite(grossPl)
+          ? feeAwarePlFromGross(grossPl, card)
+          : feeAwarePlHeld(card, won);
         card.confirmed = true;
       }
     } catch {
@@ -908,6 +1356,7 @@ export class LiveTradingService {
     const card = this.findCard(cardId);
     if (!card) return;
     await this.tryConfirmCard(card);
+    this.persistCardStat(card);
     this.notify();
     this.ensureConfirmLoop();
   }
@@ -916,6 +1365,7 @@ export class LiveTradingService {
     const card = this.findCard(cardId);
     if (!card) return;
     await this.tryConfirmCard(card);
+    this.persistCardStat(card);
     this.notify();
     this.ensureConfirmLoop();
   }
@@ -949,11 +1399,13 @@ export class LiveTradingService {
 
       if (leg === "buy") {
         const cost = result.usdcAmount ?? fillShares * fillPrice;
+        const buyFees = await estimateLiveTakerFee(result.tokenId, fillShares, fillPrice);
         const cardId = newCardId();
         this.positions[side] = {
           shares: fillShares,
           avgPrice: fillPrice,
           cost,
+          buyFees,
           cardId,
           asset: result.tokenId,
           conditionId: result.conditionId,
@@ -967,6 +1419,7 @@ export class LiveTradingService {
           shares: fillShares,
           buyPrice: fillPrice,
           buyCost: cost,
+          buyFees,
           buyAt: nowSec,
           status: "open",
           asset: result.tokenId,
@@ -983,7 +1436,7 @@ export class LiveTradingService {
           this.config.useSchedule &&
           this.scheduleContext?.placementId
         ) {
-          this.knownPlacementIds.add(this.scheduleContext.placementId);
+          this.rememberActivatedPlacement(this.scheduleContext.placementId);
         }
         if (this.positionCards.length > 100) {
           this.positionCards.length = 100;
@@ -996,20 +1449,28 @@ export class LiveTradingService {
           shares: fillShares,
           price: fillPrice,
           cost,
-          fees: 0,
-          total: cost,
+          fees: buyFees,
+          total: cost + buyFees,
         });
         void this.enrichCardFromPolymarketBuy(cardId);
       } else {
         const pos = this.positions[side]!;
         const proceeds = result.usdcAmount ?? fillShares * fillPrice;
-        const profit = proceeds - pos.cost;
+        const sellFees = await estimateLiveTakerFee(
+          result.tokenId ?? pos.asset,
+          fillShares,
+          fillPrice,
+        );
+        const buyFees = pos.buyFees ?? 0;
+        const profit = proceeds - sellFees - (pos.cost + buyFees);
         this.lockQuote(side, "sell", fillPrice);
         const card = this.findCard(pos.cardId);
         if (card && card.status === "open") {
           card.status = "sold";
           card.sellPrice = fillPrice;
           card.sellProceeds = proceeds;
+          card.sellFees = sellFees;
+          card.buyFees = card.buyFees ?? buyFees;
           card.soldAt = nowSec;
           card.pl = profit;
           card.shares = fillShares;
@@ -1017,6 +1478,7 @@ export class LiveTradingService {
           card.conditionId = card.conditionId ?? result.conditionId ?? pos.conditionId;
           card.slug = card.slug ?? result.slug;
           card.confirmed = false;
+          this.persistCardStat(card);
           void this.enrichCardFromPolymarketSell(card.id, nowSec);
         }
         this.addMarker(state, {
@@ -1027,6 +1489,7 @@ export class LiveTradingService {
           shares: fillShares,
           price: fillPrice,
           proceeds,
+          fees: sellFees,
           profit,
           total: proceeds,
         });

@@ -89,6 +89,61 @@
     );
   }
 
+  /**
+   * Now highlights:
+   * - Schedule view: UTC hour + active setup card (slots behind card do not pulse)
+   * - Heatmap view: UTC hour + heatmap hour slot
+   * Animations share one wall-clock phase via --schedule-pulse-delay on :root.
+   */
+  function syncNowHighlights() {
+    const { day, hourSlot } = getUtcScheduleClock();
+    const active = findActivePlacement();
+    const onSchedule = isScheduleView();
+    const onHeatmap = isSchedulePage() && !onSchedule;
+    const periodMs = 1300;
+    const delay = `${-(Date.now() % periodMs)}ms`;
+
+    // Set delay before toggling pulse classes so new animations start in phase.
+    document.documentElement.style.setProperty("--schedule-pulse-delay", delay);
+
+    document.querySelectorAll(".schedule-utc-hour").forEach((el) => {
+      el.classList.toggle(
+        "is-now",
+        isSchedulePage() && Number(el.dataset.hour) === hourSlot,
+      );
+    });
+
+    document.querySelectorAll(".schedule-day-column").forEach((col) => {
+      const isToday = col.dataset.day === day;
+      col.querySelectorAll(".schedule-hour-slot").forEach((slot) => {
+        slot.classList.toggle(
+          "is-now",
+          onHeatmap && isToday && Number(slot.dataset.hour) === hourSlot,
+        );
+      });
+    });
+
+    document.querySelectorAll(".schedule-placement-card").forEach((card) => {
+      card.classList.toggle(
+        "is-live",
+        onSchedule && active != null && card.dataset.placementId === active._id,
+      );
+    });
+
+    restartPulseAnimations();
+  }
+
+  /** Restart pulse animations so every active highlight shares the same phase. */
+  function restartPulseAnimations() {
+    const els = document.querySelectorAll(
+      ".schedule-utc-hour.is-now, .schedule-hour-slot.is-now, .schedule-placement-card.is-live",
+    );
+    els.forEach((el) => el.classList.remove("is-pulse-synced"));
+    // Force style recalc so removing the class actually stops the animation.
+    void document.documentElement.offsetWidth;
+    els.forEach((el) => el.classList.add("is-pulse-synced"));
+  }
+
   function rangesOverlap(aStart, aDur, bStart, bDur) {
     return aStart < bStart + bDur && bStart < aStart + aDur;
   }
@@ -604,18 +659,14 @@
   function clearAllFramedPlacements() {
     if (framedPlacementIds.size === 0) return;
     framedPlacementIds.clear();
-    if (isSchedulePage() && !isScheduleView()) {
-      renderPlacements({ reloadStats: false });
-    } else {
-      applyPlacementFrameStates();
-    }
+    applyPlacementFrameStates();
   }
 
   function updateHighlightedHeaderSummary() {
     const container = document.getElementById("schedule-highlighted-summary");
     if (!container) return;
 
-    const visible = isSchedulePage() && framedPlacementIds.size > 0;
+    const visible = framedPlacementIds.size > 0;
     container.hidden = !visible;
     if (!visible) return;
 
@@ -673,11 +724,46 @@
     return { hasData: hasAny, pnl: totalPnl, green, red, blue };
   }
 
-  function updateWeekHeaderSummary() {
+  const SUMMARY_RANGE_STORAGE_KEY = "poly-real:header-stats-range";
+
+  let headerSummaryRange = "week";
+  let headerSummaryFetchTimer = null;
+  let headerSummaryRequestId = 0;
+
+  function loadHeaderSummaryPrefs() {
+    try {
+      const savedRange = localStorage.getItem(SUMMARY_RANGE_STORAGE_KEY);
+      if (savedRange === "live" || savedRange === "week" || savedRange === "all") {
+        headerSummaryRange = savedRange;
+      } else if (savedRange === "timeframe") {
+        headerSummaryRange = "week";
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function saveHeaderSummaryPrefs() {
+    try {
+      localStorage.setItem(SUMMARY_RANGE_STORAGE_KEY, headerSummaryRange);
+    } catch {
+      // ignore
+    }
+  }
+
+  function liveWeekTotals() {
+    return weekTotals();
+  }
+
+  function renderHeaderSummaryTotals(totals) {
     const container = document.getElementById("schedule-week-summary");
     if (!container) return;
-
-    const { hasData, pnl, green, red, blue } = weekTotals();
+    container.hidden = false;
+    const hasData = totals?.hasData === true;
+    const pnl = totals?.pnl ?? 0;
+    const green = totals?.green ?? 0;
+    const red = totals?.red ?? 0;
+    const blue = totals?.blue ?? 0;
     const dotsEl = container.querySelector(".schedule-week-stats-dots");
     const pnlEl = container.querySelector(".schedule-week-pnl");
 
@@ -692,6 +778,117 @@
       pnlEl.textContent = formatPlacementPnl(pnl, hasData);
       setPnlSignClass(pnlEl, pnl, hasData);
     }
+  }
+
+  async function fetchHeaderSummaryTotals() {
+    const requestId = ++headerSummaryRequestId;
+    const mode = headerSummaryRange;
+
+    if (mode === "live") {
+      const live = liveWeekTotals();
+      if (requestId === headerSummaryRequestId) renderHeaderSummaryTotals(live);
+      return live;
+    }
+
+    const params = new URLSearchParams({ mode });
+
+    try {
+      const res = await fetch(`/api/trading/session-memory?${params}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Session memory failed (${res.status})`);
+      }
+      const data = await res.json();
+      if (requestId !== headerSummaryRequestId) return data;
+      renderHeaderSummaryTotals({
+        hasData: data.hasData === true,
+        green: data.green ?? 0,
+        red: data.red ?? 0,
+        blue: data.blue ?? 0,
+        pnl: data.pnl ?? 0,
+      });
+      return data;
+    } catch (err) {
+      console.warn("Header summary fetch failed:", err);
+      if (requestId === headerSummaryRequestId) {
+        renderHeaderSummaryTotals(liveWeekTotals());
+      }
+      return null;
+    }
+  }
+
+  function scheduleHeaderSummaryRefresh() {
+    if (headerSummaryFetchTimer != null) window.clearTimeout(headerSummaryFetchTimer);
+    headerSummaryFetchTimer = window.setTimeout(() => {
+      headerSummaryFetchTimer = null;
+      void fetchHeaderSummaryTotals();
+    }, 80);
+  }
+
+  function updateWeekHeaderSummary() {
+    if (headerSummaryRange === "live") {
+      renderHeaderSummaryTotals(liveWeekTotals());
+      return;
+    }
+    scheduleHeaderSummaryRefresh();
+  }
+
+  function syncHeaderSummaryControls() {
+    const select = document.getElementById("schedule-summary-range");
+    if (select) select.value = headerSummaryRange;
+  }
+
+  function emptyLiveStats(placementId) {
+    return {
+      placementId,
+      hasData: false,
+      green: 0,
+      red: 0,
+      blue: 0,
+      pnl: 0,
+    };
+  }
+
+  async function resetWeekCounts() {
+    try {
+      const res = await fetch("/api/trading/positions/clear", { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Reset failed (${res.status})`);
+      }
+    } catch (err) {
+      console.warn("Week count reset failed:", err);
+      return;
+    }
+
+    for (const placement of placements) {
+      placementStats.set(placement._id, emptyLiveStats(placement._id));
+    }
+    applyCardStatsStates();
+    void fetchHeaderSummaryTotals();
+  }
+
+  function bindWeekSummaryReset() {
+    const btn = document.getElementById("schedule-week-reset");
+    if (!btn || btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      void resetWeekCounts();
+    });
+  }
+
+  function bindHeaderSummaryRange() {
+    const select = document.getElementById("schedule-summary-range");
+    if (select && select.dataset.bound !== "1") {
+      select.dataset.bound = "1";
+      select.addEventListener("change", () => {
+        headerSummaryRange = select.value;
+        saveHeaderSummaryPrefs();
+        syncHeaderSummaryControls();
+        void fetchHeaderSummaryTotals();
+      });
+    }
+    syncHeaderSummaryControls();
   }
 
   function setHeaderStatsProgress(fraction, options = {}) {
@@ -1062,11 +1259,7 @@
     } else {
       framedPlacementIds.add(placementId);
     }
-    if (isSchedulePage() && !isScheduleView()) {
-      renderPlacements({ reloadStats: false });
-    } else {
-      applyPlacementFrameStates();
-    }
+    applyPlacementFrameStates();
   }
 
   function applyPlacementFrameStates() {
@@ -1100,14 +1293,11 @@
       const layer = getPlacementLayer(day);
       if (!layer) return;
       layer.replaceChildren();
-      if (!isSchedulePage()) return;
 
       const dayPlacements = placements.filter((x) => x.day === day);
-      const placementsToRender = isScheduleView()
-        ? dayPlacements
-        : dayPlacements.filter((p) => framedPlacementIds.has(p._id));
-
-      for (const p of placementsToRender) {
+      // Always mount every placement (even if the schedule page is hidden).
+      // View visibility is CSS-driven so Schedule ↔ Heatmap does not rebuild cards.
+      for (const p of dayPlacements) {
         layer.appendChild(buildPlacementCard(p));
       }
     });
@@ -1117,6 +1307,7 @@
       applyCardStatsStates();
     }
     applyPlacementFrameStates();
+    syncNowHighlights();
     window.updateSetupListPlacementCounts?.();
   }
 
@@ -1653,20 +1844,22 @@
     clearDropPreview();
     moveDragState = null;
     document.body.classList.remove("is-schedule-moving");
-    renderPlacements({ reloadStats: false });
+    // Do not re-render placements or setups — view switch is CSS-only.
     updateHighlightedHeaderSummary();
-    if (isScheduleView() && placements.length > 0) {
-      hydrateStatsFromCache();
-      applyStatsToCards();
-      void scheduleStatsRefresh();
-    }
+    syncNowHighlights();
   }
 
   function init() {
+    loadHeaderSummaryPrefs();
     initPlacementLayers();
     bindUtcRowHover();
     bindHighlightedSummaryClear();
+    bindWeekSummaryReset();
+    bindHeaderSummaryRange();
     bindGlobalPointer();
+    syncNowHighlights();
+    void fetchHeaderSummaryTotals();
+    window.setInterval(syncNowHighlights, 15_000);
   }
 
   function applyLivePlacementStats(statsList) {

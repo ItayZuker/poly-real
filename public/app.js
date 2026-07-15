@@ -860,7 +860,13 @@ function drawPriceChart(state, options = {}) {
     overlayOpts.phasesVisible = phasesOn;
     overlayOpts.phasesEditable = trading.phasesEditable;
     if (!options.setupOverride) {
+      // Prefer the editable local draft while phases can be dragged; otherwise the
+      // same trading.phaseSetup used for schedule/active setup overlay.
+      const editable = trading.phasesEditable !== false;
+      const localDraft =
+        editable && window.Simulator?.getLocalSetup ? window.Simulator.getLocalSetup() : null;
       const setup =
+        localDraft ||
         trading.phaseSetup ||
         (cfg?.autoTrade && !cfg.useSchedule ? state.sim?.setup : null);
       if (setup) overlayOpts.setupOverride = setup;
@@ -1124,7 +1130,7 @@ function updateCountdown(state) {
   const remaining = Math.max(0, state.windowEnd - Math.floor(Date.now() / 1000));
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
-  $("countdown").textContent = `${m}:${String(s).padStart(2, "0")}`;
+  $("countdown").textContent = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 function populateMarketSelect() {
@@ -1482,6 +1488,12 @@ async function applySetupToSimulator(setup) {
   closeSetupMenus();
   if (!setup?.setup) return;
   try {
+    const useScheduleInput = $("use-schedule");
+    if (useScheduleInput?.checked) {
+      useScheduleInput.checked = false;
+      const config = await pushTradingConfig(buildTradingConfigPatch());
+      if (config) syncWalletControls(config);
+    }
     const currentRes = await fetch("/api/sim/setup");
     const current = currentRes.ok ? await currentRes.json() : {};
     const latencyMs = window.getSimLatencyMs?.() ?? current.latencyMs ?? 150;
@@ -1501,7 +1513,11 @@ async function applySetupToSimulator(setup) {
     }
     if (windowState?.sim) {
       windowState.sim.setup = body;
-      if (window.Simulator) window.Simulator.syncFromState(windowState);
+      if (window.Simulator?.forceSyncSetupFromState) {
+        window.Simulator.forceSyncSetupFromState(windowState);
+      } else if (window.Simulator) {
+        window.Simulator.syncFromState(windowState);
+      }
     }
     syncLatencyDisplay(windowState);
     switchToPage("simulator");
@@ -1959,12 +1975,8 @@ function bindScheduleViewToggle() {
     for (const btn of buttons) {
       btn.classList.toggle("is-active", btn.dataset.scheduleView === view);
     }
-    if (isSchedule) {
-      clearHeatmapDisplay();
-      if (!page?.hidden) void loadScheduleSetups();
-    } else if (lastHeatmapState) {
-      renderHeatmap(lastHeatmapState);
-    } else {
+    // Keep both UIs mounted. Only load heatmap the first time if not yet available.
+    if (!isSchedule && !lastHeatmapState) {
       void loadHeatmap();
     }
     if (window.SchedulePlacements) window.SchedulePlacements.onViewChange();
@@ -2167,7 +2179,7 @@ function bindTradeToggles() {
     appendLogEntry({
       level: "info",
       source: "client",
-      message: startTradingInput.checked ? "Start Trading enabled" : "Start Trading disabled (preview mode)",
+      message: startTradingInput.checked ? "Allow trade enabled" : "Allow trade disabled (preview mode)",
     });
   });
 
@@ -2205,7 +2217,6 @@ window.getTradingUiState = () => windowState?.trading ?? null;
 function bindPageToggle() {
   const simulatorPage = $("page-simulator");
   const schedulePage = $("page-schedule-heatmap");
-  const weekSummary = $("schedule-week-summary");
   const buttons = document.querySelectorAll(".page-toggle-btn");
   if (!simulatorPage || !schedulePage || !buttons.length) return;
 
@@ -2213,7 +2224,6 @@ function bindPageToggle() {
     const isSimulator = page === "simulator";
     simulatorPage.hidden = !isSimulator;
     schedulePage.hidden = isSimulator;
-    if (weekSummary) weekSummary.hidden = isSimulator;
     for (const btn of buttons) {
       btn.classList.toggle("is-active", btn.dataset.page === page);
     }
@@ -2224,6 +2234,11 @@ function bindPageToggle() {
       void loadScheduleSetups();
       if (lastHeatmapState) renderHeatmap(lastHeatmapState);
       else void loadHeatmap();
+      // Ensure cards are present after the page becomes visible (boot may have
+      // loaded placements while this page was still hidden).
+      if (window.SchedulePlacements) {
+        void window.SchedulePlacements.loadPlacements({ reloadStats: false });
+      }
     }
     if (window.SchedulePlacements) window.SchedulePlacements.onViewChange();
   };

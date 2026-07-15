@@ -1,0 +1,301 @@
+import type {
+  PlacementLiveStats,
+  TradingPositionCard,
+  TradingPositionCardStatus,
+} from "../types.js";
+import { getMongoClient, getMongoDbName } from "./mongo-client.js";
+
+const META_COLLECTION = "trading_session_memory";
+const EVENTS_COLLECTION = "trading_stat_events";
+const META_DOC_ID = "live";
+
+/** @deprecated Snapshot shape from archive-on-reset; still summed for week/all. */
+export interface TradingSessionMemoryEntry {
+  closedAt: string;
+  startedAt?: string;
+  green: number;
+  red: number;
+  blue: number;
+  pnl: number;
+  placementStats: PlacementLiveStats[];
+}
+
+/** Settled position fields needed to rebuild market-page cards after restart. */
+export type TradingStatEventCard = Pick<
+  TradingPositionCard,
+  | "windowKey"
+  | "series"
+  | "side"
+  | "shares"
+  | "buyPrice"
+  | "buyCost"
+  | "buyFees"
+  | "buyAt"
+  | "status"
+  | "pl"
+  | "outcome"
+  | "asset"
+  | "conditionId"
+  | "slug"
+  | "confirmed"
+  | "placementId"
+  | "sellPrice"
+  | "sellProceeds"
+  | "sellFees"
+  | "soldAt"
+>;
+
+export interface TradingStatEvent {
+  /** Same as TradingPositionCard.id — upsert key. */
+  cardId: string;
+  placementId?: string;
+  status: Exclude<TradingPositionCardStatus, "open">;
+  green: number;
+  red: number;
+  blue: number;
+  pnl: number;
+  /** When this card first contributed a settled stat. */
+  settledAt: string;
+  updatedAt: string;
+  /** Optional full card snapshot for Positions UI hydrate. */
+  card?: TradingStatEventCard;
+}
+
+type TradingSessionMemoryDoc = {
+  _id: string;
+  /** Events with settledAt > this count toward the Live header range. */
+  liveResetAt?: string | null;
+  /**
+   * Schedule placements that were live while `startTrading` was on (even with no fills).
+   * Survives restart until Live reset — cards show 0/0/0 instead of "—".
+   */
+  activatedPlacementIds?: string[];
+  sessions?: TradingSessionMemoryEntry[];
+  updatedAt: string;
+};
+
+type TradingStatEventDoc = TradingStatEvent & { _id: string };
+
+export type SessionMemoryTotals = {
+  green: number;
+  red: number;
+  blue: number;
+  pnl: number;
+  sessionCount: number;
+  hasData: boolean;
+};
+
+function emptyTotals(): SessionMemoryTotals {
+  return { green: 0, red: 0, blue: 0, pnl: 0, sessionCount: 0, hasData: false };
+}
+
+function sumEntries(entries: TradingSessionMemoryEntry[]): SessionMemoryTotals {
+  const totals = emptyTotals();
+  for (const entry of entries) {
+    totals.sessionCount += 1;
+    totals.green += entry.green ?? 0;
+    totals.red += entry.red ?? 0;
+    totals.blue += entry.blue ?? 0;
+    totals.pnl += entry.pnl ?? 0;
+    totals.hasData = true;
+  }
+  return totals;
+}
+
+function sumEvents(events: TradingStatEvent[]): SessionMemoryTotals {
+  const totals = emptyTotals();
+  for (const event of events) {
+    totals.sessionCount += 1;
+    totals.green += event.green ?? 0;
+    totals.red += event.red ?? 0;
+    totals.blue += event.blue ?? 0;
+    totals.pnl += event.pnl ?? 0;
+    totals.hasData = true;
+  }
+  return totals;
+}
+
+function mergeTotals(a: SessionMemoryTotals, b: SessionMemoryTotals): SessionMemoryTotals {
+  return {
+    green: a.green + b.green,
+    red: a.red + b.red,
+    blue: a.blue + b.blue,
+    pnl: a.pnl + b.pnl,
+    sessionCount: a.sessionCount + b.sessionCount,
+    hasData: a.hasData || b.hasData,
+  };
+}
+
+function sessionClosedMs(entry: TradingSessionMemoryEntry): number {
+  const ms = Date.parse(entry.closedAt);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function settledMs(event: TradingStatEvent): number {
+  const ms = Date.parse(event.settledAt);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+async function metaCollection() {
+  const mongo = await getMongoClient();
+  return mongo.db(getMongoDbName()).collection<TradingSessionMemoryDoc>(META_COLLECTION);
+}
+
+async function eventsCollection() {
+  const mongo = await getMongoClient();
+  return mongo.db(getMongoDbName()).collection<TradingStatEventDoc>(EVENTS_COLLECTION);
+}
+
+async function loadMeta(): Promise<TradingSessionMemoryDoc | null> {
+  return (await metaCollection()).findOne({ _id: META_DOC_ID });
+}
+
+export async function getLiveResetAt(): Promise<string | null> {
+  const doc = await loadMeta();
+  return doc?.liveResetAt ?? null;
+}
+
+/** Mark Live range start; does not delete historical events (Week / All time keep them). */
+export async function markLiveReset(at = new Date().toISOString()): Promise<void> {
+  const now = new Date().toISOString();
+  await (await metaCollection()).updateOne(
+    { _id: META_DOC_ID },
+    { $set: { liveResetAt: at, activatedPlacementIds: [], updatedAt: now } },
+    { upsert: true },
+  );
+}
+
+export async function listActivatedPlacementIds(): Promise<string[]> {
+  const doc = await loadMeta();
+  const ids = doc?.activatedPlacementIds;
+  return Array.isArray(ids) ? ids.filter((id) => typeof id === "string" && id.length > 0) : [];
+}
+
+/** Remember a schedule placement was live this session (zeros until first fill). */
+export async function addActivatedPlacementId(placementId: string): Promise<void> {
+  if (!placementId) return;
+  const now = new Date().toISOString();
+  await (await metaCollection()).updateOne(
+    { _id: META_DOC_ID },
+    {
+      $addToSet: { activatedPlacementIds: placementId },
+      $set: { updatedAt: now },
+      $setOnInsert: { liveResetAt: null },
+    },
+    { upsert: true },
+  );
+}
+
+/**
+ * Upsert one settled-trade contribution. Idempotent on cardId — pl/status corrections overwrite.
+ */
+export async function upsertTradingStatEvent(
+  event: Omit<TradingStatEvent, "settledAt" | "updatedAt"> & { settledAt?: string },
+): Promise<TradingStatEvent> {
+  const col = await eventsCollection();
+  const now = new Date().toISOString();
+  const existing = await col.findOne({ _id: event.cardId });
+  const settledAt = existing?.settledAt ?? event.settledAt ?? now;
+
+  const doc: TradingStatEventDoc = {
+    _id: event.cardId,
+    cardId: event.cardId,
+    status: event.status,
+    green: event.green,
+    red: event.red,
+    blue: event.blue,
+    pnl: event.pnl,
+    settledAt,
+    updatedAt: now,
+  };
+  if (event.placementId) doc.placementId = event.placementId;
+  if (event.card) doc.card = event.card;
+  else if (existing?.card) doc.card = existing.card;
+
+  await col.replaceOne({ _id: event.cardId }, doc, { upsert: true });
+
+  await (await metaCollection()).updateOne(
+    { _id: META_DOC_ID },
+    { $set: { updatedAt: now }, $setOnInsert: { liveResetAt: null } },
+    { upsert: true },
+  );
+
+  const { _id: _, ...out } = doc;
+  return out;
+}
+
+export async function listTradingStatEvents(options: {
+  fromMs?: number;
+  toMs?: number;
+  afterLiveReset?: boolean;
+} = {}): Promise<TradingStatEvent[]> {
+  const col = await eventsCollection();
+  const docs = await col.find({}).toArray();
+  let liveResetMs: number | null = null;
+  if (options.afterLiveReset) {
+    const resetAt = await getLiveResetAt();
+    liveResetMs = resetAt ? Date.parse(resetAt) : null;
+    if (liveResetMs != null && !Number.isFinite(liveResetMs)) liveResetMs = null;
+  }
+
+  return docs
+    .map(({ _id, ...rest }) => rest)
+    .filter((event) => {
+      const at = settledMs(event);
+      if (liveResetMs != null && at <= liveResetMs) return false;
+      if (options.fromMs != null && at < options.fromMs) return false;
+      if (options.toMs != null && at > options.toMs) return false;
+      return true;
+    });
+}
+
+/** @deprecated Prefer upsertTradingStatEvent — kept for any callers of archive-on-reset. */
+export async function appendTradingSessionMemory(
+  entry: TradingSessionMemoryEntry,
+): Promise<void> {
+  const mongo = await getMongoClient();
+  const now = new Date().toISOString();
+  await mongo
+    .db(getMongoDbName())
+    .collection<TradingSessionMemoryDoc>(META_COLLECTION)
+    .updateOne(
+      { _id: META_DOC_ID },
+      {
+        $push: { sessions: entry },
+        $set: { updatedAt: now },
+      },
+      { upsert: true },
+    );
+}
+
+export async function listTradingSessionMemory(): Promise<TradingSessionMemoryEntry[]> {
+  const doc = await loadMeta();
+  return Array.isArray(doc?.sessions) ? doc.sessions : [];
+}
+
+export async function sumTradingSessionMemory(options: {
+  fromMs?: number;
+  toMs?: number;
+} = {}): Promise<SessionMemoryTotals> {
+  const events = await listTradingStatEvents({
+    fromMs: options.fromMs,
+    toMs: options.toMs,
+  });
+  const eventTotals = sumEvents(events);
+
+  const sessions = await listTradingSessionMemory();
+  const filteredSessions = sessions.filter((entry) => {
+    const closed = sessionClosedMs(entry);
+    if (options.fromMs != null && closed < options.fromMs) return false;
+    if (options.toMs != null && closed > options.toMs) return false;
+    return true;
+  });
+  const sessionTotals = sumEntries(filteredSessions);
+
+  return mergeTotals(eventTotals, sessionTotals);
+}
+
+export async function sumLiveTradingStatEvents(): Promise<SessionMemoryTotals> {
+  const events = await listTradingStatEvents({ afterLiveReset: true });
+  return sumEvents(events);
+}

@@ -677,6 +677,21 @@ body.is-schedule-resizing {
   z-index: 5;
 }
 
+/* Live pulse needs a full border; keep it above the card below so the bottom edge shows. */
+.schedule-placement-card.is-live.is-pulse-synced {
+  border: 1px solid #ef4444;
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+  animation: schedule-now-pulse 1.3s ease-in-out infinite;
+  animation-delay: var(--schedule-pulse-delay, 0ms);
+  transition: none;
+  z-index: 6;
+}
+
+.schedule-placement-card.is-live.has-placement-below:not(.is-stats-loading) {
+  border-bottom: 1px solid #ef4444;
+}
+
 .schedule-placement-card.is-stats-waiting {
   pointer-events: none;
 }
@@ -1131,6 +1146,7 @@ body.is-schedule-resizing {
 }
 
 .schedule-utc-hour {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1153,6 +1169,24 @@ body.is-schedule-resizing {
 .schedule-utc-hour.is-row-pinned {
   background: rgba(88, 166, 255, 0.16);
   color: var(--text);
+}
+
+/* Current UTC hour — same pulse as demo `history-hour-slot-recording`. */
+.schedule-utc-hour.is-now {
+  z-index: 3;
+  color: var(--text);
+}
+
+.schedule-utc-hour.is-now.is-pulse-synced::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid #ef4444;
+  background: transparent;
+  pointer-events: none;
+  z-index: 4;
+  animation: schedule-now-pulse 1.3s ease-in-out infinite;
+  animation-delay: var(--schedule-pulse-delay, 0ms);
 }
 
 .schedule-utc-hour:last-child {
@@ -1275,19 +1309,35 @@ body.is-schedule-resizing {
   box-sizing: border-box;
 }
 
-.schedule-hour-slot::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  border-top: 1px solid #21262d;
-  pointer-events: none;
-  z-index: 1;
-}
-
 .schedule-hour-slot:last-child {
   border-bottom: none;
+}
+
+/* Active day+hour heatmap/schedule slot — demo `history-hour-slot-recording`. */
+.schedule-hour-slot.is-now {
+  z-index: 3;
+}
+
+.schedule-hour-slot.is-now.is-pulse-synced::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid #ef4444;
+  background: transparent;
+  pointer-events: none;
+  z-index: 4;
+  animation: schedule-now-pulse 1.3s ease-in-out infinite;
+  animation-delay: var(--schedule-pulse-delay, 0ms);
+}
+
+@keyframes schedule-now-pulse {
+  0%,
+  100% {
+    border-color: rgba(239, 68, 68, 1);
+  }
+  50% {
+    border-color: rgba(239, 68, 68, 0.3);
+  }
 }
 
 .schedule-heatmap-row {
@@ -1346,6 +1396,95 @@ body.is-schedule-resizing {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
+}
+
+.schedule-summary-label {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.schedule-summary-range-label {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  max-height: 18px;
+  color: #8b949e;
+  cursor: pointer;
+}
+
+.schedule-summary-range-label:hover,
+.schedule-summary-range-label:focus-within {
+  color: #e6edf3;
+}
+
+.schedule-summary-range {
+  display: inline-block;
+  box-sizing: border-box;
+  height: 18px;
+  max-height: 18px;
+  max-width: none;
+  margin: 0;
+  padding: 0 12px 0 0;
+  /* Match wrap bg so Windows system select chrome blends away. */
+  border: 1px solid var(--bg) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background-color: var(--bg) !important;
+  background-image: none !important;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  color-scheme: dark;
+}
+
+.schedule-summary-range:hover,
+.schedule-summary-range:focus,
+.schedule-summary-range:active,
+.schedule-summary-range:focus-visible {
+  border: 1px solid var(--bg) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background-color: var(--bg) !important;
+  color: inherit;
+}
+
+.schedule-summary-range::-ms-expand {
+  display: none;
+}
+
+.schedule-summary-range-caret {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  display: block;
+  pointer-events: none;
+}
+
+.schedule-summary-range option {
+  color: #e6edf3;
+  background-color: #161b22;
 }
 
 .schedule-highlighted-summary {
@@ -1426,7 +1565,8 @@ body.is-schedule-resizing {
   background: var(--muted);
 }
 
-.schedule-highlighted-clear-btn {
+.schedule-highlighted-clear-btn,
+.schedule-summary-action-btn {
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -1441,10 +1581,16 @@ body.is-schedule-resizing {
   cursor: pointer;
 }
 
-.schedule-highlighted-clear-btn svg {
+.schedule-highlighted-clear-btn svg,
+.schedule-summary-action-btn svg {
   width: 14px;
   height: 14px;
   display: block;
+}
+
+.schedule-summary-action-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .schedule-highlighted-clear-btn:hover {
@@ -2638,6 +2784,14 @@ body.is-column-resizing * {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  padding: 0.2rem 0.45rem;
+  line-height: 1.2;
+  box-sizing: content-box;
+  display: inline-block;
+  width: 5ch;
+  text-align: center;
 }
 
 .quote-box-up {
