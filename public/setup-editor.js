@@ -45,6 +45,8 @@
           minGap: 0,
           maxGap: 0,
           gapVsPtb: "opposite",
+          buyStabilizeTicks: 1,
+          buyStabilizeRange: 0,
           sellProfitCents: 20,
         },
         {
@@ -56,6 +58,8 @@
           minGap: 0,
           maxGap: 0,
           gapVsPtb: "opposite",
+          buyStabilizeTicks: 1,
+          buyStabilizeRange: 0,
           sellProfitCents: 20,
         },
         {
@@ -67,6 +71,8 @@
           minGap: 0,
           maxGap: 0,
           gapVsPtb: "opposite",
+          buyStabilizeTicks: 1,
+          buyStabilizeRange: 0,
           sellProfitCents: 20,
         },
       ],

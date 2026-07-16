@@ -10,7 +10,7 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
-import { gapAllowsBuy, priceToCents, SIDES_ORDER } from "./phase-config.js";
+import { assetPricesFromState, gapAllowsBuy, priceToCents, SIDES_ORDER, stabilizeAllowsBuy } from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -479,6 +479,13 @@ export class SimulatorEngine {
   ): void {
     if (this.position) return;
 
+    const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
+    const phase = setup.phases[phaseIdx];
+    if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) {
+      logService.error("sim", `FAK buy skipped after latency (stabilize filter)`);
+      return;
+    }
+
     const ask = bestAskForSide(quote, side);
     if (ask == null || !Number.isFinite(ask) || priceToCents(ask) > triggerCents) {
       logService.error("sim", `FAK buy skipped after latency (ask above trigger or missing)`);
@@ -492,7 +499,6 @@ export class SimulatorEngine {
       return;
     }
 
-    const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     this.applyBuyFill(side, fill, nowSec, state, phaseIdx, "taker");
     this.buyWatch = null;
   }
@@ -645,6 +651,7 @@ export class SimulatorEngine {
   ): void {
     if (phase.buyOptimize || !phase.buyEnabled) return;
     if (this.position || this.restingGtd || this.pendingBuy) return;
+    if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) return;
 
     let chosenSide: Side | null = null;
     for (const side of SIDES_ORDER) {
@@ -678,20 +685,24 @@ export class SimulatorEngine {
   private syncRestingGtdForPhase(
     phase: SimSetup["phases"][number],
     phaseIdx: number,
+    state: LiveWindowState,
   ): void {
     if (!phase.buyOptimize) this.buyWatch = null;
     if (!this.restingGtd) return;
     if (
       this.restingGtd.phaseIdx !== phaseIdx ||
       phase.buyOptimize ||
-      !phase.buyEnabled
+      !phase.buyEnabled ||
+      !stabilizeAllowsBuy(phase, assetPricesFromState(state))
     ) {
       this.cancelRestingGtd(
         this.restingGtd.phaseIdx !== phaseIdx
           ? "phase change"
           : phase.buyOptimize
             ? "optimize on"
-            : "buy disabled",
+            : !phase.buyEnabled
+              ? "buy disabled"
+              : "stabilize filter",
       );
     }
   }
@@ -700,9 +711,15 @@ export class SimulatorEngine {
     quote: DepthQuote,
     nowSec: number,
     state: LiveWindowState,
+    phase: SimSetup["phases"][number],
   ): void {
     const resting = this.restingGtd;
     if (!resting) return;
+
+    if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) {
+      this.cancelRestingGtd("stabilize filter");
+      return;
+    }
 
     const fill = fillMakerLimitBuyAvailable(
       asksForSide(quote, resting.side),
@@ -732,6 +749,8 @@ export class SimulatorEngine {
     const shares = Math.max(1, phase.buyShares || 1);
     const triggerCents = phase.buyTrigger;
     const assetGap = state.assetGap;
+    const assetPrices = assetPricesFromState(state);
+    if (!stabilizeAllowsBuy(phase, assetPrices)) return;
 
     for (const side of SIDES_ORDER) {
       const ask = bestAskForSide(quote, side);
@@ -755,7 +774,7 @@ export class SimulatorEngine {
       };
       logService.info(
         "sim",
-        `Buy optimize armed: ${side} touched ${triggerCents}¢ (gap filter passed)`,
+        `Buy optimize armed: ${side} touched ${triggerCents}¢ (gap + stabilize passed)`,
       );
       return;
     }
@@ -773,6 +792,9 @@ export class SimulatorEngine {
     const ask = bestAskForSide(quote, w.side);
     if (ask == null || !Number.isFinite(ask)) return;
     const askCents = priceToCents(ask);
+    const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
+    const phase = setup.phases[phaseIdx];
+    const assetPrices = assetPricesFromState(state);
 
     if (askCents > w.triggerCents) {
       // Pause until trigger is touched again.
@@ -788,7 +810,11 @@ export class SimulatorEngine {
         w.prevAskCents = askCents;
         return;
       }
-      // Re-touch — gap already validated at first arm.
+      // Re-touch — gap already validated at first arm; re-check stabilize.
+      if (!stabilizeAllowsBuy(phase, assetPrices)) {
+        w.prevAskCents = askCents;
+        return;
+      }
       w.armed = true;
       w.stallCents = null;
       w.stallTicks = 0;
@@ -799,6 +825,7 @@ export class SimulatorEngine {
 
     // FAK: any available size is enough (partial OK).
     if (totalLevelSize(asksForSide(quote, w.side)) <= 0) return;
+    if (!stabilizeAllowsBuy(phase, assetPrices)) return;
 
     // Hunting at ≤ trigger.
     if (askCents <= w.triggerCents) {
@@ -856,11 +883,11 @@ export class SimulatorEngine {
     this.processPendingFills(state, setup, quote, nowSec, simNowMs);
 
     // GTD resting: cancel on phase/optimize change, fill from book, place when active.
-    this.syncRestingGtdForPhase(phase, phaseIdx);
-    this.tickRestingGtd(quote, nowSec, state);
+    this.syncRestingGtdForPhase(phase, phaseIdx, state);
+    this.tickRestingGtd(quote, nowSec, state, phase);
     if (!this.position || this.restingGtd) {
       this.tryPlaceRestingGtd(phase, phaseIdx, state);
-      this.tickRestingGtd(quote, nowSec, state);
+      this.tickRestingGtd(quote, nowSec, state, phase);
     }
 
     if (!this.position && !this.pendingBuy && !this.restingGtd) {

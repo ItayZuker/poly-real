@@ -150,7 +150,8 @@ export class DisplayService {
     if (this.state.prevCloseAsset != null) {
       this.state.assetGap = live.value - this.state.prevCloseAsset;
     }
-    this.state.lastTickMs = live.timestampMs;
+    const tickMs = live.timestampMs;
+    this.state.lastTickMs = tickMs;
 
     const nowSec = Math.floor(Date.now() / 1000);
     if (nowSec >= this.state.windowStart && nowSec < this.state.windowEnd) {
@@ -160,7 +161,10 @@ export class DisplayService {
       }
     }
 
-    this.notify();
+    void (async () => {
+      await liveTradingRegistry.tickAll(this.state, tickMs);
+      this.notify();
+    })();
   }
 
   private async prefetchNextWindowTokens(): Promise<void> {

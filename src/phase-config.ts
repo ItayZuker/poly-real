@@ -1,6 +1,7 @@
 import type { BuyOrderType, GapVsPtb, LiveWindowState, SimPhaseConfig, TradingPhaseSetup } from "./types.js";
 
 const SIDES_ORDER = ["up", "down"] as const;
+const MAX_STABILIZE_TICKS = 500;
 
 export function defaultPhaseConfig(): SimPhaseConfig {
   return {
@@ -12,6 +13,8 @@ export function defaultPhaseConfig(): SimPhaseConfig {
     minGap: 0,
     maxGap: 0,
     gapVsPtb: "opposite",
+    buyStabilizeTicks: 1,
+    buyStabilizeRange: 0,
     sellProfitCents: 20,
   };
 }
@@ -23,6 +26,19 @@ function asGapVsPtb(value: unknown, fallback: GapVsPtb = "opposite"): GapVsPtb {
 function asMoneyGap(value: unknown): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round(n * 100) / 100;
+}
+
+function asStabilizeTicks(value: unknown): number {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(MAX_STABILIZE_TICKS, n);
+}
+
+function asStabilizeRange(ticks: number, value: unknown): number {
+  if (ticks <= 1) return 0;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
   return Math.round(n * 100) / 100;
 }
 
@@ -43,6 +59,7 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     buyOptimize = raw.buyOptimize > 0;
   }
 
+  const buyStabilizeTicks = asStabilizeTicks(raw.buyStabilizeTicks ?? base.buyStabilizeTicks);
   return {
     buyEnabled: Boolean(raw.buyEnabled ?? base.buyEnabled),
     buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
@@ -52,6 +69,8 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     minGap: asMoneyGap(raw.minGap),
     maxGap: asMoneyGap(raw.maxGap),
     gapVsPtb: asGapVsPtb(raw.gapVsPtb, base.gapVsPtb),
+    buyStabilizeTicks,
+    buyStabilizeRange: asStabilizeRange(buyStabilizeTicks, raw.buyStabilizeRange),
     sellProfitCents: Math.max(
       1,
       Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
@@ -89,6 +108,45 @@ export function gapAllowsBuy(
     side === "up" ? phase.gapVsPtb === "with" : phase.gapVsPtb === "opposite";
   if (wantAbovePtb) return assetGap > 0;
   return assetGap < 0;
+}
+
+/** Underlying asset $ samples from Chainlink / RTDS priceHistory (same series as heatmap). */
+export function assetPricesFromState(
+  state: { priceHistory?: Array<{ price: number }> } | null | undefined,
+): number[] {
+  const hist = state?.priceHistory;
+  if (!hist?.length) return [];
+  const out: number[] = [];
+  for (const p of hist) {
+    if (p && Number.isFinite(p.price)) out.push(p.price);
+  }
+  return out;
+}
+
+/**
+ * Stabilize filter: last N asset-price samples must span ≤ buyStabilizeRange.
+ * ticks ≤ 1 → off (allow). Fewer than N samples → block.
+ */
+export function stabilizeAllowsBuy(
+  phase: SimPhaseConfig,
+  assetPrices: ReadonlyArray<number> | null | undefined,
+): boolean {
+  const ticks = phase.buyStabilizeTicks ?? 1;
+  if (ticks <= 1) return true;
+  if (!assetPrices || assetPrices.length < ticks) return false;
+
+  const start = assetPrices.length - ticks;
+  let min = assetPrices[start]!;
+  let max = min;
+  if (!Number.isFinite(min)) return false;
+  for (let i = start + 1; i < assetPrices.length; i++) {
+    const p = assetPrices[i]!;
+    if (!Number.isFinite(p)) return false;
+    if (p < min) min = p;
+    if (p > max) max = p;
+  }
+  const range = phase.buyStabilizeRange ?? 0;
+  return max - min <= range + 1e-9;
 }
 
 export function priceToCents(price: number): number {

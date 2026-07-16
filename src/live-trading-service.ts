@@ -46,11 +46,13 @@ import {
 } from "./db/user-repository.js";
 import { isTradingExecutor } from "./trading-executor.js";
 import {
+  assetPricesFromState,
   centsToPrice,
   gapAllowsBuy,
   gtdExpirationUnix,
   phaseIndexForState,
   SIDES_ORDER,
+  stabilizeAllowsBuy,
 } from "./phase-config.js";
 import type {
   LiveWindowState,
@@ -1051,6 +1053,7 @@ export class LiveTradingService {
         // Optimize-off buys are resting GTD limits — do not mirror sim market fires.
         const phase = this.phaseAtTime(setup, state, marker.t);
         if (!phase.buyOptimize) continue;
+        if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) continue;
         if (this.positions[marker.side]) continue;
         await this.executeOrder(state, marker.side, "buy", marker.shares, "auto", "shares", "FAK");
       } else if (marker.type === "sell") {
@@ -1081,18 +1084,26 @@ export class LiveTradingService {
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const key = sessionKey(state);
+    const stabilizeOk = stabilizeAllowsBuy(phase, assetPricesFromState(state));
 
-    // Phase changed or optimize/disabled — cancel prior resting buy.
+    // Phase changed or optimize/disabled/stabilize — cancel prior resting buy.
     if (this.restingBuy) {
       const r = this.restingBuy;
       if (
         r.sessionKey !== key ||
         r.phaseIdx !== phaseIdx ||
         phase.buyOptimize ||
-        !phase.buyEnabled
+        !phase.buyEnabled ||
+        !stabilizeOk
       ) {
         await this.cancelRestingBuy(
-          r.phaseIdx !== phaseIdx ? "phase change" : phase.buyOptimize ? "optimize on" : "buy disabled",
+          r.phaseIdx !== phaseIdx
+            ? "phase change"
+            : phase.buyOptimize
+              ? "optimize on"
+              : !phase.buyEnabled
+                ? "buy disabled"
+                : "stabilize filter",
         );
       }
     }
@@ -1105,6 +1116,7 @@ export class LiveTradingService {
 
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;
+    if (!stabilizeOk) return;
     if (this.positions.up || this.positions.down) return;
     if (this.restingBuy) return;
 

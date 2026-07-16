@@ -228,6 +228,16 @@ export interface SimPhaseConfig {
   maxGap: number;
   /** Gap direction relative to the side being bought. */
   gapVsPtb: GapVsPtb;
+  /**
+   * Stabilize lookback in underlying asset-price samples.
+   * 1 = filter off; ≥2 = on. Cap 500.
+   */
+  buyStabilizeTicks: number;
+  /**
+   * Max allowed max(price)−min(price) over the last buyStabilizeTicks samples ($).
+   * Forced to 0 when ticks ≤ 1.
+   */
+  buyStabilizeRange: number;
   /** Sell limit = buy + this many cents. */
   sellProfitCents: number;
 }

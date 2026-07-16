@@ -5,7 +5,7 @@ import {
 import type { MarketDocument } from "./types.js";
 import { getTradingSetupById } from "./db/trading-setup-repository.js";
 import type { SchedulePlacementListItem } from "./db/schedule-placement-repository.js";
-import { listBookReplayTicks } from "./db/replay-tick-repository.js";
+import { listReplayTicks } from "./db/replay-tick-repository.js";
 import { getRollingCutoffUtcSec } from "./heatmap-service.js";
 import { SimulatorEngine } from "./simulator-engine.js";
 import { phaseSetupToSimSetup } from "./simulator-service.js";
@@ -157,6 +157,7 @@ function replayTickToState(
   series: string,
   windowStart: number,
   windowEnd: number,
+  priceHistory: Array<{ t: number; price: number }>,
 ): LiveWindowState {
   return {
     series,
@@ -182,7 +183,7 @@ function replayTickToState(
     minAssetPrice: tick.minAssetPrice,
     maxAssetPrice: tick.maxAssetPrice,
     assetRange: tick.assetRange,
-    priceHistory: [],
+    priceHistory,
   };
 }
 
@@ -220,7 +221,7 @@ export async function simulateRecordedWindow(
 
   let ticks = tickCache?.get(window.windowStart);
   if (!ticks) {
-    ticks = await listBookReplayTicks(market, window.windowStart, 50_000);
+    ticks = await listReplayTicks(market, window.windowStart, 50_000);
     tickCache?.set(window.windowStart, ticks);
   }
   const windowEnd = window.windowEnd;
@@ -246,16 +247,28 @@ export async function simulateRecordedWindow(
   }
 
   const engine = new SimulatorEngine();
+  const priceHistory: Array<{ t: number; price: number }> = [];
 
   for (const tick of ticks) {
     if (tick.tMs >= windowEnd * 1000) break;
-    const state = replayTickToState(tick, series, windowStart, windowEnd);
+    // Same series as live heatmap: append on each Chainlink sample (incl. same $).
+    if (
+      tick.source === "chainlink-tick" &&
+      tick.assetPrice != null &&
+      Number.isFinite(tick.assetPrice)
+    ) {
+      priceHistory.push({ t: tick.t, price: tick.assetPrice });
+      if (priceHistory.length > 2000) {
+        priceHistory.splice(0, priceHistory.length - 2000);
+      }
+    }
+    const state = replayTickToState(tick, series, windowStart, windowEnd, priceHistory);
     engine.tick(state, setup, tick.tMs);
   }
 
   const lastInWindow = [...ticks].reverse().find((t) => t.tMs < windowEnd * 1000) ?? ticks[ticks.length - 1];
   const endMs = windowEnd * 1000 - 1;
-  const endState = replayTickToState(lastInWindow, series, windowStart, windowEnd);
+  const endState = replayTickToState(lastInWindow, series, windowStart, windowEnd, priceHistory);
   engine.tick({ ...endState, lastTickMs: endMs }, setup, endMs);
 
   // Settle from stored Polymarket outcome in window JSON (backfilled / recorded at finalize).

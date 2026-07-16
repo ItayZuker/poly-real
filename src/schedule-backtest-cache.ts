@@ -6,7 +6,7 @@ import { readJsonFile, writeJsonFile } from "./db/file-store.js";
 import type { PlacementBacktestStats } from "./schedule-backtest-service.js";
 
 /** Bump when simulator/backtest rules change. */
-export const SCHEDULE_BACKTEST_CACHE_VERSION = "5";
+export const SCHEDULE_BACKTEST_CACHE_VERSION = "6";
 
 interface CacheEntry {
   cacheKey: string;
