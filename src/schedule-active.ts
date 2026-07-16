@@ -25,6 +25,34 @@ export function getUtcScheduleClock(now = new Date()): { day: ScheduleDayId; hou
   return { day, hour };
 }
 
+/** Sort key within the UTC week (Sun=0 … Sat=6, then start hour). */
+export function schedulePlacementSortKey(placement: {
+  day: ScheduleDayId;
+  startHour: number;
+}): number {
+  const dayMap: Record<ScheduleDayId, number> = {
+    sun: 0,
+    mon: 1,
+    tue: 2,
+    wed: 3,
+    thu: 4,
+    fri: 5,
+    sat: 6,
+  };
+  return (dayMap[placement.day] ?? 0) * 24 + placement.startHour;
+}
+
+/** True when this week's slot has fully ended (before the current UTC clock). */
+export function isSchedulePlacementElapsed(
+  placement: { day: ScheduleDayId; startHour: number; durationHours: number },
+  now = new Date(),
+): boolean {
+  const { day, hour } = getUtcScheduleClock(now);
+  const nowKey = schedulePlacementSortKey({ day, startHour: hour });
+  const endKey = schedulePlacementSortKey(placement) + placement.durationHours;
+  return endKey <= nowKey + 1e-9;
+}
+
 export function isScheduleContextActive(
   ctx: Pick<ActiveScheduleContext, "day" | "startHour" | "durationHours">,
   now = new Date(),

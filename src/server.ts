@@ -476,10 +476,30 @@ app.post("/api/trading/order", async (req, res) => {
 
 app.post("/api/trading/positions/clear", async (req, res) => {
   try {
-    // Reset Live counters only — history stays in Mongo for Week / All time.
+    // Reset Live header counters only — history stays in Mongo for Week / All time.
+    // Schedule placement card stats keep collecting until cards are removed.
     tradingFor(req).clearPositionCards();
     pushWindowState();
     res.json({ ok: true, archived: false });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/** Reload schedule-card / Live stats from Mongo into RAM (e.g. after restore script). */
+app.post("/api/trading/stats/rehydrate", async (req, res) => {
+  try {
+    await tradingFor(req).hydrateLiveStatsFromMongo();
+    pushWindowState();
+    const live = tradingFor(req).getLiveSessionTotals();
+    res.json({
+      ok: true,
+      green: live.green,
+      red: live.red,
+      blue: live.blue,
+      pnl: live.pnl,
+      placementStats: live.placementStats,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

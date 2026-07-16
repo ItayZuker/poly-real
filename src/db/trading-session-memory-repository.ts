@@ -67,7 +67,8 @@ type TradingSessionMemoryDoc = {
   liveResetAt?: string | null;
   /**
    * Schedule placements that were live while `startTrading` was on (even with no fills).
-   * Survives restart until Live reset — cards show 0/0/0 instead of "—".
+   * Survives restart and header Live reset — cleared only when the placement is removed.
+   * Cards show 0/0/0 instead of "—" until the first fill.
    */
   activatedPlacementIds?: string[];
   sessions?: TradingSessionMemoryEntry[];
@@ -211,13 +212,16 @@ export async function getLiveResetAt(userId: string): Promise<string | null> {
   return doc?.liveResetAt ?? null;
 }
 
-/** Mark Live range start; does not delete historical events (Week / All time keep them). */
+/**
+ * Mark Live header-range start. Does not delete events, and does not clear
+ * activatedPlacementIds — schedule cards keep collecting until removed.
+ */
 export async function markLiveReset(userId: string, at = new Date().toISOString()): Promise<void> {
   await ensureReady();
   const now = new Date().toISOString();
   await (await metaCollection()).updateOne(
     { _id: userId },
-    { $set: { liveResetAt: at, activatedPlacementIds: [], updatedAt: now } },
+    { $set: { liveResetAt: at, updatedAt: now } },
     { upsert: true },
   );
 }

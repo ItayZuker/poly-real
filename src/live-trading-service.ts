@@ -1,8 +1,11 @@
 import {
   findActiveScheduleContext,
   isScheduleContextActive,
+  isSchedulePlacementElapsed,
+  schedulePlacementSortKey,
   type ActiveScheduleContext,
 } from "./schedule-active.js";
+import { listSchedulePlacements } from "./db/schedule-placement-repository.js";
 import {
   cancelOpenOrder,
   fetchOpenOrder,
@@ -33,6 +36,7 @@ import {
 } from "./taker-fee.js";
 import {
   addActivatedPlacementId,
+  getLiveResetAt,
   listActivatedPlacementIds,
   listTradingStatEvents,
   markLiveReset,
@@ -194,6 +198,17 @@ function eventFingerprint(
   ].join("|");
 }
 
+function eventSettledMs(event: TradingStatEvent): number {
+  const at = Date.parse(event.settledAt);
+  return Number.isFinite(at) ? at : NaN;
+}
+
+function cardSettledMs(card: TradingPositionCard): number {
+  const sec = card.soldAt ?? card.buyAt;
+  if (sec == null || !Number.isFinite(sec)) return NaN;
+  return sec * 1000;
+}
+
 function cardSnapshotFromPosition(card: TradingPositionCard): TradingStatEvent["card"] {
   if (card.status === "open") return undefined;
   const snap: NonNullable<TradingStatEvent["card"]> = {
@@ -318,12 +333,14 @@ export class LiveTradingService {
   /** Placement ids that have had schedule auto-trades this session (for live card stats). */
   private knownPlacementIds = new Set<string>();
   /**
-   * Settled contributions for Live range (RAM cards + Mongo hydrate after restart).
-   * Keyed by cardId — survives restart until Live reset.
+   * Settled contributions for schedule card stats + Live header (filtered by liveResetAtMs).
+   * Keyed by cardId — survives restart and header Live reset; cleared per placement on remove.
    */
   private liveStatLedger = new Map<string, TradingStatEvent>();
   /** Last written fingerprints — skip identical Mongo upserts. */
   private lastPersistedStatFingerprint = new Map<string, string>();
+  /** Header "Live" range cut — events at/before this ms are excluded from session totals only. */
+  private liveResetAtMs: number | null = null;
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
@@ -374,10 +391,14 @@ export class LiveTradingService {
     return this.getConfig();
   }
 
-  /** Reload Live-range settled events from Mongo (after boot / reset). */
+  /** Reload settled events from Mongo (after boot). Card stats keep full history; Live header uses liveResetAt. */
   async hydrateLiveStatsFromMongo(): Promise<void> {
     try {
-      const events = await listTradingStatEvents(this.userId, { afterLiveReset: true });
+      const resetAt = await getLiveResetAt(this.userId);
+      const resetMs = resetAt ? Date.parse(resetAt) : NaN;
+      this.liveResetAtMs = Number.isFinite(resetMs) ? resetMs : null;
+
+      const events = await listTradingStatEvents(this.userId, {});
       const activated = await listActivatedPlacementIds(this.userId);
       this.liveStatLedger.clear();
       this.lastPersistedStatFingerprint.clear();
@@ -407,13 +428,17 @@ export class LiveTradingService {
         "trading",
         `Hydrated ${events.length} live stat event(s) from Mongo (${restored.length} position card(s), ${this.knownPlacementIds.size} placement(s))`,
       );
+      await this.syncActivatedSchedulePlacements();
     } catch (err) {
       logService.warn("trading", `Failed to hydrate live stats from Mongo: ${String(err)}`);
     }
   }
 
   /** Mark a schedule placement as live this session so cards show 0/0/0 until the first fill. */
-  private rememberActivatedPlacement(placementId: string | undefined): void {
+  private rememberActivatedPlacement(
+    placementId: string | undefined,
+    opts?: { quiet?: boolean },
+  ): void {
     if (!placementId || this.knownPlacementIds.has(placementId)) return;
     this.knownPlacementIds.add(placementId);
     this.statsPersistChain = this.statsPersistChain
@@ -424,7 +449,52 @@ export class LiveTradingService {
           `Failed to persist activated placement ${placementId}: ${String(err)}`,
         );
       });
-    this.notify();
+    if (!opts?.quiet) this.notify();
+  }
+
+  /**
+   * Zero-trade slots that already ran (or sit between slots with live activity) should
+   * show gray +$0.00 / 0·0·0 — not dashes.
+   */
+  private async syncActivatedSchedulePlacements(): Promise<void> {
+    if (!this.config.autoTrade || !this.config.useSchedule) return;
+
+    let placements: Awaited<ReturnType<typeof listSchedulePlacements>>;
+    try {
+      placements = await listSchedulePlacements(this.userId);
+    } catch {
+      return;
+    }
+    if (placements.length === 0) return;
+
+    let changed = false;
+    const remember = (id: string): void => {
+      if (this.knownPlacementIds.has(id)) return;
+      this.rememberActivatedPlacement(id, { quiet: true });
+      changed = true;
+    };
+
+    if (this.config.startTrading) {
+      for (const p of placements) {
+        if (isSchedulePlacementElapsed(p)) remember(p._id);
+      }
+    }
+
+    const keyed = placements
+      .map((p) => ({ p, key: schedulePlacementSortKey(p) }))
+      .sort((a, b) => a.key - b.key);
+    const knownKeys = keyed
+      .filter(({ p }) => this.knownPlacementIds.has(p._id))
+      .map(({ key }) => key);
+    if (knownKeys.length >= 1) {
+      const minK = Math.min(...knownKeys);
+      const maxK = Math.max(...knownKeys);
+      for (const { p, key } of keyed) {
+        if (key >= minK && key <= maxK) remember(p._id);
+      }
+    }
+
+    if (changed) this.notify();
   }
 
   private persistCardStat(card: TradingPositionCard): void {
@@ -677,7 +747,7 @@ export class LiveTradingService {
     this.notify();
   }
 
-  /** Snapshot of settled live counters (Live range: RAM + hydrated Mongo since reset). */
+  /** Snapshot of settled live counters (Live range: RAM + hydrated Mongo since header reset). */
   getLiveSessionTotals(): {
     green: number;
     red: number;
@@ -697,6 +767,7 @@ export class LiveTradingService {
 
     for (const card of this.positionCards) {
       if (card.status === "open") continue;
+      if (!this.countsTowardLiveHeader(cardSettledMs(card))) continue;
       const contrib = contributionFromCard(card);
       if (!contrib) continue;
       seen.add(card.id);
@@ -711,11 +782,12 @@ export class LiveTradingService {
 
     for (const event of this.liveStatLedger.values()) {
       if (seen.has(event.cardId)) continue;
+      if (!this.countsTowardLiveHeader(eventSettledMs(event))) continue;
       green += event.green ?? 0;
       red += event.red ?? 0;
       blue += event.blue ?? 0;
       pnl += event.pnl ?? 0;
-      const settled = Date.parse(event.settledAt);
+      const settled = eventSettledMs(event);
       if (Number.isFinite(settled)) {
         const buyAtSec = Math.floor(settled / 1000);
         if (earliestBuyAt == null || buyAtSec < earliestBuyAt) earliestBuyAt = buyAtSec;
@@ -744,25 +816,25 @@ export class LiveTradingService {
     return out;
   }
 
-  /** Clears settled/sold history for Live; Week/All keep Mongo events. */
+  private countsTowardLiveHeader(settledAtMs: number): boolean {
+    if (!Number.isFinite(settledAtMs)) return false;
+    if (this.liveResetAtMs == null) return true;
+    return settledAtMs > this.liveResetAtMs;
+  }
+
+  /**
+   * Reset header "Live" counters only. Schedule placement cards keep collecting;
+   * Week / All keep Mongo events. Does not clear activated placements or card ledgers.
+   */
   clearPositionCards(): void {
-    const keepIds = new Set(
-      [this.positions.up?.cardId, this.positions.down?.cardId].filter(Boolean) as string[],
-    );
-    this.positionCards = this.positionCards.filter(
-      (card) => card.status === "open" && keepIds.has(card.id),
-    );
-    this.knownPlacementIds = new Set(
-      this.positionCards.map((c) => c.placementId).filter(Boolean) as string[],
-    );
-    this.liveStatLedger.clear();
-    this.lastPersistedStatFingerprint.clear();
+    const at = new Date().toISOString();
+    const ms = Date.parse(at);
+    this.liveResetAtMs = Number.isFinite(ms) ? ms : Date.now();
     this.statsPersistChain = this.statsPersistChain
-      .then(() => markLiveReset(this.userId))
+      .then(() => markLiveReset(this.userId, at))
       .catch((err) => {
         logService.warn("trading", `Failed to mark live stats reset: ${String(err)}`);
       });
-    this.stopConfirmLoopIfIdle();
     this.notify();
   }
 
@@ -980,6 +1052,7 @@ export class LiveTradingService {
     ) {
       this.rememberActivatedPlacement(nextPlacementId);
     }
+    await this.syncActivatedSchedulePlacements();
     if (prevVisible !== this.shouldShowPhases() || prevPlacementId !== nextPlacementId) {
       this.notify();
     }

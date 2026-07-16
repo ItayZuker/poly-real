@@ -415,7 +415,7 @@ export interface TradingPublicState {
   positions: { up: LiveSidePosition | null; down: LiveSidePosition | null };
   positionCards: TradingPositionCard[];
   placementStats: PlacementLiveStats[];
-  /** All settled real outcomes since Live reset (includes trades without a schedule card). */
+  /** Settled real outcomes in the header Live range (after last header reset; includes trades without a schedule card). */
   sessionTotals: {
     green: number;
     red: number;

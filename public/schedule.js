@@ -1081,13 +1081,18 @@
       return;
     }
 
+    // Header Live / Demo totals only — schedule placement cards keep collecting.
     liveSessionTotals = emptyTotals();
     clearDemoHitsStore();
-    for (const placement of placements) {
-      placementStats.set(placement._id, emptyLiveStats(placement._id));
+    if (headerSummaryRange === "live") {
+      renderHeaderSummaryTotals(liveSessionTotals);
+    } else if (headerSummaryRange === "demo") {
+      renderHeaderSummaryTotals(demoHitsStore.totals);
+    } else if (headerSummaryRange === "schedule") {
+      renderHeaderSummaryTotals(scheduleTotals());
+    } else {
+      void fetchHeaderSummaryTotals();
     }
-    applyCardStatsStates();
-    void fetchHeaderSummaryTotals();
   }
 
   function bindWeekSummaryReset() {
