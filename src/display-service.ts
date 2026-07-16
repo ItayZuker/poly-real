@@ -13,6 +13,7 @@ import {
 } from "./market-pair.js";
 import { takeLevels } from "./book-depth.js";
 import { pickDisplayPrice } from "./quote-price.js";
+import { recordAskSamples } from "./phase-config.js";
 import { simulatorService } from "./simulator-service.js";
 import { liveTradingRegistry } from "./live-trading-service.js";
 import { resolveTakerFeeParams } from "./taker-fee.js";
@@ -44,6 +45,8 @@ export class DisplayService {
       windowStart: now,
       windowEnd: now + 300,
       priceHistory: [],
+      upAskCentsSamples: [],
+      downAskCentsSamples: [],
     };
   }
 
@@ -92,7 +95,12 @@ export class DisplayService {
   }
 
   getState(): LiveWindowState {
-    return { ...this.state, priceHistory: [...this.state.priceHistory] };
+    return {
+      ...this.state,
+      priceHistory: [...this.state.priceHistory],
+      upAskCentsSamples: [...(this.state.upAskCentsSamples ?? [])],
+      downAskCentsSamples: [...(this.state.downAskCentsSamples ?? [])],
+    };
   }
 
   onUpdate(listener: UpdateListener): () => void {
@@ -135,6 +143,7 @@ export class DisplayService {
     if (feedLatency != null) {
       this.state.feedLatencyMs = feedLatency;
     }
+    recordAskSamples(this.state);
     void (async () => {
       await liveTradingRegistry.tickAll(this.state, tickMs);
       this.notify();
@@ -206,6 +215,8 @@ export class DisplayService {
 
       if (this.state.windowStart !== pair.windowStart) {
         this.state.priceHistory = [];
+        this.state.upAskCentsSamples = [];
+        this.state.downAskCentsSamples = [];
       }
 
       this.state.series = this.series;

@@ -2,6 +2,7 @@ import type { BuyOrderType, GapVsPtb, LiveWindowState, SimPhaseConfig, TradingPh
 
 const SIDES_ORDER = ["up", "down"] as const;
 const MAX_STABILIZE_TICKS = 500;
+export const MAX_ASK_CENTS_SAMPLES = 2000;
 
 export function defaultPhaseConfig(): SimPhaseConfig {
   return {
@@ -37,9 +38,9 @@ function asStabilizeTicks(value: unknown): number {
 
 function asStabilizeRange(ticks: number, value: unknown): number {
   if (ticks <= 1) return 0;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  return Math.round(n * 100) / 100;
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.max(1, Math.min(99, n));
 }
 
 /** Resolve order type from optimize flag (migrates legacy FOK → FAK). */
@@ -110,43 +111,59 @@ export function gapAllowsBuy(
   return assetGap < 0;
 }
 
-/** Underlying asset $ samples from Chainlink / RTDS priceHistory (same series as heatmap). */
-export function assetPricesFromState(
-  state: { priceHistory?: Array<{ price: number }> } | null | undefined,
-): number[] {
-  const hist = state?.priceHistory;
-  if (!hist?.length) return [];
-  const out: number[] = [];
-  for (const p of hist) {
-    if (p && Number.isFinite(p.price)) out.push(p.price);
+/** Append best-ask ¢ samples from the current book snapshot (one sample per side per book tick). */
+export function recordAskSamples(state: LiveWindowState): void {
+  if (state.yesAsk != null && Number.isFinite(state.yesAsk)) {
+    if (!state.upAskCentsSamples) state.upAskCentsSamples = [];
+    state.upAskCentsSamples.push(Math.round(state.yesAsk * 100));
+    if (state.upAskCentsSamples.length > MAX_ASK_CENTS_SAMPLES) {
+      state.upAskCentsSamples.splice(0, state.upAskCentsSamples.length - MAX_ASK_CENTS_SAMPLES);
+    }
   }
-  return out;
+  if (state.noAsk != null && Number.isFinite(state.noAsk)) {
+    if (!state.downAskCentsSamples) state.downAskCentsSamples = [];
+    state.downAskCentsSamples.push(Math.round(state.noAsk * 100));
+    if (state.downAskCentsSamples.length > MAX_ASK_CENTS_SAMPLES) {
+      state.downAskCentsSamples.splice(0, state.downAskCentsSamples.length - MAX_ASK_CENTS_SAMPLES);
+    }
+  }
+}
+
+export function askCentsSamplesForSide(
+  state: Pick<LiveWindowState, "upAskCentsSamples" | "downAskCentsSamples"> | null | undefined,
+  side: "up" | "down",
+): number[] {
+  if (!state) return [];
+  return side === "up" ? (state.upAskCentsSamples ?? []) : (state.downAskCentsSamples ?? []);
 }
 
 /**
- * Stabilize filter: last N asset-price samples must span ≤ buyStabilizeRange.
+ * Stabilize filter: last N best-ask ¢ samples for the buy side must span ≤ buyStabilizeRange.
  * ticks ≤ 1 → off (allow). Fewer than N samples → block.
  */
-export function stabilizeAllowsBuy(
-  phase: SimPhaseConfig,
-  assetPrices: ReadonlyArray<number> | null | undefined,
-): boolean {
-  const ticks = phase.buyStabilizeTicks ?? 1;
+export function stabilizeAllowsBuy(phase: SimPhaseConfig, askCentsSamples: ReadonlyArray<number>): boolean {
+  const ticks = Math.max(1, Math.floor(phase.buyStabilizeTicks || 1));
   if (ticks <= 1) return true;
-  if (!assetPrices || assetPrices.length < ticks) return false;
+  const range = Math.max(1, Math.floor(phase.buyStabilizeRange || 1));
+  if (askCentsSamples.length < ticks) return false;
 
-  const start = assetPrices.length - ticks;
-  let min = assetPrices[start]!;
-  let max = min;
-  if (!Number.isFinite(min)) return false;
-  for (let i = start + 1; i < assetPrices.length; i++) {
-    const p = assetPrices[i]!;
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = askCentsSamples.length - ticks; i < askCentsSamples.length; i++) {
+    const p = askCentsSamples[i]!;
     if (!Number.isFinite(p)) return false;
-    if (p < min) min = p;
-    if (p > max) max = p;
+    min = Math.min(min, p);
+    max = Math.max(max, p);
   }
-  const range = phase.buyStabilizeRange ?? 0;
-  return max - min <= range + 1e-9;
+  return max - min <= range;
+}
+
+export function stabilizeAllowsBuyForSide(
+  phase: SimPhaseConfig,
+  state: Pick<LiveWindowState, "upAskCentsSamples" | "downAskCentsSamples"> | null | undefined,
+  side: "up" | "down",
+): boolean {
+  return stabilizeAllowsBuy(phase, askCentsSamplesForSide(state, side));
 }
 
 export function priceToCents(price: number): number {

@@ -153,10 +153,10 @@
     let buyStabilizeTicks = Math.floor(Number(raw.buyStabilizeTicks));
     if (!Number.isFinite(buyStabilizeTicks) || buyStabilizeTicks < 1) buyStabilizeTicks = 1;
     buyStabilizeTicks = Math.min(500, buyStabilizeTicks);
-    let buyStabilizeRange = Number(raw.buyStabilizeRange);
+    let buyStabilizeRange = Math.floor(Number(raw.buyStabilizeRange));
     if (buyStabilizeTicks <= 1) buyStabilizeRange = 0;
-    else if (!Number.isFinite(buyStabilizeRange) || buyStabilizeRange < 0) buyStabilizeRange = 0;
-    else buyStabilizeRange = Math.round(buyStabilizeRange * 100) / 100;
+    else if (!Number.isFinite(buyStabilizeRange) || buyStabilizeRange < 1) buyStabilizeRange = 1;
+    else buyStabilizeRange = Math.max(1, Math.min(99, buyStabilizeRange));
     return {
       buyEnabled: Boolean(raw.buyEnabled ?? base.buyEnabled),
       buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
@@ -255,8 +255,10 @@
   function syncStabilizeLabels(formLocked = false) {
     const ticksInput = document.getElementById("phase-stabilize-ticks");
     const rangeInput = document.getElementById("phase-stabilize-range");
+    const ticksText = document.getElementById("phase-stabilize-ticks-text");
     const rangeText = document.getElementById("phase-stabilize-range-text");
     const rangeLabel = document.getElementById("phase-stabilize-range-label");
+    const ticksLabel = document.getElementById("phase-stabilize-ticks-label");
     if (!ticksInput || !rangeInput || !rangeText || !rangeLabel) return;
 
     const buyEnabled = Boolean(document.getElementById("phase-buy-enabled")?.checked);
@@ -267,12 +269,21 @@
     ticksInput.value = String(ticks);
 
     const filterOff = ticks <= 1;
+    if (ticksText) {
+      ticksText.textContent = filterOff ? "Stabilize ticks off" : "Stabilize ticks";
+    }
+    if (ticksLabel) {
+      ticksLabel.classList.toggle("is-none", filterOff);
+    }
     if (filterOff) {
       rangeInput.value = "0";
-      rangeText.textContent = "Stabilize range ($) off";
+      rangeText.textContent = "Stabilize range (¢) off";
       rangeLabel.classList.add("is-none");
     } else {
-      rangeText.textContent = "Stabilize range ($)";
+      if (!Number.isFinite(Number(rangeInput.value)) || Number(rangeInput.value) < 1) {
+        rangeInput.value = "1";
+      }
+      rangeText.textContent = "Stabilize range (¢)";
       rangeLabel.classList.remove("is-none");
     }
 
@@ -776,13 +787,13 @@
     if (!Number.isFinite(buyStabilizeTicks) || buyStabilizeTicks < 1) buyStabilizeTicks = 1;
     buyStabilizeTicks = Math.min(500, buyStabilizeTicks);
     cfg.buyStabilizeTicks = buyStabilizeTicks;
-    const stabilizeRange = Number(document.getElementById("phase-stabilize-range").value);
+    const stabilizeRange = Math.floor(Number(document.getElementById("phase-stabilize-range").value));
     cfg.buyStabilizeRange =
       buyStabilizeTicks <= 1
         ? 0
-        : Number.isFinite(stabilizeRange) && stabilizeRange >= 0
-          ? Math.round(stabilizeRange * 100) / 100
-          : 0;
+        : Number.isFinite(stabilizeRange) && stabilizeRange >= 1
+          ? Math.max(1, Math.min(99, stabilizeRange))
+          : 1;
     cfg.sellProfitCents = Number(document.getElementById("phase-sell-profit").value) || 20;
     delete cfg.sellOptimize;
     setup.phases[phaseIdx] = normalizePhase(cfg);

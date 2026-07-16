@@ -7,6 +7,7 @@ import { getTradingSetupById } from "./db/trading-setup-repository.js";
 import type { SchedulePlacementListItem } from "./db/schedule-placement-repository.js";
 import { listReplayTicks } from "./db/replay-tick-repository.js";
 import { getRollingCutoffUtcSec } from "./heatmap-service.js";
+import { recordAskSamples } from "./phase-config.js";
 import { SimulatorEngine } from "./simulator-engine.js";
 import { phaseSetupToSimSetup } from "./simulator-service.js";
 import {
@@ -248,6 +249,8 @@ export async function simulateRecordedWindow(
 
   const engine = new SimulatorEngine();
   const priceHistory: Array<{ t: number; price: number }> = [];
+  const upAskCentsSamples: number[] = [];
+  const downAskCentsSamples: number[] = [];
 
   for (const tick of ticks) {
     if (tick.tMs >= windowEnd * 1000) break;
@@ -263,12 +266,22 @@ export async function simulateRecordedWindow(
       }
     }
     const state = replayTickToState(tick, series, windowStart, windowEnd, priceHistory);
+    state.upAskCentsSamples = upAskCentsSamples;
+    state.downAskCentsSamples = downAskCentsSamples;
+    if (tick.source === "clob-book") {
+      recordAskSamples(state);
+    }
     engine.tick(state, setup, tick.tMs);
   }
 
   const lastInWindow = [...ticks].reverse().find((t) => t.tMs < windowEnd * 1000) ?? ticks[ticks.length - 1];
   const endMs = windowEnd * 1000 - 1;
   const endState = replayTickToState(lastInWindow, series, windowStart, windowEnd, priceHistory);
+  endState.upAskCentsSamples = upAskCentsSamples;
+  endState.downAskCentsSamples = downAskCentsSamples;
+  if (lastInWindow.source === "clob-book") {
+    recordAskSamples(endState);
+  }
   engine.tick({ ...endState, lastTickMs: endMs }, setup, endMs);
 
   // Settle from stored Polymarket outcome in window JSON (backfilled / recorded at finalize).

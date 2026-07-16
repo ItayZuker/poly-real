@@ -10,7 +10,7 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
-import { assetPricesFromState, gapAllowsBuy, priceToCents, SIDES_ORDER, stabilizeAllowsBuy } from "./phase-config.js";
+import { gapAllowsBuy, priceToCents, SIDES_ORDER, stabilizeAllowsBuyForSide } from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -481,7 +481,7 @@ export class SimulatorEngine {
 
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
-    if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) {
+    if (!stabilizeAllowsBuyForSide(phase, state, side)) {
       logService.error("sim", `FAK buy skipped after latency (stabilize filter)`);
       return;
     }
@@ -651,7 +651,6 @@ export class SimulatorEngine {
   ): void {
     if (phase.buyOptimize || !phase.buyEnabled) return;
     if (this.position || this.restingGtd || this.pendingBuy) return;
-    if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) return;
 
     let chosenSide: Side | null = null;
     for (const side of SIDES_ORDER) {
@@ -661,6 +660,7 @@ export class SimulatorEngine {
       }
     }
     if (!chosenSide) return;
+    if (!stabilizeAllowsBuyForSide(phase, state, chosenSide)) return;
 
     const shares = Math.max(1, phase.buyShares || 1);
     const limitPrice = centsToPrice(phase.buyTrigger);
@@ -689,11 +689,12 @@ export class SimulatorEngine {
   ): void {
     if (!phase.buyOptimize) this.buyWatch = null;
     if (!this.restingGtd) return;
+    const restingSide = this.restingGtd.side;
     if (
       this.restingGtd.phaseIdx !== phaseIdx ||
       phase.buyOptimize ||
       !phase.buyEnabled ||
-      !stabilizeAllowsBuy(phase, assetPricesFromState(state))
+      !stabilizeAllowsBuyForSide(phase, state, restingSide)
     ) {
       this.cancelRestingGtd(
         this.restingGtd.phaseIdx !== phaseIdx
@@ -716,7 +717,7 @@ export class SimulatorEngine {
     const resting = this.restingGtd;
     if (!resting) return;
 
-    if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) {
+    if (!stabilizeAllowsBuyForSide(phase, state, resting.side)) {
       this.cancelRestingGtd("stabilize filter");
       return;
     }
@@ -749,8 +750,6 @@ export class SimulatorEngine {
     const shares = Math.max(1, phase.buyShares || 1);
     const triggerCents = phase.buyTrigger;
     const assetGap = state.assetGap;
-    const assetPrices = assetPricesFromState(state);
-    if (!stabilizeAllowsBuy(phase, assetPrices)) return;
 
     for (const side of SIDES_ORDER) {
       const ask = bestAskForSide(quote, side);
@@ -760,6 +759,7 @@ export class SimulatorEngine {
       // Optimize: must first touch trigger exactly, then hunt ≤.
       if (askCents !== triggerCents) continue;
       if (!gapAllowsBuy(side, phase, assetGap)) continue;
+      if (!stabilizeAllowsBuyForSide(phase, state, side)) continue;
 
       this.buyWatch = {
         side,
@@ -794,7 +794,6 @@ export class SimulatorEngine {
     const askCents = priceToCents(ask);
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
-    const assetPrices = assetPricesFromState(state);
 
     if (askCents > w.triggerCents) {
       // Pause until trigger is touched again.
@@ -811,7 +810,7 @@ export class SimulatorEngine {
         return;
       }
       // Re-touch — gap already validated at first arm; re-check stabilize.
-      if (!stabilizeAllowsBuy(phase, assetPrices)) {
+      if (!stabilizeAllowsBuyForSide(phase, state, w.side)) {
         w.prevAskCents = askCents;
         return;
       }
@@ -825,7 +824,7 @@ export class SimulatorEngine {
 
     // FAK: any available size is enough (partial OK).
     if (totalLevelSize(asksForSide(quote, w.side)) <= 0) return;
-    if (!stabilizeAllowsBuy(phase, assetPrices)) return;
+    if (!stabilizeAllowsBuyForSide(phase, state, w.side)) return;
 
     // Hunting at ≤ trigger.
     if (askCents <= w.triggerCents) {

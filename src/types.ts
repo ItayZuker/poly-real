@@ -203,6 +203,10 @@ export interface LiveWindowState {
   /** Measured CLOB WebSocket round-trip latency (ms). */
   feedLatencyMs?: number;
   priceHistory: Array<{ t: number; price: number }>;
+  /** Rolling UP token best-ask samples in ¢ (CLOB book ticks). */
+  upAskCentsSamples?: number[];
+  /** Rolling DOWN token best-ask samples in ¢ (CLOB book ticks). */
+  downAskCentsSamples?: number[];
 }
 
 export type GapVsPtb = "with" | "opposite";
@@ -229,13 +233,13 @@ export interface SimPhaseConfig {
   /** Gap direction relative to the side being bought. */
   gapVsPtb: GapVsPtb;
   /**
-   * Stabilize lookback in underlying asset-price samples.
+   * Stabilize lookback in CLOB best-ask book samples (¢).
    * 1 = filter off; ≥2 = on. Cap 500.
    */
   buyStabilizeTicks: number;
   /**
-   * Max allowed max(price)−min(price) over the last buyStabilizeTicks samples ($).
-   * Forced to 0 when ticks ≤ 1.
+   * Max allowed max(ask)−min(ask) over the last buyStabilizeTicks samples (¢).
+   * Forced to 0 when ticks ≤ 1; clamped 1–99 when ticks ≥ 2.
    */
   buyStabilizeRange: number;
   /** Sell limit = buy + this many cents. */

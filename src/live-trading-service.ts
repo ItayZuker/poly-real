@@ -46,13 +46,12 @@ import {
 } from "./db/user-repository.js";
 import { isTradingExecutor } from "./trading-executor.js";
 import {
-  assetPricesFromState,
   centsToPrice,
   gapAllowsBuy,
   gtdExpirationUnix,
   phaseIndexForState,
   SIDES_ORDER,
-  stabilizeAllowsBuy,
+  stabilizeAllowsBuyForSide,
 } from "./phase-config.js";
 import type {
   LiveWindowState,
@@ -1053,7 +1052,10 @@ export class LiveTradingService {
         // Optimize-off buys are resting GTD limits — do not mirror sim market fires.
         const phase = this.phaseAtTime(setup, state, marker.t);
         if (!phase.buyOptimize) continue;
-        if (!stabilizeAllowsBuy(phase, assetPricesFromState(state))) continue;
+        if (!stabilizeAllowsBuyForSide(phase, state, marker.side)) {
+          logService.info("trading", `FAK buy skipped (stabilize filter)`);
+          continue;
+        }
         if (this.positions[marker.side]) continue;
         await this.executeOrder(state, marker.side, "buy", marker.shares, "auto", "shares", "FAK");
       } else if (marker.type === "sell") {
@@ -1084,17 +1086,17 @@ export class LiveTradingService {
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const key = sessionKey(state);
-    const stabilizeOk = stabilizeAllowsBuy(phase, assetPricesFromState(state));
 
     // Phase changed or optimize/disabled/stabilize — cancel prior resting buy.
     if (this.restingBuy) {
       const r = this.restingBuy;
+      const restingStabilizeOk = stabilizeAllowsBuyForSide(phase, state, r.side);
       if (
         r.sessionKey !== key ||
         r.phaseIdx !== phaseIdx ||
         phase.buyOptimize ||
         !phase.buyEnabled ||
-        !stabilizeOk
+        !restingStabilizeOk
       ) {
         await this.cancelRestingBuy(
           r.phaseIdx !== phaseIdx
@@ -1110,13 +1112,12 @@ export class LiveTradingService {
 
     // Poll open resting order for fills.
     if (this.restingBuy) {
-      await this.pollRestingBuy(state);
+      await this.pollRestingBuy(state, setup);
       if (this.restingBuy) return; // still open — don't place another
     }
 
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;
-    if (!stabilizeOk) return;
     if (this.positions.up || this.positions.down) return;
     if (this.restingBuy) return;
 
@@ -1128,6 +1129,7 @@ export class LiveTradingService {
       }
     }
     if (!chosenSide) return;
+    if (!stabilizeAllowsBuyForSide(phase, state, chosenSide)) return;
 
     const windowEnd = state.windowEnd ?? nowSec + 300;
     const limitPrice = centsToPrice(phase.buyTrigger);
@@ -1181,9 +1183,17 @@ export class LiveTradingService {
     }
   }
 
-  private async pollRestingBuy(state: LiveWindowState): Promise<void> {
+  private async pollRestingBuy(state: LiveWindowState, setup: SimSetup): Promise<void> {
     const resting = this.restingBuy;
     if (!resting) return;
+
+    const nowSec = Math.floor((state.lastTickMs ?? Date.now()) / 1000);
+    const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
+    const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+    if (!stabilizeAllowsBuyForSide(phase, state, resting.side)) {
+      await this.cancelRestingBuy("stabilize filter");
+      return;
+    }
 
     const snap = await fetchOpenOrder(this.userId, resting.orderId);
     // Transient fetch failures — keep tracking so we don't double-place.
