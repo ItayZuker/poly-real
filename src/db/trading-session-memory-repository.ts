@@ -66,6 +66,11 @@ type TradingSessionMemoryDoc = {
   /** Events with settledAt > this count toward the Live header range. */
   liveResetAt?: string | null;
   /**
+   * When schedule live collection armed (Start Trading). Slots before this stay pre-run (dashes).
+   * Survives header Live reset.
+   */
+  liveCollectionStartedAt?: string | null;
+  /**
    * Schedule placements that were live while `startTrading` was on (even with no fills).
    * Survives restart and header Live reset — cleared only when the placement is removed.
    * Cards show 0/0/0 instead of "—" until the first fill.
@@ -212,6 +217,47 @@ export async function getLiveResetAt(userId: string): Promise<string | null> {
   return doc?.liveResetAt ?? null;
 }
 
+export async function getLiveCollectionStartedAt(userId: string): Promise<string | null> {
+  await ensureReady();
+  const doc = await loadMeta(userId);
+  return doc?.liveCollectionStartedAt ?? null;
+}
+
+/** Persist when schedule live collection first armed; no-ops if already set. */
+export async function ensureLiveCollectionStartedAt(
+  userId: string,
+  at = new Date().toISOString(),
+): Promise<string> {
+  await ensureReady();
+  const existing = await getLiveCollectionStartedAt(userId);
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  await (await metaCollection()).updateOne(
+    { _id: userId },
+    {
+      $setOnInsert: { liveResetAt: null, activatedPlacementIds: [] },
+      $set: { liveCollectionStartedAt: at, updatedAt: now },
+    },
+    { upsert: true },
+  );
+  // Race: another writer may have set it first
+  return (await getLiveCollectionStartedAt(userId)) ?? at;
+}
+
+/** Overwrite collection start (restore / repair). */
+export async function setLiveCollectionStartedAt(
+  userId: string,
+  at: string | null,
+): Promise<void> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  await (await metaCollection()).updateOne(
+    { _id: userId },
+    { $set: { liveCollectionStartedAt: at, updatedAt: now } },
+    { upsert: true },
+  );
+}
+
 /**
  * Mark Live header-range start. Does not delete events, and does not clear
  * activatedPlacementIds — schedule cards keep collecting until removed.
@@ -231,6 +277,21 @@ export async function listActivatedPlacementIds(userId: string): Promise<string[
   const doc = await loadMeta(userId);
   const ids = doc?.activatedPlacementIds;
   return Array.isArray(ids) ? ids.filter((id) => typeof id === "string" && id.length > 0) : [];
+}
+
+/** Replace the full activated-placement set (e.g. prune pre-run slots). */
+export async function setActivatedPlacementIds(userId: string, placementIds: string[]): Promise<void> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  const unique = [...new Set(placementIds.filter((id) => typeof id === "string" && id.length > 0))];
+  await (await metaCollection()).updateOne(
+    { _id: userId },
+    {
+      $set: { activatedPlacementIds: unique, updatedAt: now },
+      $setOnInsert: { liveResetAt: null },
+    },
+    { upsert: true },
+  );
 }
 
 /** Remember a schedule placement was live this session (zeros until first fill). */

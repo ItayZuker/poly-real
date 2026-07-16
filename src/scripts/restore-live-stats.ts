@@ -1,7 +1,7 @@
 /**
- * Restore schedule-card live stats after an accidental header reset.
- * Events were never deleted — rebuilds activatedPlacementIds (including zero-trade
- * gaps between slots with activity), clears liveResetAt.
+ * Repair live card activations: collection started Tue 22:00 UTC this week.
+ * Slots before that stay pre-run (dashes). From that floor onward, elapsed /
+ * between-fill slots get gray +$0.00 zeros.
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -28,6 +28,23 @@ function sortKey(day: DayId, startHour: number): number {
   return (dayMap[day] ?? 0) * 24 + startHour;
 }
 
+/** Most recent Tuesday 22:00 UTC at or before now. */
+function lastTuesday2200Utc(now = new Date()): Date {
+  const day = now.getUTCDay(); // Sun=0 … Tue=2
+  const daysBack = (day - 2 + 7) % 7;
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysBack, 22, 0, 0, 0),
+  );
+}
+
+function clockFromMs(ms: number): { day: DayId; hour: number } {
+  const d = new Date(ms);
+  const dayMap: DayId[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const day = dayMap[d.getUTCDay()] ?? "mon";
+  const hour = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
+  return { day, hour };
+}
+
 async function main(): Promise<void> {
   const client = new MongoClient(uri!);
   await client.connect();
@@ -38,22 +55,12 @@ async function main(): Promise<void> {
   const placementsCol = db.collection("schedual_setups_real");
 
   const events = await eventsCol.find({}).toArray();
-  console.log(`Found ${events.length} trading_stat_events`);
-
   const placements = await placementsCol.find({}).toArray();
-  console.log(`Found ${placements.length} schedule placements`);
+  const startedAt = lastTuesday2200Utc();
+  const floor = sortKey(clockFromMs(startedAt.getTime()).day, clockFromMs(startedAt.getTime()).hour);
 
-  let green = 0;
-  let red = 0;
-  let blue = 0;
-  let pnl = 0;
-  for (const e of events) {
-    green += Number(e.green) || 0;
-    red += Number(e.red) || 0;
-    blue += Number(e.blue) || 0;
-    pnl += Number(e.pnl) || 0;
-  }
-  console.log("Event totals:", { green, red, blue, pnl: Number(pnl.toFixed(4)) });
+  console.log(`Collection start: ${startedAt.toISOString()} (floorKey=${floor})`);
+  console.log(`Events=${events.length}, placements=${placements.length}`);
 
   const metaDocs = await metaCol.find({}).toArray();
   for (const doc of metaDocs) {
@@ -61,30 +68,42 @@ async function main(): Promise<void> {
     const userEvents = events.filter((e) => !e.userId || e.userId === userId);
     const userPlacements = placements.filter((p) => !p.userId || String(p.userId) === userId);
 
-    const fromEvents = userEvents
-      .map((e) => e.placementId)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-
-    const prev = Array.isArray(doc.activatedPlacementIds)
-      ? doc.activatedPlacementIds.filter((id: unknown) => typeof id === "string")
-      : [];
-
-    const seed = new Set<string>([...prev, ...fromEvents]);
-
-    // Fill timeline gaps between known activations → gray +$0.00 for zero-trade slots.
     const keyed = userPlacements
       .map((p) => ({
         id: String(p._id),
         key: sortKey(p.day as DayId, Number(p.startHour) || 0),
+        end: sortKey(p.day as DayId, Number(p.startHour) || 0) + (Number(p.durationHours) || 0),
       }))
       .sort((a, b) => a.key - b.key);
-    const knownKeys = keyed.filter((k) => seed.has(k.id)).map((k) => k.key);
-    if (knownKeys.length >= 1) {
-      const minK = Math.min(...knownKeys);
-      const maxK = Math.max(...knownKeys);
+
+    const eventIds = new Set(
+      userEvents
+        .map((e) => e.placementId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
+
+    const seed = new Set<string>();
+    for (const k of keyed) {
+      if (k.key + 1e-9 < floor) continue;
+      if (eventIds.has(k.id)) seed.add(k.id);
+    }
+
+    const seedKeys = keyed.filter((k) => seed.has(k.id)).map((k) => k.key);
+    if (seedKeys.length >= 1) {
+      const minK = Math.min(...seedKeys);
+      const maxK = Math.max(...seedKeys);
       for (const k of keyed) {
+        if (k.key + 1e-9 < floor) continue;
         if (k.key >= minK && k.key <= maxK) seed.add(k.id);
       }
+    }
+
+    // Elapsed since floor through now (UTC week clock).
+    const nowClock = clockFromMs(Date.now());
+    const nowKey = sortKey(nowClock.day, nowClock.hour);
+    for (const k of keyed) {
+      if (k.key + 1e-9 < floor) continue;
+      if (k.end <= nowKey + 1e-9) seed.add(k.id);
     }
 
     const merged = [...seed];
@@ -93,18 +112,20 @@ async function main(): Promise<void> {
       {
         $set: {
           liveResetAt: null,
+          liveCollectionStartedAt: startedAt.toISOString(),
           activatedPlacementIds: merged,
           updatedAt: new Date().toISOString(),
         },
       },
+      { upsert: true },
     );
     console.log(
-      `Restored user ${userId.slice(0, 8)}…: liveResetAt=null, activatedPlacementIds=${merged.length} (was ${prev.length})`,
+      `User ${userId.slice(0, 8)}…: activated=${merged.length} (pre-run slots excluded before Tue 22:00)`,
     );
   }
 
   await client.close();
-  console.log("Done. Restart the server (or POST /api/trading/stats/rehydrate) to reload RAM.");
+  console.log("Done. Restart server / rehydrate to reload RAM.");
 }
 
 main().catch((err) => {

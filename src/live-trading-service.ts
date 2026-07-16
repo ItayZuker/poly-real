@@ -1,5 +1,6 @@
 import {
   findActiveScheduleContext,
+  getUtcScheduleClock,
   isScheduleContextActive,
   isSchedulePlacementElapsed,
   schedulePlacementSortKey,
@@ -36,10 +37,13 @@ import {
 } from "./taker-fee.js";
 import {
   addActivatedPlacementId,
+  ensureLiveCollectionStartedAt,
+  getLiveCollectionStartedAt,
   getLiveResetAt,
   listActivatedPlacementIds,
   listTradingStatEvents,
   markLiveReset,
+  setActivatedPlacementIds,
   upsertTradingStatEvent,
   type TradingStatEvent,
 } from "./db/trading-session-memory-repository.js";
@@ -341,6 +345,8 @@ export class LiveTradingService {
   private lastPersistedStatFingerprint = new Map<string, string>();
   /** Header "Live" range cut — events at/before this ms are excluded from session totals only. */
   private liveResetAtMs: number | null = null;
+  /** Schedule live collection arm time — slots before this stay pre-run (dashes). */
+  private liveCollectionStartedAtMs: number | null = null;
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
@@ -398,7 +404,23 @@ export class LiveTradingService {
       const resetMs = resetAt ? Date.parse(resetAt) : NaN;
       this.liveResetAtMs = Number.isFinite(resetMs) ? resetMs : null;
 
+      const collectionStartedAt = await getLiveCollectionStartedAt(this.userId);
+      const collectionMs = collectionStartedAt ? Date.parse(collectionStartedAt) : NaN;
+      this.liveCollectionStartedAtMs = Number.isFinite(collectionMs) ? collectionMs : null;
+
       const events = await listTradingStatEvents(this.userId, {});
+      if (this.liveCollectionStartedAtMs == null && events.length > 0) {
+        let earliest = Infinity;
+        for (const event of events) {
+          const at = eventSettledMs(event);
+          if (Number.isFinite(at) && at < earliest) earliest = at;
+        }
+        if (Number.isFinite(earliest)) {
+          this.liveCollectionStartedAtMs = earliest;
+          await ensureLiveCollectionStartedAt(this.userId, new Date(earliest).toISOString());
+        }
+      }
+
       const activated = await listActivatedPlacementIds(this.userId);
       this.liveStatLedger.clear();
       this.lastPersistedStatFingerprint.clear();
@@ -453,8 +475,8 @@ export class LiveTradingService {
   }
 
   /**
-   * Zero-trade slots that already ran (or sit between slots with live activity) should
-   * show gray +$0.00 / 0·0·0 — not dashes.
+   * Zero-trade slots that ran after live collection started (or sit between slots with
+   * live fills) show gray +$0.00. Slots before collection start stay pre-run (dashes).
    */
   private async syncActivatedSchedulePlacements(): Promise<void> {
     if (!this.config.autoTrade || !this.config.useSchedule) return;
@@ -467,6 +489,44 @@ export class LiveTradingService {
     }
     if (placements.length === 0) return;
 
+    if (this.config.startTrading) {
+      await this.ensureCollectionStarted();
+    }
+
+    const floorKey = this.collectionFloorKey();
+    const keyed = placements
+      .map((p) => ({ p, key: schedulePlacementSortKey(p) }))
+      .sort((a, b) => a.key - b.key);
+
+    // Drop pre-run activations (before recording/collection start).
+    if (floorKey != null) {
+      const keep: string[] = [];
+      let pruned = false;
+      for (const { p, key } of keyed) {
+        if (this.knownPlacementIds.has(p._id)) {
+          if (key + 1e-9 < floorKey) {
+            this.knownPlacementIds.delete(p._id);
+            pruned = true;
+          } else {
+            keep.push(p._id);
+          }
+        }
+      }
+      // Keep ids not on this week's board (shouldn't happen) — only persist board survivors + events.
+      for (const id of this.knownPlacementIds) {
+        if (!keyed.some(({ p }) => p._id === id)) keep.push(id);
+      }
+      if (pruned) {
+        const unique = [...new Set(keep)];
+        this.knownPlacementIds = new Set(unique);
+        this.statsPersistChain = this.statsPersistChain
+          .then(() => setActivatedPlacementIds(this.userId, unique))
+          .catch((err) => {
+            logService.warn("trading", `Failed to prune activated placements: ${String(err)}`);
+          });
+      }
+    }
+
     let changed = false;
     const remember = (id: string): void => {
       if (this.knownPlacementIds.has(id)) return;
@@ -474,27 +534,55 @@ export class LiveTradingService {
       changed = true;
     };
 
-    if (this.config.startTrading) {
-      for (const p of placements) {
+    // While live: every elapsed slot at/after collection start is a real zero result.
+    if (this.config.startTrading && floorKey != null) {
+      for (const { p, key } of keyed) {
+        if (key + 1e-9 < floorKey) continue;
         if (isSchedulePlacementElapsed(p)) remember(p._id);
       }
     }
 
-    const keyed = placements
-      .map((p) => ({ p, key: schedulePlacementSortKey(p) }))
-      .sort((a, b) => a.key - b.key);
-    const knownKeys = keyed
-      .filter(({ p }) => this.knownPlacementIds.has(p._id))
+    // Fill gaps between slots that actually have fills (still not before floor).
+    const eventPlacementIds = new Set<string>();
+    for (const event of this.liveStatLedger.values()) {
+      if (event.placementId) eventPlacementIds.add(event.placementId);
+    }
+    const seedKeys = keyed
+      .filter(({ p, key }) => {
+        if (!eventPlacementIds.has(p._id)) return false;
+        if (floorKey != null && key + 1e-9 < floorKey) return false;
+        return true;
+      })
       .map(({ key }) => key);
-    if (knownKeys.length >= 1) {
-      const minK = Math.min(...knownKeys);
-      const maxK = Math.max(...knownKeys);
+    if (seedKeys.length >= 1) {
+      const minK = Math.min(...seedKeys);
+      const maxK = Math.max(...seedKeys);
       for (const { p, key } of keyed) {
+        if (floorKey != null && key + 1e-9 < floorKey) continue;
         if (key >= minK && key <= maxK) remember(p._id);
       }
     }
 
     if (changed) this.notify();
+  }
+
+  private collectionFloorKey(): number | null {
+    if (this.liveCollectionStartedAtMs == null) return null;
+    const { day, hour } = getUtcScheduleClock(new Date(this.liveCollectionStartedAtMs));
+    return schedulePlacementSortKey({ day, startHour: hour });
+  }
+
+  private async ensureCollectionStarted(at = new Date()): Promise<void> {
+    if (this.liveCollectionStartedAtMs != null) return;
+    const iso = at.toISOString();
+    this.liveCollectionStartedAtMs = at.getTime();
+    try {
+      const stored = await ensureLiveCollectionStartedAt(this.userId, iso);
+      const ms = Date.parse(stored);
+      if (Number.isFinite(ms)) this.liveCollectionStartedAtMs = ms;
+    } catch (err) {
+      logService.warn("trading", `Failed to persist live collection start: ${String(err)}`);
+    }
   }
 
   private persistCardStat(card: TradingPositionCard): void {
@@ -589,7 +677,7 @@ export class LiveTradingService {
     const isLive =
       this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
     if (isLive && (!wasLive || patch.startTrading === true || patch.useSchedule === true)) {
-      void this.refreshScheduleContext(true);
+      void this.ensureCollectionStarted().then(() => this.refreshScheduleContext(true));
     }
     return this.getConfig();
   }

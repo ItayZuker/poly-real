@@ -1728,11 +1728,26 @@
     writeStatsCache(cache);
   }
 
+  /** Update abutting-edge classes for cards on one day without rebuilding the layer. */
+  function refreshDayPlacementEdgeClasses(day) {
+    const dayPlacements = placements.filter((x) => x.day === day);
+    for (const p of dayPlacements) {
+      const card = document.querySelector(
+        `.schedule-placement-card[data-placement-id="${CSS.escape(p._id)}"]`,
+      );
+      if (!card) continue;
+      const endHour = p.startHour + p.durationHours;
+      const others = dayPlacements.filter((x) => x._id !== p._id);
+      const hasAbove = others.some((o) => o.startHour + o.durationHours === p.startHour);
+      const hasBelow = others.some((o) => o.startHour === endHour);
+      card.classList.toggle("has-placement-above", hasAbove);
+      card.classList.toggle("has-placement-below", hasBelow);
+    }
+  }
+
   async function removePlacement(id) {
     closeMenus();
     const placement = placements.find((p) => p._id === id);
-    const label = placement?.title ? `"${placement.title}"` : "this schedule card";
-    if (!window.confirm(`Remove ${label} from the live schedule?`)) return;
     try {
       const res = await fetch(`/api/schedule-placements/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -1744,10 +1759,18 @@
       placements = placements.filter((p) => p._id !== id);
       framedPlacementIds.delete(id);
       removePlacementFromCache(id);
-      renderPlacements({ reloadStats: false });
-      if (typeof window.refreshScheduleSetupsList === "function") {
-        void window.refreshScheduleSetupsList();
-      }
+
+      document
+        .querySelectorAll(`.schedule-placement-card[data-placement-id="${CSS.escape(id)}"]`)
+        .forEach((el) => el.remove());
+      if (placement?.day) refreshDayPlacementEdgeClasses(placement.day);
+
+      updateDayHeaderPnls();
+      updateWeekHeaderSummary();
+      applyPlacementFrameStates();
+      syncNowHighlights();
+      // Counts only — do not reload/rebuild the left setups list.
+      window.updateSetupListPlacementCounts?.();
     } catch (err) {
       console.error(err);
     }
