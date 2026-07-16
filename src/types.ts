@@ -207,6 +207,9 @@ export interface LiveWindowState {
 
 export type GapVsPtb = "with" | "opposite";
 
+/** Optimize off → GTD resting limit; optimize on → immediate FAK. */
+export type BuyOrderType = "GTD" | "FAK";
+
 export interface SimPhaseConfig {
   buyEnabled: boolean;
   buyShares: number;
@@ -214,6 +217,11 @@ export interface SimPhaseConfig {
   buyTrigger: number;
   /** After touching trigger, hunt a better (≤) fill. */
   buyOptimize: boolean;
+  /**
+   * Buy execution type for this phase (derived from buyOptimize).
+   * Optimize off: GTD. Optimize on: FAK.
+   */
+  buyOrderType: BuyOrderType;
   /** Min |asset−PTB| in $; 0 = ignore. */
   minGap: number;
   /** Max |asset−PTB| in $; 0 = ignore. */

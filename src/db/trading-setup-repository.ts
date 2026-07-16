@@ -1,6 +1,6 @@
 import type { ObjectId } from "mongodb";
 import type { TradingPhaseSetup, TradingSetupRecord } from "../types.js";
-import { normalizeTradingPhaseSetup } from "../phase-config.js";
+import { normalizePhaseConfig, normalizeTradingPhaseSetup } from "../phase-config.js";
 import {
   colorFromId,
   normalizeSetupColor,
@@ -86,11 +86,20 @@ function serializeTradingSetup(doc: TradingSetupDoc): TradingSetupListItem {
     phaseSplit: doc.setup.phaseSplit,
     phases: doc.setup.phases,
   });
+  // Always expose normalized phases (incl. buyOrderType derived from buyOptimize).
+  const setup = normalizedSetup ?? {
+    phaseSplit: doc.setup.phaseSplit,
+    phases: [
+      normalizePhaseConfig(doc.setup.phases?.[0]),
+      normalizePhaseConfig(doc.setup.phases?.[1]),
+      normalizePhaseConfig(doc.setup.phases?.[2]),
+    ],
+  };
   const item: TradingSetupListItem = {
     _id: String(doc._id),
     title: doc.title,
     color: resolveSetupColor(doc),
-    setup: normalizedSetup ?? doc.setup,
+    setup,
     createdAt: doc.createdAt instanceof Date ? doc.createdAt.toISOString() : String(doc.createdAt),
     liveScheduleInUse: doc.liveScheduleInUse === true,
     simScheduleInUse: doc.simScheduleInUse === true,
@@ -150,10 +159,13 @@ export async function insertTradingSetup(input: CreateTradingSetupInput): Promis
       .filter((color): color is string => color != null),
   );
 
+  const setup = normalizePhaseSetup(input.setup);
+  if (!setup) throw new Error("Invalid setup phases");
+
   const doc: TradingSetupRecord = {
     title: input.title,
     color: pickUniqueSetupColor(usedColors, existing.length),
-    setup: input.setup,
+    setup,
     createdAt: new Date(),
   };
   if (input.description) {

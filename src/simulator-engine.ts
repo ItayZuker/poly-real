@@ -1,11 +1,11 @@
 import type { BookLevel } from "./clob-service.js";
 import {
   bestPrice,
-  canFillAsks,
-  fillMakerLimitBuy,
+  fillMakerLimitBuyAvailable,
   fillMakerLimitSell,
   takeLevels,
-  walkAsks,
+  totalLevelSize,
+  walkAsksAvailable,
   walkBids,
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
@@ -48,6 +48,15 @@ interface BuyWatch {
   prevAskCents: number | null;
 }
 
+/** Resting GTD limit buy (optimize off) — mirrors live phase-enter limit. */
+interface RestingGtdBuy {
+  side: Side;
+  /** Remaining shares to fill. */
+  shares: number;
+  limitPrice: number;
+  phaseIdx: number;
+}
+
 interface SellWatch {
   target: number;
 }
@@ -56,8 +65,8 @@ interface PendingBuy {
   side: Side;
   shares: number;
   executeAtMs: number;
-  /** Limit price for maker; null = take asks. */
-  limitPrice: number | null;
+  /** Max price for FAK re-check after latency (¢ → used as trigger). */
+  triggerCents: number;
 }
 
 interface PendingSell {
@@ -130,13 +139,6 @@ function bestBidForSide(quote: DepthQuote, side: Side): number | undefined {
   return bestPrice(bidsForSide(quote, side));
 }
 
-function hasBuyLiquidity(quote: DepthQuote, side: Side, shares: number): boolean {
-  if (!shares || shares <= 0) return false;
-  const ask = bestAskForSide(quote, side);
-  if (ask == null || !Number.isFinite(ask)) return false;
-  return canFillAsks(asksForSide(quote, side), shares);
-}
-
 function elapsedFrac(state: LiveWindowState, nowSec: number): number {
   if (!state.windowStart || !state.windowEnd) return 0;
   const duration = state.windowEnd - state.windowStart;
@@ -155,6 +157,7 @@ export class SimulatorEngine {
   private sessionKey: string | null = null;
   private position: Position | null = null;
   private buyWatch: BuyWatch | null = null;
+  private restingGtd: RestingGtdBuy | null = null;
   private sellWatch: SellWatch | null = null;
   private pendingBuy: PendingBuy | null = null;
   private pendingSell: PendingSell | null = null;
@@ -248,6 +251,7 @@ export class SimulatorEngine {
     this.sessionKey = key;
     this.position = null;
     this.buyWatch = null;
+    this.restingGtd = null;
     this.sellWatch = null;
     this.pendingBuy = null;
     this.pendingSell = null;
@@ -382,26 +386,27 @@ export class SimulatorEngine {
     return setup.feeParams ?? DEFAULT_CRYPTO_TAKER_FEE_PARAMS;
   }
 
-  private scheduleBuy(
+  /** Schedule FAK-style taker buy after simulated latency. */
+  private scheduleFakBuy(
     side: Side,
     shares: number,
+    triggerCents: number,
     nowSec: number,
     state: LiveWindowState,
     setup: SimSetup,
     simNowMs: number,
     quote: DepthQuote,
-    limitPrice: number | null,
   ): void {
     const latency = this.latencyMs(setup);
     if (latency <= 0) {
-      this.executeBuy(side, shares, nowSec, state, setup, quote, limitPrice);
+      this.executeFakBuy(side, shares, triggerCents, nowSec, state, setup, quote);
       return;
     }
     if (this.pendingBuy) return;
-    this.pendingBuy = { side, shares, executeAtMs: simNowMs + latency, limitPrice };
+    this.pendingBuy = { side, shares, executeAtMs: simNowMs + latency, triggerCents };
     logService.info(
       "sim",
-      `Buy scheduled: ${side} ${shares} sh, latency ${latency} ms (ask ${fmtCents(bestAskForSide(quote, side) ?? 0)})`,
+      `FAK buy scheduled: ${side} up to ${shares} sh, latency ${latency} ms (ask ${fmtCents(bestAskForSide(quote, side) ?? 0)})`,
     );
   }
 
@@ -436,31 +441,16 @@ export class SimulatorEngine {
     if (this.pendingBuy && simNowMs >= this.pendingBuy.executeAtMs) {
       const pending = this.pendingBuy;
       this.pendingBuy = null;
-      if (!this.boughtThisWindow && !this.position) {
-        const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
-        const phase = setup.phases[phaseIdx];
-        if (phase.buyEnabled) {
-          const trigger = centsToPrice(phase.buyTrigger);
-          const ask = bestAskForSide(quote, pending.side);
-          const askOk =
-            ask != null &&
-            Number.isFinite(ask) &&
-            ask <= trigger &&
-            hasBuyLiquidity(quote, pending.side, pending.shares);
-          if (askOk) {
-            this.executeBuy(
-              pending.side,
-              pending.shares,
-              nowSec,
-              state,
-              setup,
-              quote,
-              pending.limitPrice,
-            );
-          } else {
-            logService.error("sim", `Buy skipped after latency (conditions no longer met)`);
-          }
-        }
+      if (!this.position) {
+        this.executeFakBuy(
+          pending.side,
+          pending.shares,
+          pending.triggerCents,
+          nowSec,
+          state,
+          setup,
+          quote,
+        );
       }
     }
 
@@ -477,41 +467,73 @@ export class SimulatorEngine {
     }
   }
 
-  private executeBuy(
+  /** FAK taker: take whatever size is available up to maxShares (partial OK). */
+  private executeFakBuy(
     side: Side,
-    shares: number,
+    maxShares: number,
+    triggerCents: number,
     nowSec: number,
     state: LiveWindowState,
     setup: SimSetup,
     quote: DepthQuote,
-    limitPrice: number | null,
   ): void {
-    if (!hasBuyLiquidity(quote, side, shares)) return;
-    if (this.boughtThisWindow || this.position) return;
+    if (this.position) return;
+
+    const ask = bestAskForSide(quote, side);
+    if (ask == null || !Number.isFinite(ask) || priceToCents(ask) > triggerCents) {
+      logService.error("sim", `FAK buy skipped after latency (ask above trigger or missing)`);
+      return;
+    }
+
+    const feeParams = this.feeParams(setup);
+    const fill = walkAsksAvailable(asksForSide(quote, side), maxShares, true, feeParams);
+    if (!fill || fill.shares <= 0) {
+      logService.error("sim", `FAK buy skipped after latency (no size available)`);
+      return;
+    }
 
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
-    const phase = setup.phases[phaseIdx];
-    const feeParams = this.feeParams(setup);
-    const makerLimit = limitPrice ?? centsToPrice(phase.buyTrigger);
-    const isTaker = limitPrice == null;
-    const fill = isTaker
-      ? walkAsks(asksForSide(quote, side), shares, true, feeParams)
-      : fillMakerLimitBuy(asksForSide(quote, side), shares, makerLimit);
-    if (!fill) return;
+    this.applyBuyFill(side, fill, nowSec, state, phaseIdx, "taker");
+    this.buyWatch = null;
+  }
+
+  private applyBuyFill(
+    side: Side,
+    fill: { shares: number; avgPrice: number; cost: number; fees: number },
+    nowSec: number,
+    state: LiveWindowState,
+    phaseIdx: number,
+    style: "maker" | "taker",
+  ): void {
+    const shares = fill.shares;
+    if (!(shares > 0)) return;
+
+    if (this.position && this.position.side === side) {
+      const totalShares = this.position.totalShares + shares;
+      const totalCost = this.position.buyCost + fill.cost;
+      const totalFees = this.position.buyFees + fill.fees;
+      this.position.totalShares = totalShares;
+      this.position.remainingShares += shares;
+      this.position.buyCost = totalCost;
+      this.position.buyFees = totalFees;
+      this.position.buyPrice = totalShares > 0 ? totalCost / totalShares : fill.avgPrice;
+    } else if (!this.position) {
+      this.position = {
+        side,
+        buyPrice: fill.avgPrice,
+        buyT: nowSec,
+        phaseIndex: phaseIdx,
+        totalShares: shares,
+        remainingShares: shares,
+        buyCost: fill.cost,
+        buyFees: fill.fees,
+      };
+      this.sellWatch = null;
+    } else {
+      return;
+    }
 
     this.boughtThisWindow = true;
-    this.position = {
-      side,
-      buyPrice: fill.avgPrice,
-      buyT: nowSec,
-      phaseIndex: phaseIdx,
-      totalShares: shares,
-      remainingShares: shares,
-      buyCost: fill.cost,
-      buyFees: fill.fees,
-    };
-    this.buyWatch = null;
-    this.sellWatch = null;
     this.markers.push({
       type: "buy",
       side,
@@ -527,7 +549,7 @@ export class SimulatorEngine {
     this.lockQuoteBox(side, "buy", fill.avgPrice);
     logService.success(
       "sim",
-      `Buy filled: ${side} ${shares} sh @ ${fmtCents(fill.avgPrice)}, cost $${fill.cost.toFixed(2)}${fill.fees > 0 ? `, fees $${fill.fees.toFixed(5)}` : ""} (${isTaker ? "taker" : "maker"})`,
+      `Buy filled: ${side} ${shares} sh @ ${fmtCents(fill.avgPrice)}, cost $${fill.cost.toFixed(2)}${fill.fees > 0 ? `, fees $${fill.fees.toFixed(5)}` : ""} (${style})`,
     );
   }
 
@@ -598,21 +620,102 @@ export class SimulatorEngine {
     this.sellWatch = null;
   }
 
-  private fireBuy(
+  private fireFakBuy(
     side: Side,
-    shares: number,
+    maxShares: number,
+    triggerCents: number,
     nowSec: number,
     state: LiveWindowState,
     setup: SimSetup,
     simNowMs: number,
     quote: DepthQuote,
-    optimize: boolean,
   ): void {
-    const limitPrice = optimize ? null : centsToPrice(setup.phases[
-      phaseIndexForFrac(elapsedFrac(state, nowSec), setup)
-    ].buyTrigger);
     this.buyWatch = null;
-    this.scheduleBuy(side, shares, nowSec, state, setup, simNowMs, quote, limitPrice);
+    const available = totalLevelSize(asksForSide(quote, side));
+    const shares = Math.min(maxShares, available);
+    if (!(shares > 0)) return;
+    this.scheduleFakBuy(side, shares, triggerCents, nowSec, state, setup, simNowMs, quote);
+  }
+
+  /** Place resting GTD at phase enter when gap allows (optimize off). */
+  private tryPlaceRestingGtd(
+    phase: SimSetup["phases"][number],
+    phaseIdx: number,
+    state: LiveWindowState,
+  ): void {
+    if (phase.buyOptimize || !phase.buyEnabled) return;
+    if (this.position || this.restingGtd || this.pendingBuy) return;
+
+    let chosenSide: Side | null = null;
+    for (const side of SIDES_ORDER) {
+      if (gapAllowsBuy(side, phase, state.assetGap)) {
+        chosenSide = side;
+        break;
+      }
+    }
+    if (!chosenSide) return;
+
+    const shares = Math.max(1, phase.buyShares || 1);
+    const limitPrice = centsToPrice(phase.buyTrigger);
+    this.restingGtd = {
+      side: chosenSide,
+      shares,
+      limitPrice,
+      phaseIdx,
+    };
+    logService.info(
+      "sim",
+      `GTD resting placed: ${chosenSide} ${shares} sh @ ${fmtCents(limitPrice)} (phase ${phaseIdx + 1})`,
+    );
+  }
+
+  private cancelRestingGtd(reason: string): void {
+    if (!this.restingGtd) return;
+    logService.info("sim", `GTD resting cancelled (${reason})`);
+    this.restingGtd = null;
+  }
+
+  private syncRestingGtdForPhase(
+    phase: SimSetup["phases"][number],
+    phaseIdx: number,
+  ): void {
+    if (!phase.buyOptimize) this.buyWatch = null;
+    if (!this.restingGtd) return;
+    if (
+      this.restingGtd.phaseIdx !== phaseIdx ||
+      phase.buyOptimize ||
+      !phase.buyEnabled
+    ) {
+      this.cancelRestingGtd(
+        this.restingGtd.phaseIdx !== phaseIdx
+          ? "phase change"
+          : phase.buyOptimize
+            ? "optimize on"
+            : "buy disabled",
+      );
+    }
+  }
+
+  private tickRestingGtd(
+    quote: DepthQuote,
+    nowSec: number,
+    state: LiveWindowState,
+  ): void {
+    const resting = this.restingGtd;
+    if (!resting) return;
+
+    const fill = fillMakerLimitBuyAvailable(
+      asksForSide(quote, resting.side),
+      resting.shares,
+      resting.limitPrice,
+    );
+    if (!fill || fill.shares <= 0) return;
+
+    this.applyBuyFill(resting.side, fill, nowSec, state, resting.phaseIdx, "maker");
+    resting.shares -= fill.shares;
+    if (resting.shares <= 1e-9) {
+      this.restingGtd = null;
+    }
   }
 
   private tryStartBuyWatch(
@@ -620,28 +723,20 @@ export class SimulatorEngine {
     quote: DepthQuote,
     nowSec: number,
     state: LiveWindowState,
-    setup: SimSetup,
-    simNowMs: number,
+    _setup: SimSetup,
+    _simNowMs: number,
   ): void {
-    if (!phase.buyEnabled || this.position || this.buyWatch || this.boughtThisWindow) return;
+    if (!phase.buyOptimize || !phase.buyEnabled) return;
+    if (this.position || this.buyWatch || this.restingGtd || this.pendingBuy) return;
 
     const shares = Math.max(1, phase.buyShares || 1);
     const triggerCents = phase.buyTrigger;
     const assetGap = state.assetGap;
 
     for (const side of SIDES_ORDER) {
-      if (!hasBuyLiquidity(quote, side, shares)) continue;
       const ask = bestAskForSide(quote, side);
       if (ask == null || !Number.isFinite(ask)) continue;
       const askCents = priceToCents(ask);
-
-      if (!phase.buyOptimize) {
-        // Limit: fire when ask is at or below trigger; gap checked at arm/fire.
-        if (askCents > triggerCents) continue;
-        if (!gapAllowsBuy(side, phase, assetGap)) continue;
-        this.fireBuy(side, shares, nowSec, state, setup, simNowMs, quote, false);
-        return;
-      }
 
       // Optimize: must first touch trigger exactly, then hunt ≤.
       if (askCents !== triggerCents) continue;
@@ -702,13 +797,14 @@ export class SimulatorEngine {
       return;
     }
 
-    if (!hasBuyLiquidity(quote, w.side, w.shares)) return;
+    // FAK: any available size is enough (partial OK).
+    if (totalLevelSize(asksForSide(quote, w.side)) <= 0) return;
 
     // Hunting at ≤ trigger.
     if (askCents <= w.triggerCents) {
       if (w.prevAskCents != null && askCents > w.prevAskCents) {
         // Reverse while still ≤ trigger → buy.
-        this.fireBuy(w.side, w.shares, nowSec, state, setup, simNowMs, quote, true);
+        this.fireFakBuy(w.side, w.shares, w.triggerCents, nowSec, state, setup, simNowMs, quote);
         return;
       }
 
@@ -719,7 +815,7 @@ export class SimulatorEngine {
         w.stallTicks = 1;
       }
       if (w.stallTicks >= 3) {
-        this.fireBuy(w.side, w.shares, nowSec, state, setup, simNowMs, quote, true);
+        this.fireFakBuy(w.side, w.shares, w.triggerCents, nowSec, state, setup, simNowMs, quote);
         return;
       }
     }
@@ -759,7 +855,15 @@ export class SimulatorEngine {
 
     this.processPendingFills(state, setup, quote, nowSec, simNowMs);
 
-    if (!this.position && !this.pendingBuy) {
+    // GTD resting: cancel on phase/optimize change, fill from book, place when active.
+    this.syncRestingGtdForPhase(phase, phaseIdx);
+    this.tickRestingGtd(quote, nowSec, state);
+    if (!this.position || this.restingGtd) {
+      this.tryPlaceRestingGtd(phase, phaseIdx, state);
+      this.tickRestingGtd(quote, nowSec, state);
+    }
+
+    if (!this.position && !this.pendingBuy && !this.restingGtd) {
       this.tryStartBuyWatch(phase, quote, nowSec, state, setup, simNowMs);
       this.tickBuyWatch(quote, nowSec, state, setup, simNowMs);
     } else if (this.position && !this.pendingSell) {

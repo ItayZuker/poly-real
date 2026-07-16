@@ -1038,6 +1038,26 @@
     select.value = headerSummaryRange;
   }
 
+  function setHeaderSummaryRange(range) {
+    const select = document.getElementById("schedule-summary-range");
+    if (!select) return;
+
+    const allowed = new Set(["live", "demo", "schedule", "week", "all"]);
+    let next = allowed.has(range) ? range : headerSummaryRange;
+
+    const allowTrade = Boolean(document.getElementById("start-trading")?.checked);
+    if (allowTrade && next === "demo") next = "live";
+    if (!allowTrade && next === "live") next = "demo";
+
+    if (next === headerSummaryRange && select.value === next) return;
+
+    headerSummaryRange = next;
+    select.value = next;
+    saveHeaderSummaryPrefs();
+    syncHeaderSummaryControls();
+    void fetchHeaderSummaryTotals();
+  }
+
   function emptyLiveStats(placementId) {
     return {
       placementId,
@@ -2077,6 +2097,7 @@
     applyLiveSessionTotals,
     applyDemoLastWindow,
     syncHeaderSummaryControls,
+    setHeaderSummaryRange,
     getPlacementCountsBySetup,
     refreshPlacementStats: scheduleStatsRefresh,
     refreshAllPlacementStats: (options = {}) =>

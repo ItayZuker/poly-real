@@ -51,9 +51,16 @@ import {
   initTradingClient,
   isTradingConfigured,
   onBalanceRefresh,
+  reconnectTradingClient,
   refreshCollateralBalance,
 } from "./trading-client.js";
 import { liveTradingService } from "./live-trading-service.js";
+import {
+  ensureDefaultUser,
+  getDefaultUserPublic,
+  updateDefaultUserProfile,
+  updateDefaultUserWallet,
+} from "./db/user-repository.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3848;
@@ -120,9 +127,115 @@ function filterSchedulePlacements(
 app.get("/api/account", async (_req, res) => {
   try {
     const status = await refreshCollateralBalance();
-    res.json(status);
+    const user = await getDefaultUserPublic();
+    res.json({
+      ...status,
+      hasPrivateKey: user.wallet.hasPrivateKey || Boolean(status.hasPrivateKey),
+      funderAddress: status.funderAddress ?? user.wallet.funderAddress,
+      signerAddress: status.signerAddress ?? user.wallet.signerAddress,
+      privateKeyHint: user.wallet.privateKeyHint,
+    });
   } catch {
-    res.json(getTradingAccountStatus());
+    try {
+      const user = await getDefaultUserPublic();
+      const status = getTradingAccountStatus();
+      res.json({
+        ...status,
+        hasPrivateKey: user.wallet.hasPrivateKey,
+        funderAddress: status.funderAddress ?? user.wallet.funderAddress,
+        signerAddress: status.signerAddress ?? user.wallet.signerAddress,
+        privateKeyHint: user.wallet.privateKeyHint,
+      });
+    } catch {
+      res.json(getTradingAccountStatus());
+    }
+  }
+});
+
+app.get("/api/user", async (_req, res) => {
+  try {
+    const user = await getDefaultUserPublic();
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.patch("/api/user", async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { name?: string; email?: string };
+    if (!("name" in body) && !("email" in body)) {
+      res.status(400).json({ error: "Provide name and/or email" });
+      return;
+    }
+    const user = await updateDefaultUserProfile({
+      name: body.name,
+      email: body.email,
+    });
+    res.json(user);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.patch("/api/account/wallet", async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as {
+      funderAddress?: string;
+      privateKey?: string;
+      signatureType?: number;
+    };
+    if (
+      body.funderAddress == null &&
+      body.privateKey == null &&
+      body.signatureType == null
+    ) {
+      res.status(400).json({ error: "Provide funderAddress and/or privateKey" });
+      return;
+    }
+
+    const user = await updateDefaultUserWallet({
+      funderAddress: body.funderAddress,
+      privateKey: body.privateKey,
+      signatureType: body.signatureType,
+    });
+
+    let status = getTradingAccountStatus();
+    try {
+      status = await reconnectTradingClient();
+    } catch (err) {
+      status = getTradingAccountStatus();
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+        wallet: user.wallet,
+        account: {
+          ...status,
+          hasPrivateKey: user.wallet.hasPrivateKey,
+          funderAddress: status.funderAddress ?? user.wallet.funderAddress,
+          signerAddress: status.signerAddress ?? user.wallet.signerAddress,
+          privateKeyHint: user.wallet.privateKeyHint,
+        },
+      });
+      return;
+    }
+
+    broadcast("account", {
+      ...status,
+      hasPrivateKey: user.wallet.hasPrivateKey,
+      privateKeyHint: user.wallet.privateKeyHint,
+    });
+
+    res.json({
+      ok: true,
+      wallet: user.wallet,
+      account: {
+        ...status,
+        hasPrivateKey: user.wallet.hasPrivateKey,
+        privateKeyHint: user.wallet.privateKeyHint,
+      },
+    });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -444,12 +557,6 @@ app.delete("/api/trading-setups/:id", async (req, res) => {
       res.status(404).json({ error: "Setup not found" });
       return;
     }
-    if (existing.simScheduleInUse) {
-      res.status(409).json({
-        error: "Setup is in use on the sim schedule and cannot be deleted here",
-      });
-      return;
-    }
     const setupId = String(req.params.id);
     const linked = (await listSchedulePlacements()).filter((p) => p.setupId === setupId);
     await deletePlacementsBySetupId(setupId);
@@ -711,6 +818,11 @@ app.get("/api/stream", (req, res) => {
 async function main(): Promise<void> {
   await initStorageAndSeed();
   await ensureAllMarketIndexes();
+  try {
+    await ensureDefaultUser();
+  } catch (err) {
+    logService.warn("server", `Failed to ensure default user: ${String(err)}`);
+  }
   await liveTradingService.loadPersistedConfig();
   try {
     await reconcileLiveScheduleInUseFlags();
@@ -741,8 +853,10 @@ async function main(): Promise<void> {
   }, HEATMAP_REFRESH_MS);
   heatmapRefreshTimer.unref?.();
 
-  if (isTradingConfigured()) {
+  try {
     await initTradingClient();
+  } catch (err) {
+    logService.warn("server", `Trading client init skipped/failed: ${String(err)}`);
   }
 
   chainlinkPriceFeed.start();

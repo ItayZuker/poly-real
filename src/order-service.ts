@@ -8,6 +8,7 @@ import type { LiveWindowState } from "./types.js";
 export type TradeSide = "up" | "down";
 export type TradeLeg = "buy" | "sell";
 export type OrderSizeUnit = "shares" | "usdc";
+export type MarketOrderType = "FOK" | "FAK";
 
 export interface PlaceOrderInput {
   series: string;
@@ -16,6 +17,20 @@ export interface PlaceOrderInput {
   /** Share count or USDC amount depending on sizeUnit (sells are always shares). */
   size: number;
   sizeUnit?: OrderSizeUnit;
+  /** Immediate market style; default FOK. */
+  orderType?: MarketOrderType;
+  state?: LiveWindowState;
+}
+
+export interface PlaceLimitOrderInput {
+  series: string;
+  side: TradeSide;
+  /** Share count. */
+  size: number;
+  /** Limit price in 0–1. */
+  price: number;
+  /** Unix seconds expiration for GTD. */
+  expirationSec: number;
   state?: LiveWindowState;
 }
 
@@ -29,6 +44,20 @@ export interface PlaceOrderResult {
   tokenId?: string;
   conditionId?: string;
   slug?: string;
+  /** Resting / live order (GTD) that did not fill immediately. */
+  resting?: boolean;
+  status?: string;
+}
+
+export interface OpenOrderSnapshot {
+  orderId: string;
+  status: string;
+  originalSize: number;
+  sizeMatched: number;
+  price: number;
+  side: string;
+  assetId?: string;
+  market?: string;
 }
 
 function tokenForSide(
@@ -47,6 +76,10 @@ function quotePrice(state: LiveWindowState | undefined, side: TradeSide, leg: Tr
 function num(value: unknown): number | undefined {
   const n = typeof value === "string" ? Number(value) : typeof value === "number" ? value : NaN;
   return Number.isFinite(n) ? n : undefined;
+}
+
+function toClobMarketType(orderType: MarketOrderType | undefined): typeof OrderType.FOK | typeof OrderType.FAK {
+  return orderType === "FAK" ? OrderType.FAK : OrderType.FOK;
 }
 
 /** Best-effort parse of fill size/price from CLOB market-order response. */
@@ -112,6 +145,22 @@ function estimatedSharesFromBuy(size: number, sizeUnit: OrderSizeUnit, refPrice:
   return Math.max(1, Math.round((usdcAmount / refPrice) * 1000) / 1000);
 }
 
+function parseOpenOrder(raw: Record<string, unknown> | null | undefined, fallbackId = ""): OpenOrderSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const orderId = String(raw.id ?? raw.orderID ?? raw.orderId ?? fallbackId);
+  if (!orderId) return null;
+  return {
+    orderId,
+    status: String(raw.status ?? ""),
+    originalSize: num(raw.original_size) ?? num(raw.originalSize) ?? 0,
+    sizeMatched: num(raw.size_matched) ?? num(raw.sizeMatched) ?? 0,
+    price: num(raw.price) ?? 0,
+    side: String(raw.side ?? ""),
+    assetId: raw.asset_id != null ? String(raw.asset_id) : raw.assetId != null ? String(raw.assetId) : undefined,
+    market: raw.market != null ? String(raw.market) : undefined,
+  };
+}
+
 export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
   if (!isTradingConfigured()) {
     return { success: false, error: "Trading account not configured" };
@@ -129,6 +178,7 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
 
   const sizeUnit: OrderSizeUnit =
     input.leg === "sell" ? "shares" : input.sizeUnit === "usdc" ? "usdc" : "shares";
+  const clobOrderType = toClobMarketType(input.orderType);
 
   try {
     const pair = await fetchCurrentUpDownMarket(input.series);
@@ -160,10 +210,10 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
         tokenID,
         amount,
         side: clobSide,
-        orderType: OrderType.FOK,
+        orderType: clobOrderType,
       },
       { tickSize, negRisk },
-      OrderType.FOK,
+      clobOrderType,
     )) as Record<string, unknown> | null;
 
     if (resp?.success === false || resp?.errorMsg) {
@@ -180,9 +230,16 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
       input.leg === "buy" ? amount : undefined,
     );
 
+    // FAK may return success with zero fill if nothing available.
+    if (!(fill.fillShares > 0)) {
+      const err = `${clobOrderType} order not filled`;
+      logService.warn("trading", `${input.leg} ${input.side}: ${err}`);
+      return { success: false, error: err };
+    }
+
     logService.success(
       "trading",
-      `${input.leg.toUpperCase()} ${input.side.toUpperCase()}: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢` +
+      `${input.leg.toUpperCase()} ${input.side.toUpperCase()} (${clobOrderType}): ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢` +
         (input.leg === "buy" ? ` (~$${amount.toFixed(2)} ${sizeUnit === "shares" ? "for " + size + " sh target" : "USDC"})` : ""),
     );
 
@@ -195,10 +252,117 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
       tokenId: tokenID,
       conditionId: pair.conditionId,
       slug: pair.slug,
+      status: resp?.status != null ? String(resp.status) : undefined,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logService.error("trading", `${input.leg} ${input.side} error: ${message}`);
     return { success: false, error: message };
+  }
+}
+
+/** Place a resting GTD limit buy (shares @ price) that expires at expirationSec. */
+export async function placeLimitGtdBuy(input: PlaceLimitOrderInput): Promise<PlaceOrderResult> {
+  if (!isTradingConfigured()) {
+    return { success: false, error: "Trading account not configured" };
+  }
+
+  const client = getTradingClient();
+  if (!client) {
+    return { success: false, error: "Trading client not initialized" };
+  }
+
+  const size = Math.max(1, Math.floor(Number(input.size)));
+  const price = Number(input.price);
+  const expiration = Math.floor(Number(input.expirationSec));
+  if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+    return { success: false, error: "Invalid limit price" };
+  }
+  if (!Number.isFinite(expiration) || expiration <= 0) {
+    return { success: false, error: "Invalid expiration" };
+  }
+
+  try {
+    const pair = await fetchCurrentUpDownMarket(input.series);
+    const tokenID = tokenForSide(pair, input.side);
+    const publicClient = await createPublicClient(getClobHost(), getChainId());
+    const info = await getMarketInfo(publicClient, tokenID);
+    const tickSize = (info.tickSize ?? "0.01") as TickSize;
+    const negRisk = info.negRisk ?? false;
+
+    const resp = (await client.createAndPostOrder(
+      {
+        tokenID,
+        price,
+        size,
+        side: Side.BUY,
+        expiration,
+      },
+      { tickSize, negRisk },
+      OrderType.GTD,
+    )) as Record<string, unknown> | null;
+
+    if (resp?.success === false || resp?.errorMsg) {
+      const err = String(resp?.errorMsg ?? resp?.error ?? "Order rejected");
+      logService.error("trading", `GTD buy ${input.side} failed: ${err}`);
+      return { success: false, error: err };
+    }
+
+    const orderId = String(resp?.orderID ?? resp?.orderId ?? "");
+    const status = resp?.status != null ? String(resp.status) : "";
+    const fill = parseFillFromResponse(resp, "buy", price, size, size * price);
+    const immediateFill = fill.fillShares > 0 && (status === "matched" || Boolean(resp?.takingAmount));
+
+    logService.success(
+      "trading",
+      immediateFill
+        ? `GTD BUY ${input.side.toUpperCase()} filled: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢`
+        : `GTD BUY ${input.side.toUpperCase()} resting: ${size} sh @ ${(price * 100).toFixed(0)}¢ (exp ${expiration})`,
+    );
+
+    return {
+      success: true,
+      orderId,
+      fillPrice: immediateFill ? fill.fillPrice : undefined,
+      fillShares: immediateFill ? fill.fillShares : undefined,
+      usdcAmount: immediateFill ? fill.usdcAmount : undefined,
+      tokenId: tokenID,
+      conditionId: pair.conditionId,
+      slug: pair.slug,
+      resting: !immediateFill,
+      status,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logService.error("trading", `GTD buy ${input.side} error: ${message}`);
+    return { success: false, error: message };
+  }
+}
+
+export async function cancelOpenOrder(orderId: string): Promise<{ ok: boolean; error?: string }> {
+  if (!orderId) return { ok: false, error: "Missing order id" };
+  const client = getTradingClient();
+  if (!client) return { ok: false, error: "Trading client not initialized" };
+  try {
+    await client.cancelOrder({ orderID: orderId });
+    logService.info("trading", `Cancelled order ${orderId.slice(0, 10)}…`);
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logService.warn("trading", `Cancel ${orderId.slice(0, 10)}… failed: ${message}`);
+    return { ok: false, error: message };
+  }
+}
+
+export async function fetchOpenOrder(orderId: string): Promise<OpenOrderSnapshot | null> {
+  if (!orderId) return null;
+  const client = getTradingClient();
+  if (!client) return null;
+  try {
+    const raw = (await client.getOrder(orderId)) as unknown as Record<string, unknown> | null;
+    return parseOpenOrder(raw, orderId);
+  } catch (err) {
+    logService.warn("trading", `getOrder ${orderId.slice(0, 10)}… failed: ${String(err)}`);
+    return null;
   }
 }

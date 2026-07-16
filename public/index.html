@@ -40,7 +40,7 @@
         <div id="schedule-week-summary" class="schedule-week-summary" title="Trading session totals">
           <label class="schedule-summary-range-label" for="schedule-summary-range">
             <select id="schedule-summary-range" class="schedule-summary-range" aria-label="Stats range">
-              <option value="live">Live update</option>
+              <option value="live">Market</option>
               <option value="demo">Demo update</option>
               <option value="schedule">Schedule</option>
               <option value="week" selected>Week</option>
@@ -82,6 +82,16 @@
           <button type="button" class="page-toggle-btn is-active" data-page="simulator">Market</button>
           <button type="button" class="page-toggle-btn" data-page="schedule">Schedule / Heatmap</button>
         </div>
+        <button
+          type="button"
+          id="settings-page-btn"
+          class="header-settings-btn"
+          data-page="settings"
+          aria-label="Settings"
+          title="Settings"
+        >
+          <span id="settings-page-initial" class="header-settings-initial" aria-hidden="true">?</span>
+        </button>
       </div>
       <div id="header-stats-progress" class="header-stats-progress" hidden aria-hidden="true">
         <div class="header-stats-progress-bar"></div>
@@ -114,52 +124,39 @@
         <div class="left-column-inner">
         <section class="panel settings-panel" aria-label="Wallet">
           <div class="settings-panel-header">
-            <button
-              type="button"
-              id="wallet-balance-refresh"
-              class="wallet-header-refresh"
-              aria-label="Refresh wallet balance"
-              title="Refresh balance"
-            >
-              <svg class="wallet-balance-refresh-icon" viewBox="0 0 16 16" aria-hidden="true">
-                <path
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M2.5 3.5v3h3M13.5 12.5v-3h-3"
-                />
-                <path
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  d="M3.2 9.2A5 5 0 0 0 12.5 11M12.8 6.8A5 5 0 0 0 3.5 5"
-                />
-              </svg>
-              <span class="settings-panel-title">Wallet</span>
-            </button>
+            <div class="wallet-header-title-row">
+              <button
+                type="button"
+                id="wallet-balance-refresh"
+                class="wallet-header-refresh"
+                aria-label="Refresh wallet balance"
+                title="Refresh balance"
+              >
+                <svg class="wallet-balance-refresh-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M2.5 3.5v3h3M13.5 12.5v-3h-3"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    d="M3.2 9.2A5 5 0 0 0 12.5 11M12.8 6.8A5 5 0 0 0 3.5 5"
+                  />
+                </svg>
+                <span class="settings-panel-title">Wallet</span>
+              </button>
+              <span id="wallet-status" class="wallet-header-status">—</span>
+            </div>
             <span id="wallet-balance" class="wallet-header-balance">—</span>
           </div>
           <div id="settings-body" class="settings-panel-body">
             <div class="wallet-summary-rows">
-              <div class="wallet-summary-row">
-                <span class="wallet-summary-label">Status</span>
-                <span id="wallet-status" class="wallet-summary-value">—</span>
-              </div>
-              <div class="wallet-summary-row">
-                <span class="wallet-summary-label">Signer</span>
-                <span id="wallet-signer" class="wallet-summary-value wallet-summary-mono" title="">—</span>
-              </div>
-              <div class="wallet-summary-row">
-                <span class="wallet-summary-label">Funder</span>
-                <span id="wallet-funder" class="wallet-summary-value wallet-summary-mono" title="">—</span>
-              </div>
-              <div class="wallet-summary-row">
-                <span class="wallet-summary-label">Sig type</span>
-                <span id="wallet-sig-type" class="wallet-summary-value">—</span>
-              </div>
               <div class="wallet-control-fields">
                 <label class="wallet-control-field wallet-control-field--toggle" for="auto-trade">
                   <span class="wallet-control-label">Auto Trade</span>
@@ -375,6 +372,129 @@
       </aside>
       </div>
 
+      <div id="page-settings" class="app-page app-page-settings" hidden>
+        <div class="settings-page">
+          <header class="settings-page-header">
+            <h2 class="settings-page-title">Settings</h2>
+            <p class="settings-page-sub">Account profile and trading credentials</p>
+          </header>
+
+          <section class="settings-card" aria-label="User profile">
+            <h3 class="settings-card-title">User</h3>
+            <p class="settings-card-desc">Profile details stored on your account</p>
+            <div class="settings-form-grid">
+              <div class="settings-field">
+                <label class="settings-field-label" for="settings-user-name">Name</label>
+                <input type="text" id="settings-user-name" class="settings-field-input" autocomplete="name" />
+              </div>
+              <div class="settings-field">
+                <label class="settings-field-label" for="settings-user-email">Email</label>
+                <input type="email" id="settings-user-email" class="settings-field-input" autocomplete="email" />
+              </div>
+            </div>
+            <div class="settings-card-actions">
+              <button type="button" id="settings-user-save" class="settings-primary-btn">Save profile</button>
+              <span id="settings-user-status" class="settings-inline-status" hidden></span>
+            </div>
+          </section>
+
+          <section class="settings-card" aria-label="Trading credentials">
+            <h3 class="settings-card-title">Trading credentials</h3>
+            <p class="settings-card-desc">Polymarket funder wallet and signing key used for live orders</p>
+            <div class="settings-form-grid">
+              <div class="settings-field settings-field--wide">
+                <div class="settings-field-label-row">
+                  <button
+                    type="button"
+                    class="settings-info-toggle"
+                    data-settings-info="funder"
+                    aria-expanded="false"
+                    aria-controls="settings-info-funder"
+                    title="About funder address"
+                  >
+                    <span class="settings-info-icon" aria-hidden="true">
+                      <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 7.2v4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="5" r="0.85" fill="currentColor"/></svg>
+                    </span>
+                    <span class="settings-field-label">Funder address</span>
+                  </button>
+                  <span id="settings-wallet-status" class="settings-label-status">—</span>
+                </div>
+                <div class="settings-secret-row">
+                  <input
+                    type="password"
+                    id="settings-funder-input"
+                    class="settings-field-input settings-field-mono"
+                    placeholder="0x…"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <button type="button" id="settings-funder-toggle" class="settings-reveal-btn" aria-pressed="false">
+                    Show
+                  </button>
+                </div>
+                <div class="settings-field-actions">
+                  <button type="button" id="settings-funder-save" class="settings-primary-btn">Save funder</button>
+                </div>
+                <div id="settings-info-funder" class="settings-info-panel" data-settings-info-panel="funder" aria-hidden="true">
+                  <div class="settings-info-panel-body">
+                    <p><strong>What it is:</strong> Your Polymarket proxy / profile wallet — the address that holds USDC and positions. Usually different from the signing wallet address tied to your private key.</p>
+                    <p><strong>Where to get it:</strong></p>
+                    <ul>
+                      <li><strong>Polymarket.com</strong> — open your profile / settings; copy the wallet address shown there</li>
+                      <li>Often labeled as your Polymarket address or proxy wallet (not the signing-wallet address)</li>
+                    </ul>
+                    <p>Paste the full <code>0x…</code> address here.</p>
+                  </div>
+                </div>
+              </div>
+              <div class="settings-field settings-field--wide">
+                <div class="settings-field-label-row">
+                  <button
+                    type="button"
+                    class="settings-info-toggle"
+                    data-settings-info="privateKey"
+                    aria-expanded="false"
+                    aria-controls="settings-info-privateKey"
+                    title="About private key"
+                  >
+                    <span class="settings-info-icon" aria-hidden="true">
+                      <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 7.2v4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="5" r="0.85" fill="currentColor"/></svg>
+                    </span>
+                    <span class="settings-field-label">Private key</span>
+                  </button>
+                  <span id="settings-signer" class="settings-label-signer settings-field-mono">—</span>
+                </div>
+                <input
+                  type="password"
+                  id="settings-key-input"
+                  class="settings-field-input settings-field-mono"
+                  placeholder="Paste key to set / change"
+                  spellcheck="false"
+                  autocomplete="new-password"
+                />
+                <div class="settings-field-actions">
+                  <button type="button" id="settings-key-save" class="settings-primary-btn">Save private key</button>
+                </div>
+                <div id="settings-info-privateKey" class="settings-info-panel" data-settings-info-panel="privateKey" aria-hidden="true">
+                  <div class="settings-info-panel-body">
+                    <p><strong>What it is:</strong> The signing key for your wallet (EOA). The app derives the Signer address from it and uses it to place Polymarket orders. It is stored encrypted — never shown again after save.</p>
+                    <p><strong>Where to get it</strong> (any wallet that can export a private key):</p>
+                    <ul>
+                      <li><strong>MetaMask</strong> — Account details → Show private key</li>
+                      <li><strong>Rabby</strong> — Account / Address management → Export private key</li>
+                      <li><strong>Phantom / other EVM wallets</strong> — Settings → Export private key (if supported)</li>
+                      <li><strong>Dedicated bot wallet</strong> — generate a new key and fund only what you’re willing to risk</li>
+                    </ul>
+                    <p>Any exportable EOA key works. Hardware wallets usually cannot export a key for server bots.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p id="settings-wallet-error" class="settings-inline-status settings-inline-status--error" hidden></p>
+          </section>
+        </div>
+      </div>
+
       <div id="page-schedule-heatmap" class="app-page app-page-schedule" hidden>
         <aside class="panel schedule-setups-panel" aria-label="Saved trading setups">
           <div class="schedule-setups-header">
@@ -460,24 +580,24 @@
         <button type="button" id="phase-modal-close" class="modal-close" aria-label="Close">×</button>
       </div>
       <div class="modal-body">
-        <section class="modal-section">
+        <section class="modal-section" id="phase-buy-section">
           <h3>Buy</h3>
-          <label class="modal-toggle">
+          <label class="modal-toggle" id="phase-buy-enabled-toggle">
             <span>Allow buy in this phase</span>
             <span class="switch">
               <input type="checkbox" id="phase-buy-enabled" />
               <span class="switch-slider"></span>
             </span>
           </label>
-          <label class="modal-field">
+          <label class="modal-field" id="phase-buy-shares-label">
             <span>Shares to buy</span>
             <input type="number" id="phase-buy-shares" min="1" max="100000" step="1" value="10" />
           </label>
-          <label class="modal-field">
-            <span>Trigger (¢)</span>
+          <label class="modal-field" id="phase-buy-trigger-label">
+            <span id="phase-buy-trigger-text">Trigger (¢) GTD</span>
             <input type="number" id="phase-buy-trigger" min="1" max="99" step="1" value="40" />
           </label>
-          <label class="modal-toggle">
+          <label class="modal-toggle" id="phase-buy-optimize-toggle">
             <span>Optimize</span>
             <span class="switch">
               <input type="checkbox" id="phase-buy-optimize" />
@@ -492,9 +612,10 @@
             <span id="phase-min-gap-text">Min gap ($) None</span>
             <input type="number" id="phase-min-gap" min="0" max="100000" step="0.01" value="0" />
           </label>
-          <label class="modal-field">
+          <label class="modal-field" id="phase-gap-vs-ptb-label">
             <span>Gap vs PTB</span>
             <select id="phase-gap-vs-ptb" class="modal-select">
+              <option value="none">None</option>
               <option value="opposite">Opposite</option>
               <option value="with">With</option>
             </select>
@@ -564,6 +685,9 @@
           <canvas id="setup-edit-chart"></canvas>
           <div id="setup-edit-phase-hover" class="sim-phase-hover" hidden></div>
         </div>
+        <p id="setup-edit-phases-hint" class="phase-modal-schedule-hint" hidden>
+          This setup is on the schedule. Remove its placements to edit phases.
+        </p>
       </div>
       <div class="modal-footer modal-footer-actions">
         <button type="button" id="setup-edit-cancel" class="modal-btn-secondary">Cancel</button>

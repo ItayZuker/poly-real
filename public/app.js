@@ -10,13 +10,6 @@ let chartWindowStart = null;
 
 const MAX_LOG_LINES = 500;
 
-const SIGNATURE_TYPE_LABELS = {
-  0: "EOA",
-  1: "Proxy",
-  2: "Gnosis Safe",
-  3: "Deposit",
-};
-
 function shortAddress(addr) {
   if (!addr || addr.length < 10) return addr || "—";
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
@@ -28,35 +21,107 @@ function formatUsdcBalance(raw) {
   return `$${(value / 1_000_000).toFixed(2)}`;
 }
 
+function setSettingsWalletError(message) {
+  const el = $("settings-wallet-error");
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+}
+
+function setSettingsUserStatus(message, isError = false) {
+  const el = $("settings-user-status");
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    el.classList.remove("settings-inline-status--error");
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+  el.classList.toggle("settings-inline-status--error", Boolean(isError));
+}
+
 function renderWalletAccount(data) {
   const statusEl = $("wallet-status");
   const balanceEl = $("wallet-balance");
-  const signerEl = $("wallet-signer");
-  const funderEl = $("wallet-funder");
-  const sigTypeEl = $("wallet-sig-type");
-  if (!statusEl || !balanceEl || !signerEl || !funderEl || !sigTypeEl) return;
+  if (!statusEl || !balanceEl) return;
 
   if (!data?.connected) {
-    statusEl.textContent = data?.error ? "Error" : "Not connected";
-    statusEl.className = "wallet-summary-value wallet-summary-value-negative";
+    statusEl.textContent = "No Connection";
+    statusEl.className = "wallet-header-status wallet-header-status--error";
+    statusEl.title = data?.error || "No Connection";
     balanceEl.textContent = "—";
-    signerEl.textContent = "—";
-    signerEl.title = "";
-    funderEl.textContent = "—";
-    funderEl.title = "";
-    sigTypeEl.textContent = "—";
-    return;
+  } else {
+    statusEl.textContent = "Connected";
+    statusEl.className = "wallet-header-status wallet-header-status--ok";
+    statusEl.title = "";
+    balanceEl.textContent = formatUsdcBalance(data.collateralBalance);
   }
 
-  statusEl.textContent = "Connected";
-  statusEl.className = "wallet-summary-value wallet-summary-value-positive";
-  balanceEl.textContent = formatUsdcBalance(data.collateralBalance);
-  signerEl.textContent = shortAddress(data.signerAddress);
-  signerEl.title = data.signerAddress || "";
-  funderEl.textContent = shortAddress(data.funderAddress);
-  funderEl.title = data.funderAddress || "";
-  const sigLabel = SIGNATURE_TYPE_LABELS[data.signatureType] ?? `Type ${data.signatureType}`;
-  sigTypeEl.textContent = `${sigLabel} (${data.signatureType})`;
+  renderSettingsWalletAccount(data);
+}
+
+function renderSettingsWalletAccount(data) {
+  const funderInput = $("settings-funder-input");
+  const signerEl = $("settings-signer");
+  const statusEl = $("settings-wallet-status");
+
+  if (funderInput && document.activeElement !== funderInput) {
+    funderInput.value = data?.funderAddress || "";
+    // Avoid leaking the address via hover tooltip while masked.
+    funderInput.title = funderInput.type === "text" ? data?.funderAddress || "" : "";
+  }
+
+  if (signerEl) {
+    signerEl.textContent = data?.signerAddress ? shortAddress(data.signerAddress) : "—";
+    signerEl.title = data?.signerAddress || "";
+    signerEl.className = "settings-label-signer settings-field-mono";
+  }
+
+  if (statusEl) {
+    if (!data?.connected) {
+      statusEl.textContent = "Not connected";
+      statusEl.className = "settings-label-status settings-conn--error";
+      statusEl.title = data?.error || "Not connected";
+    } else {
+      statusEl.textContent = "Connected";
+      statusEl.className = "settings-label-status settings-conn--ok";
+      statusEl.title = "";
+    }
+  }
+}
+
+function userNameInitial(name) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return "?";
+  const letter = trimmed[0];
+  return letter.toLocaleUpperCase();
+}
+
+function renderHeaderUserInitial(name) {
+  const el = $("settings-page-initial");
+  const btn = $("settings-page-btn");
+  const initial = userNameInitial(name);
+  if (el) el.textContent = initial;
+  if (btn) {
+    const label = String(name || "").trim() || "Settings";
+    btn.title = label;
+    btn.setAttribute("aria-label", `Settings — ${label}`);
+  }
+}
+
+function renderSettingsUser(user) {
+  const nameEl = $("settings-user-name");
+  const emailEl = $("settings-user-email");
+  if (nameEl && document.activeElement !== nameEl) nameEl.value = user?.name || "";
+  if (emailEl && document.activeElement !== emailEl) emailEl.value = user?.email || "";
+  renderHeaderUserInitial(user?.name);
 }
 
 async function loadWalletAccount() {
@@ -66,6 +131,172 @@ async function loadWalletAccount() {
     renderWalletAccount(await res.json());
   } catch {
     renderWalletAccount({ connected: false, error: "Failed to load" });
+  }
+}
+
+async function loadSettingsUser() {
+  try {
+    const res = await fetch("/api/user");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderSettingsUser(await res.json());
+  } catch (err) {
+    setSettingsUserStatus(err instanceof Error ? err.message : String(err), true);
+  }
+}
+
+async function saveWalletField(body) {
+  setSettingsWalletError("");
+  const res = await fetch("/api/account/wallet", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (payload?.account) renderWalletAccount(payload.account);
+    throw new Error(payload?.error || `HTTP ${res.status}`);
+  }
+  if (payload?.account) renderWalletAccount(payload.account);
+  else await loadWalletAccount();
+  return payload;
+}
+
+function setSettingsInfoPanelOpen(panel, open) {
+  if (!panel) return;
+  panel.classList.toggle("is-open", open);
+  panel.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
+function closeSettingsInfoPanels(exceptKey = null) {
+  document.querySelectorAll(".settings-info-panel").forEach((panel) => {
+    const key = panel.getAttribute("data-settings-info-panel");
+    if (exceptKey != null && key === exceptKey) return;
+    setSettingsInfoPanelOpen(panel, false);
+  });
+  document.querySelectorAll(".settings-info-toggle").forEach((btn) => {
+    const key = btn.getAttribute("data-settings-info");
+    if (exceptKey != null && key === exceptKey) return;
+    btn.setAttribute("aria-expanded", "false");
+  });
+}
+
+function bindSettingsInfoTips() {
+  const page = $("page-settings");
+  if (!page || page.dataset.infoBound === "1") return;
+  page.dataset.infoBound = "1";
+
+  page.addEventListener("click", (event) => {
+    const btn = event.target.closest?.(".settings-info-toggle");
+    if (btn && page.contains(btn)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = btn.getAttribute("data-settings-info");
+      const panel = page.querySelector(`[data-settings-info-panel="${key}"]`);
+      if (!panel) return;
+      const willOpen = !panel.classList.contains("is-open");
+      closeSettingsInfoPanels(willOpen ? key : null);
+      setSettingsInfoPanelOpen(panel, willOpen);
+      btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+      return;
+    }
+
+    if (!event.target.closest?.(".settings-info-panel")) {
+      closeSettingsInfoPanels();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSettingsInfoPanels();
+  });
+}
+
+function bindSettingsFunderReveal() {
+  const funderInput = $("settings-funder-input");
+  const toggle = $("settings-funder-toggle");
+  if (!funderInput || !toggle || toggle.dataset.bound === "1") return;
+  toggle.dataset.bound = "1";
+  toggle.addEventListener("click", () => {
+    const showing = funderInput.type === "text";
+    funderInput.type = showing ? "password" : "text";
+    toggle.textContent = showing ? "Show" : "Hide";
+    toggle.setAttribute("aria-pressed", showing ? "false" : "true");
+    funderInput.title = funderInput.type === "text" ? funderInput.value : "";
+  });
+}
+
+function bindSettingsEditors() {
+  bindSettingsInfoTips();
+  bindSettingsFunderReveal();
+
+  const userSave = $("settings-user-save");
+  const funderInput = $("settings-funder-input");
+  const funderSave = $("settings-funder-save");
+  const keyInput = $("settings-key-input");
+  const keySave = $("settings-key-save");
+
+  if (userSave && userSave.dataset.bound !== "1") {
+    userSave.dataset.bound = "1";
+    userSave.addEventListener("click", async () => {
+      setSettingsUserStatus("");
+      userSave.disabled = true;
+      try {
+        const res = await fetch("/api/user", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: $("settings-user-name")?.value ?? "",
+            email: $("settings-user-email")?.value ?? "",
+          }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
+        renderSettingsUser(payload);
+        setSettingsUserStatus("Saved");
+      } catch (err) {
+        setSettingsUserStatus(err instanceof Error ? err.message : String(err), true);
+      } finally {
+        userSave.disabled = false;
+      }
+    });
+  }
+
+  if (funderSave && funderInput && funderSave.dataset.bound !== "1") {
+    funderSave.dataset.bound = "1";
+    funderSave.addEventListener("click", async () => {
+      const funderAddress = funderInput.value.trim();
+      if (!funderAddress) {
+        setSettingsWalletError("Enter a funder address");
+        return;
+      }
+      funderSave.disabled = true;
+      try {
+        await saveWalletField({ funderAddress });
+      } catch (err) {
+        setSettingsWalletError(err instanceof Error ? err.message : String(err));
+      } finally {
+        funderSave.disabled = false;
+      }
+    });
+  }
+
+  if (keySave && keyInput && keySave.dataset.bound !== "1") {
+    keySave.dataset.bound = "1";
+    keySave.addEventListener("click", async () => {
+      const privateKey = keyInput.value.trim();
+      if (!privateKey) {
+        setSettingsWalletError("Paste a private key to save");
+        return;
+      }
+      keySave.disabled = true;
+      try {
+        await saveWalletField({ privateKey });
+        keyInput.value = "";
+      } catch (err) {
+        setSettingsWalletError(err instanceof Error ? err.message : String(err));
+      } finally {
+        keySave.disabled = false;
+      }
+    });
   }
 }
 
@@ -516,15 +747,31 @@ function setColumnSplit(pct) {
   syncMarketColumnRail();
 }
 
+function parseSplitPct(raw) {
+  const text = String(raw ?? "").trim();
+  // Number("") === 0 — treat blank as missing, not 0% covered.
+  if (!text) return null;
+  const pct = Number(text);
+  return Number.isFinite(pct) ? pct : null;
+}
+
+function getColumnSplitPct() {
+  const page = $("page-simulator");
+  if (!page) return 50;
+  const inline = parseSplitPct(page.style.getPropertyValue("--split-left-pct"));
+  if (inline != null) return inline;
+  const fromCss = parseSplitPct(getComputedStyle(page).getPropertyValue("--split-left-pct"));
+  return fromCss != null ? fromCss : 50;
+}
+
 function syncLeftColumnRail() {
   const page = $("page-simulator");
   const rail = $("left-column-rail");
-  const leftColumn = document.querySelector(".left-column");
-  if (!page || !rail || !leftColumn) return;
-  const pct = Number(page.style.getPropertyValue("--split-left-pct"));
-  const splitPct = Number.isFinite(pct) ? pct : 50;
-  const covered = splitPct <= LEFT_COVERED_PCT || leftColumn.getBoundingClientRect().width < 8;
+  if (!page || !rail) return;
+  // Use split % only — measuring width during first paint can be ~0 and falsely show the rail.
+  const covered = getColumnSplitPct() <= LEFT_COVERED_PCT;
   rail.hidden = !covered;
+  rail.classList.toggle("is-visible", covered);
   page.classList.toggle("is-left-covered", covered);
   if (covered) clampLeftColumnRailTop();
 }
@@ -532,12 +779,10 @@ function syncLeftColumnRail() {
 function syncMarketColumnRail() {
   const page = $("page-simulator");
   const rail = $("market-column-rail");
-  const marketPanel = document.querySelector(".simulator-panel");
-  if (!page || !rail || !marketPanel) return;
-  const pct = Number(page.style.getPropertyValue("--split-left-pct"));
-  const splitPct = Number.isFinite(pct) ? pct : 50;
-  const covered = splitPct >= RIGHT_COVERED_PCT || marketPanel.getBoundingClientRect().width < 8;
+  if (!page || !rail) return;
+  const covered = getColumnSplitPct() >= RIGHT_COVERED_PCT;
   rail.hidden = !covered;
+  rail.classList.toggle("is-visible", covered);
   page.classList.toggle("is-market-covered", covered);
   syncMarketRailLivePulse();
   if (covered) clampMarketColumnRailTop();
@@ -1902,19 +2147,11 @@ window.refreshScheduleSetupsList = () => loadScheduleSetups();
 
 async function deleteTradingSetup(setup) {
   closeSetupMenus();
-  if (setup?.simScheduleInUse === true) {
-    appendLogEntry({
-      level: "warn",
-      source: "sim",
-      message: `Cannot delete "${setup.title}": it is in use on the sim schedule`,
-    });
-    return;
-  }
-  const inLive = setup?.liveScheduleInUse === true;
+  const placementCount = getSetupPlacementCounts()[setup?._id] ?? 0;
   const confirmed = window.confirm(
-    inLive
-      ? `Delete "${setup.title}"?\n\nIt is currently placed on the live schedule. This will remove those schedule cards and cannot be undone.`
-      : `Delete "${setup.title}"? This will remove it from the schedule and cannot be undone.`,
+    placementCount > 0
+      ? `Delete "${setup.title}"?\n\nIt has ${placementCount} placement${placementCount === 1 ? "" : "s"} on the schedule. Those schedule cards will be removed and this cannot be undone.`
+      : `Delete "${setup.title}"? This cannot be undone.`,
   );
   if (!confirmed) return;
 
@@ -1942,6 +2179,11 @@ function openSetupEditor(setup) {
 }
 
 function switchToPage(page) {
+  if (page === "settings") {
+    const settingsBtn = $("settings-page-btn");
+    if (settingsBtn && !settingsBtn.classList.contains("is-active")) settingsBtn.click();
+    return;
+  }
   const btn = document.querySelector(`.page-toggle-btn[data-page="${page}"]`);
   if (btn && !btn.classList.contains("is-active")) btn.click();
 }
@@ -2241,16 +2483,10 @@ function renderScheduleSetupsList(setups, errorMessage) {
       deleteBtn.className = "schedule-setup-menu-item schedule-setup-menu-item-danger";
       deleteBtn.setAttribute("role", "menuitem");
       deleteBtn.textContent = "Delete";
-      if (setup.simScheduleInUse === true) {
-        deleteBtn.disabled = true;
-        deleteBtn.classList.add("is-disabled");
-        deleteBtn.title = "In use on the sim schedule — remove it there first";
-      } else {
-        deleteBtn.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          void deleteTradingSetup(setup);
-        });
-      }
+      deleteBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        void deleteTradingSetup(setup);
+      });
 
       menu.append(editBtn, duplicateBtn, applyBtn, applyScheduleBtn, deleteBtn);
       document.body.appendChild(menu);
@@ -2725,20 +2961,27 @@ window.getTradingUiState = () => windowState?.trading ?? null;
 function bindPageToggle() {
   const simulatorPage = $("page-simulator");
   const schedulePage = $("page-schedule-heatmap");
+  const settingsPage = $("page-settings");
   const buttons = document.querySelectorAll(".page-toggle-btn");
-  if (!simulatorPage || !schedulePage || !buttons.length) return;
+  const settingsBtn = $("settings-page-btn");
+  if (!simulatorPage || !schedulePage || !settingsPage || !buttons.length) return;
 
   const showPage = (page) => {
     const isSimulator = page === "simulator";
+    const isSchedule = page === "schedule";
+    const isSettings = page === "settings";
     simulatorPage.hidden = !isSimulator;
-    schedulePage.hidden = isSimulator;
+    schedulePage.hidden = !isSchedule;
+    settingsPage.hidden = !isSettings;
     for (const btn of buttons) {
       btn.classList.toggle("is-active", btn.dataset.page === page);
     }
+    if (settingsBtn) settingsBtn.classList.toggle("is-active", isSettings);
+
     if (isSimulator && windowState) {
       resizeChartCanvas();
       drawPriceChart(windowState);
-    } else if (!isSimulator) {
+    } else if (isSchedule) {
       void loadScheduleSetups();
       if (lastHeatmapState) renderHeatmap(lastHeatmapState);
       else void loadHeatmap();
@@ -2747,8 +2990,20 @@ function bindPageToggle() {
       if (window.SchedulePlacements) {
         void window.SchedulePlacements.loadPlacements({ reloadStats: false });
       }
+    } else if (isSettings) {
+      void loadSettingsUser();
+      void loadWalletAccount();
     }
-    if (window.SchedulePlacements) window.SchedulePlacements.onViewChange();
+
+    if (window.SchedulePlacements) {
+      window.SchedulePlacements.onViewChange();
+      if (isSimulator) {
+        const allowTrade = Boolean($("start-trading")?.checked);
+        window.SchedulePlacements.setHeaderSummaryRange?.(allowTrade ? "live" : "demo");
+      } else if (isSchedule) {
+        window.SchedulePlacements.setHeaderSummaryRange?.("schedule");
+      }
+    }
   };
 
   for (const btn of buttons) {
@@ -2756,6 +3011,14 @@ function bindPageToggle() {
       const page = btn.dataset.page;
       if (!page || btn.classList.contains("is-active")) return;
       showPage(page);
+    });
+  }
+
+  if (settingsBtn && settingsBtn.dataset.bound !== "1") {
+    settingsBtn.dataset.bound = "1";
+    settingsBtn.addEventListener("click", () => {
+      if (settingsBtn.classList.contains("is-active")) return;
+      showPage("settings");
     });
   }
 }
@@ -2771,10 +3034,17 @@ async function init() {
   initLeftRowSplitter();
   bindLeftColumnRail();
   bindMarketColumnRail();
+  // Keep collapsed rails hidden until layout + split % are known (avoids flash on refresh).
   syncLeftColumnRail();
   syncMarketColumnRail();
+  requestAnimationFrame(() => {
+    syncLeftColumnRail();
+    syncMarketColumnRail();
+  });
   void loadWalletAccount();
+  void loadSettingsUser();
   bindWalletBalanceRefresh();
+  bindSettingsEditors();
   initScheduleDaySlots();
   initScheduleUtcColumn();
   initHeatmapLegend();

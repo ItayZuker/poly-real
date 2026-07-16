@@ -22,6 +22,7 @@
   let refreshTimer = null;
   let resizeObserver = null;
   let persisting = false;
+  let phasesReadOnly = false;
 
   function $(id) {
     return document.getElementById(id);
@@ -40,6 +41,7 @@
           buyShares: 10,
           buyTrigger: 40,
           buyOptimize: false,
+          buyOrderType: "GTD",
           minGap: 0,
           maxGap: 0,
           gapVsPtb: "opposite",
@@ -50,6 +52,7 @@
           buyShares: 10,
           buyTrigger: 40,
           buyOptimize: false,
+          buyOrderType: "GTD",
           minGap: 0,
           maxGap: 0,
           gapVsPtb: "opposite",
@@ -60,6 +63,7 @@
           buyShares: 10,
           buyTrigger: 40,
           buyOptimize: false,
+          buyOrderType: "GTD",
           minGap: 0,
           maxGap: 0,
           gapVsPtb: "opposite",
@@ -227,9 +231,25 @@
     syncSaveState();
   }
 
+  function setupPlacementCount(setupId) {
+    if (!setupId) return 0;
+    return window.SchedulePlacements?.getPlacementCountsBySetup?.()?.[setupId] ?? 0;
+  }
+
   function beginExternalEditing() {
     if (!window.Simulator?.beginExternalPhaseEdit || !draft?.setup) return;
-    window.Simulator.beginExternalPhaseEdit(draft.setup, onDraftChange);
+    window.Simulator.beginExternalPhaseEdit(draft.setup, onDraftChange, {
+      readOnly: phasesReadOnly,
+    });
+  }
+
+  function syncPhasesReadOnlyUi() {
+    if (!canvas) return;
+    canvas.classList.toggle("is-phases-locked", phasesReadOnly);
+    canvas.style.cursor = phasesReadOnly ? "default" : "pointer";
+    if (modal) modal.classList.toggle("is-phases-locked", phasesReadOnly);
+    const hint = $("setup-edit-phases-hint");
+    if (hint) hint.hidden = !phasesReadOnly;
   }
 
   function bindCanvas() {
@@ -243,7 +263,7 @@
       dragMoved = false;
       hoveredPhaseLine = null;
       hidePhaseHover();
-      canvas.style.cursor = "pointer";
+      canvas.style.cursor = phasesReadOnly ? "default" : "pointer";
       drawChart();
 
       if (openPhase && !wasDragging && !moved && chartLayout && draft?.setup && clientX != null) {
@@ -259,7 +279,7 @@
     }
 
     function onWindowMouseMove(e) {
-      if (dragLine == null || !chartLayout || !draft?.setup) return;
+      if (phasesReadOnly || dragLine == null || !chartLayout || !draft?.setup) return;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       dragMoved = true;
@@ -279,7 +299,7 @@
     }
 
     canvas.addEventListener("mousedown", (e) => {
-      if (!chartLayout || !draft?.setup) return;
+      if (phasesReadOnly || !chartLayout || !draft?.setup) return;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       dragMoved = false;
@@ -297,6 +317,16 @@
       if (!chartLayout || !draft?.setup || dragLine != null) return;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
+      if (phasesReadOnly) {
+        hidePhaseHover();
+        if (hoveredPhaseLine != null) {
+          hoveredPhaseLine = null;
+          drawChart();
+        }
+        canvas.style.cursor = "pointer";
+        updatePhaseHover(x);
+        return;
+      }
       const onLine = nearLine(x, chartLayout, 0, draft.setup) || nearLine(x, chartLayout, 1, draft.setup);
       let nextHover = null;
       if (onLine) {
@@ -322,13 +352,14 @@
       hoveredPhaseLine = null;
       hidePhaseHover();
       drawChart();
-      canvas.style.cursor = "default";
+      canvas.style.cursor = phasesReadOnly ? "default" : "default";
     });
   }
 
   function open(setup) {
     if (!modal || !titleInput || !descInput) return;
     editingId = setup._id;
+    phasesReadOnly = setupPlacementCount(setup._id) > 0;
     draft = {
       title: setup.title,
       description: setup.description ?? "",
@@ -343,6 +374,7 @@
     saveBtn.disabled = true;
     saveBtn.setAttribute("aria-disabled", "true");
     beginExternalEditing();
+    syncPhasesReadOnlyUi();
     startRefresh();
     requestAnimationFrame(() => {
       drawChart();
@@ -363,15 +395,20 @@
     if (phaseModal) {
       phaseModal.hidden = true;
       phaseModal.setAttribute("hidden", "");
+      phaseModal.classList.remove("is-view-only", "modal-overlay-stacked");
     }
     if (modal) {
       modal.hidden = true;
       modal.setAttribute("hidden", "");
+      modal.classList.remove("is-phases-locked");
     }
     editingId = null;
     draft = null;
     baseline = null;
     chartLayout = null;
+    phasesReadOnly = false;
+    const hint = $("setup-edit-phases-hint");
+    if (hint) hint.hidden = true;
     hidePhaseHover();
   }
 

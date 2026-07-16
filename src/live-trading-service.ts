@@ -3,7 +3,13 @@ import {
   isScheduleContextActive,
   type ActiveScheduleContext,
 } from "./schedule-active.js";
-import { placeMarketOrder } from "./order-service.js";
+import {
+  cancelOpenOrder,
+  fetchOpenOrder,
+  placeLimitGtdBuy,
+  placeMarketOrder,
+  type MarketOrderType,
+} from "./order-service.js";
 import { getTradingClient, refreshCollateralBalance } from "./trading-client.js";
 import { SimulatorEngine } from "./simulator-engine.js";
 import { simulatorService, phaseSetupToSimSetup } from "./simulator-service.js";
@@ -25,8 +31,6 @@ import {
   estimateTakerFeeUsd,
   resolveTakerFeeParams,
 } from "./taker-fee.js";
-import { tradingConfigFilePath } from "./db/data-dir.js";
-import { readJsonFile, writeJsonFile } from "./db/file-store.js";
 import {
   addActivatedPlacementId,
   listActivatedPlacementIds,
@@ -35,9 +39,22 @@ import {
   upsertTradingStatEvent,
   type TradingStatEvent,
 } from "./db/trading-session-memory-repository.js";
+import {
+  ensureDefaultUser,
+  getDefaultUserPublic,
+  updateDefaultUserTrading,
+} from "./db/user-repository.js";
+import {
+  centsToPrice,
+  gapAllowsBuy,
+  gtdExpirationUnix,
+  phaseIndexForState,
+  SIDES_ORDER,
+} from "./phase-config.js";
 import type {
   LiveWindowState,
   SimMarker,
+  SimPhaseConfig,
   SimQuoteLocks,
   SimSetup,
   TradingConfig,
@@ -46,6 +63,20 @@ import type {
   TradingPublicState,
   PlacementLiveStats,
 } from "./types.js";
+
+interface RestingBuyOrder {
+  orderId: string;
+  side: "up" | "down";
+  phaseIdx: number;
+  sessionKey: string;
+  shares: number;
+  limitPrice: number;
+  sizeMatched: number;
+  tokenId?: string;
+  conditionId?: string;
+  slug?: string;
+  cardId?: string;
+}
 
 type SettledStatContribution = {
   green: number;
@@ -283,6 +314,8 @@ export class LiveTradingService {
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
+  /** Resting GTD limit buy for the active non-optimize phase. */
+  private restingBuy: RestingBuyOrder | null = null;
   private scheduleContext: ActiveScheduleContext | null = null;
   private scheduleContextFetchedAt = 0;
   private activePhaseSetup: TradingPhaseSetup | null = null;
@@ -309,8 +342,9 @@ export class LiveTradingService {
 
   async loadPersistedConfig(): Promise<TradingConfig> {
     try {
-      const loaded = await readJsonFile<Partial<TradingConfig>>(tradingConfigFilePath());
-      this.config = normalizeTradingConfig(loaded);
+      await ensureDefaultUser();
+      const user = await getDefaultUserPublic();
+      this.config = normalizeTradingConfig(user.trading);
     } catch (err) {
       logService.warn("trading", `Failed to load trading config: ${String(err)}`);
       this.config = defaultTradingConfig();
@@ -423,7 +457,7 @@ export class LiveTradingService {
   private persistConfig(): void {
     const snapshot = this.getConfig();
     this.persistChain = this.persistChain
-      .then(() => writeJsonFile(tradingConfigFilePath(), snapshot))
+      .then(() => updateDefaultUserTrading(snapshot).then(() => undefined))
       .catch((err) => {
         logService.warn("trading", `Failed to save trading config: ${String(err)}`);
       });
@@ -841,6 +875,11 @@ export class LiveTradingService {
 
   private resetWindow(state: LiveWindowState): void {
     const prevKey = this.sessionKey;
+    const prevResting = this.restingBuy;
+    this.restingBuy = null;
+    if (prevResting?.orderId) {
+      void cancelOpenOrder(prevResting.orderId);
+    }
     this.positions = { up: null, down: null };
     this.quoteLocks = emptyQuoteLocks();
     this.markers = [];
@@ -954,13 +993,26 @@ export class LiveTradingService {
     const currentCount = this.autoEngine.getMarkers().filter((m) => m.windowKey === key).length;
 
     if (this.config.startTrading) {
-      await this.mirrorNewSimMarkers(state, prevMarkerCount);
+      await this.mirrorNewSimMarkers(state, autoSetup, prevMarkerCount);
+      await this.manageRestingGtdBuys(state, autoSetup, nowMs);
     } else {
       this.mirroredMarkerCount = currentCount;
+      if (this.restingBuy) {
+        await this.cancelRestingBuy("startTrading off");
+      }
     }
   }
 
-  private async mirrorNewSimMarkers(state: LiveWindowState, prevCount: number): Promise<void> {
+  private phaseAtTime(setup: SimSetup, state: LiveWindowState, tSec: number): SimPhaseConfig {
+    const idx = phaseIndexForState(state, setup.phaseSplit, tSec);
+    return setup.phases[idx] ?? setup.phases[0];
+  }
+
+  private async mirrorNewSimMarkers(
+    state: LiveWindowState,
+    setup: SimSetup,
+    prevCount: number,
+  ): Promise<void> {
     if (this.orderInFlight) return;
     const key = sessionKey(state);
     const simMarkers = this.autoEngine.getMarkers().filter((m) => m.windowKey === key);
@@ -969,14 +1021,260 @@ export class LiveTradingService {
     const newMarkers = simMarkers.slice(prevCount);
     for (const marker of newMarkers) {
       if (marker.type === "buy") {
+        // Optimize-off buys are resting GTD limits — do not mirror sim market fires.
+        const phase = this.phaseAtTime(setup, state, marker.t);
+        if (!phase.buyOptimize) continue;
         if (this.positions[marker.side]) continue;
-        await this.executeOrder(state, marker.side, "buy", marker.shares, "auto");
+        await this.executeOrder(state, marker.side, "buy", marker.shares, "auto", "shares", "FAK");
       } else if (marker.type === "sell") {
         if (!this.positions[marker.side]) continue;
         await this.executeOrder(state, marker.side, "sell", this.positions[marker.side]!.shares, "auto");
       }
     }
     this.mirroredMarkerCount = simMarkers.length;
+  }
+
+  private async cancelRestingBuy(reason: string): Promise<void> {
+    const resting = this.restingBuy;
+    if (!resting) return;
+    this.restingBuy = null;
+    logService.info("trading", `Cancel resting GTD (${reason})`);
+    await cancelOpenOrder(resting.orderId);
+  }
+
+  private async manageRestingGtdBuys(
+    state: LiveWindowState,
+    setup: SimSetup,
+    nowMs?: number,
+  ): Promise<void> {
+    if (this.orderInFlight) return;
+
+    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
+    const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
+    const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+    const key = sessionKey(state);
+
+    // Phase changed or optimize/disabled — cancel prior resting buy.
+    if (this.restingBuy) {
+      const r = this.restingBuy;
+      if (
+        r.sessionKey !== key ||
+        r.phaseIdx !== phaseIdx ||
+        phase.buyOptimize ||
+        !phase.buyEnabled
+      ) {
+        await this.cancelRestingBuy(
+          r.phaseIdx !== phaseIdx ? "phase change" : phase.buyOptimize ? "optimize on" : "buy disabled",
+        );
+      }
+    }
+
+    // Poll open resting order for fills.
+    if (this.restingBuy) {
+      await this.pollRestingBuy(state);
+      if (this.restingBuy) return; // still open — don't place another
+    }
+
+    // Place GTD when optimize is off and phase allows buys.
+    if (phase.buyOptimize || !phase.buyEnabled) return;
+    if (this.positions.up || this.positions.down) return;
+    if (this.restingBuy) return;
+
+    let chosenSide: "up" | "down" | null = null;
+    for (const side of SIDES_ORDER) {
+      if (gapAllowsBuy(side, phase, state.assetGap)) {
+        chosenSide = side;
+        break;
+      }
+    }
+    if (!chosenSide) return;
+
+    const windowEnd = state.windowEnd ?? nowSec + 300;
+    const limitPrice = centsToPrice(phase.buyTrigger);
+    const shares = Math.max(1, phase.buyShares || 1);
+
+    this.orderInFlight = true;
+    try {
+      const result = await placeLimitGtdBuy({
+        series: state.series,
+        side: chosenSide,
+        size: shares,
+        price: limitPrice,
+        expirationSec: gtdExpirationUnix(windowEnd, nowSec),
+        state,
+      });
+      if (!result.success || !result.orderId) {
+        if (result.error) logService.warn("trading", `GTD place failed: ${result.error}`);
+        return;
+      }
+
+      if (result.fillShares != null && result.fillPrice != null && result.fillShares > 0) {
+        await this.recordBuyFill(
+          state,
+          chosenSide,
+          result.fillShares,
+          result.fillPrice,
+          result.usdcAmount,
+          result.tokenId,
+          result.conditionId,
+          result.slug,
+          "auto",
+        );
+        return;
+      }
+
+      this.restingBuy = {
+        orderId: result.orderId,
+        side: chosenSide,
+        phaseIdx,
+        sessionKey: key,
+        shares,
+        limitPrice,
+        sizeMatched: 0,
+        tokenId: result.tokenId,
+        conditionId: result.conditionId,
+        slug: result.slug,
+      };
+      this.notify();
+    } finally {
+      this.orderInFlight = false;
+    }
+  }
+
+  private async pollRestingBuy(state: LiveWindowState): Promise<void> {
+    const resting = this.restingBuy;
+    if (!resting) return;
+
+    const snap = await fetchOpenOrder(resting.orderId);
+    // Transient fetch failures — keep tracking so we don't double-place.
+    if (!snap) return;
+
+    const matched = Math.max(0, snap.sizeMatched);
+    if (matched > resting.sizeMatched + 1e-9) {
+      const delta = matched - resting.sizeMatched;
+      const fillPrice = snap.price > 0 ? snap.price : resting.limitPrice;
+      await this.recordBuyFill(
+        state,
+        resting.side,
+        delta,
+        fillPrice,
+        delta * fillPrice,
+        resting.tokenId ?? snap.assetId,
+        resting.conditionId ?? snap.market,
+        resting.slug,
+        "auto",
+        resting.cardId,
+      );
+      const pos = this.positions[resting.side];
+      resting.cardId = pos?.cardId ?? resting.cardId;
+      resting.sizeMatched = matched;
+      resting.tokenId = resting.tokenId ?? snap.assetId;
+      resting.conditionId = resting.conditionId ?? snap.market;
+    }
+
+    const status = snap.status.toLowerCase();
+    // Still working — leave resting open.
+    if (status === "live" || status === "delayed") return;
+
+    // Matched, cancelled, expired, unmatched, etc.
+    this.restingBuy = null;
+    this.notify();
+  }
+
+  private async recordBuyFill(
+    state: LiveWindowState,
+    side: "up" | "down",
+    fillShares: number,
+    fillPrice: number,
+    usdcAmount: number | undefined,
+    tokenId: string | undefined,
+    conditionId: string | undefined,
+    slug: string | undefined,
+    source: "manual" | "auto",
+    existingCardId?: string,
+  ): Promise<void> {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const cost = usdcAmount ?? fillShares * fillPrice;
+    const buyFees = await estimateLiveTakerFee(tokenId, fillShares, fillPrice);
+
+    const existing = existingCardId ? this.findCard(existingCardId) : undefined;
+    const pos = this.positions[side];
+
+    if (existing && existing.status === "open" && pos) {
+      const totalShares = pos.shares + fillShares;
+      const totalCost = pos.cost + cost;
+      const totalFees = (pos.buyFees ?? 0) + buyFees;
+      pos.shares = totalShares;
+      pos.avgPrice = totalShares > 0 ? totalCost / totalShares : fillPrice;
+      pos.cost = totalCost;
+      pos.buyFees = totalFees;
+      pos.asset = pos.asset ?? tokenId;
+      pos.conditionId = pos.conditionId ?? conditionId;
+      existing.shares = totalShares;
+      existing.buyPrice = pos.avgPrice;
+      existing.buyCost = totalCost;
+      existing.buyFees = totalFees;
+      existing.asset = existing.asset ?? tokenId;
+      existing.conditionId = existing.conditionId ?? conditionId;
+      existing.slug = existing.slug ?? slug;
+    } else {
+      const cardId = newCardId();
+      this.positions[side] = {
+        shares: fillShares,
+        avgPrice: fillPrice,
+        cost,
+        buyFees,
+        cardId,
+        asset: tokenId,
+        conditionId,
+      };
+      this.lockQuote(side, "buy", fillPrice);
+      this.positionCards.unshift({
+        id: cardId,
+        windowKey: sessionKey(state),
+        series: state.series,
+        side,
+        shares: fillShares,
+        buyPrice: fillPrice,
+        buyCost: cost,
+        buyFees,
+        buyAt: nowSec,
+        status: "open",
+        asset: tokenId,
+        conditionId,
+        slug,
+        confirmed: false,
+        placementId:
+          source === "auto" && this.config.useSchedule
+            ? this.scheduleContext?.placementId
+            : undefined,
+      });
+      if (
+        source === "auto" &&
+        this.config.useSchedule &&
+        this.scheduleContext?.placementId
+      ) {
+        this.rememberActivatedPlacement(this.scheduleContext.placementId);
+      }
+      if (this.positionCards.length > 100) {
+        this.positionCards.length = 100;
+      }
+      void this.enrichCardFromPolymarketBuy(cardId);
+    }
+
+    this.addMarker(state, {
+      type: "buy",
+      side,
+      t: nowSec,
+      y: state.assetPrice ?? null,
+      shares: fillShares,
+      price: fillPrice,
+      cost,
+      fees: buyFees,
+      total: cost + buyFees,
+    });
+    void refreshCollateralBalance();
+    this.notify();
   }
 
   canManualTrade(side: "up" | "down", leg: "buy" | "sell"): boolean {
@@ -1390,6 +1688,7 @@ export class LiveTradingService {
     size: number,
     source: "manual" | "auto",
     sizeUnit: "shares" | "usdc" = "shares",
+    orderType: MarketOrderType = "FOK",
   ): Promise<{ ok: boolean; error?: string }> {
     if (this.orderInFlight) return { ok: false, error: "Order already in progress" };
     this.orderInFlight = true;
@@ -1400,6 +1699,7 @@ export class LiveTradingService {
         leg,
         size,
         sizeUnit: leg === "sell" ? "shares" : sizeUnit,
+        orderType: leg === "buy" ? orderType : "FOK",
         state,
       });
       if (!result.success || result.fillPrice == null || result.fillShares == null) {
@@ -1411,61 +1711,17 @@ export class LiveTradingService {
       const fillPrice = result.fillPrice;
 
       if (leg === "buy") {
-        const cost = result.usdcAmount ?? fillShares * fillPrice;
-        const buyFees = await estimateLiveTakerFee(result.tokenId, fillShares, fillPrice);
-        const cardId = newCardId();
-        this.positions[side] = {
-          shares: fillShares,
-          avgPrice: fillPrice,
-          cost,
-          buyFees,
-          cardId,
-          asset: result.tokenId,
-          conditionId: result.conditionId,
-        };
-        this.lockQuote(side, "buy", fillPrice);
-        this.positionCards.unshift({
-          id: cardId,
-          windowKey: sessionKey(state),
-          series: state.series,
+        await this.recordBuyFill(
+          state,
           side,
-          shares: fillShares,
-          buyPrice: fillPrice,
-          buyCost: cost,
-          buyFees,
-          buyAt: nowSec,
-          status: "open",
-          asset: result.tokenId,
-          conditionId: result.conditionId,
-          slug: result.slug,
-          confirmed: false,
-          placementId:
-            source === "auto" && this.config.useSchedule
-              ? this.scheduleContext?.placementId
-              : undefined,
-        });
-        if (
-          source === "auto" &&
-          this.config.useSchedule &&
-          this.scheduleContext?.placementId
-        ) {
-          this.rememberActivatedPlacement(this.scheduleContext.placementId);
-        }
-        if (this.positionCards.length > 100) {
-          this.positionCards.length = 100;
-        }
-        this.addMarker(state, {
-          type: "buy",
-          side,
-          t: nowSec,
-          y: state.assetPrice ?? null,
-          shares: fillShares,
-          price: fillPrice,
-          cost,
-          fees: buyFees,
-          total: cost + buyFees,
-        });
-        void this.enrichCardFromPolymarketBuy(cardId);
+          fillShares,
+          fillPrice,
+          result.usdcAmount,
+          result.tokenId,
+          result.conditionId,
+          result.slug,
+          source,
+        );
       } else {
         const pos = this.positions[side]!;
         const proceeds = result.usdcAmount ?? fillShares * fillPrice;
@@ -1507,11 +1763,11 @@ export class LiveTradingService {
           total: proceeds,
         });
         this.positions[side] = null;
+        void refreshCollateralBalance();
+        this.notify();
       }
 
       logService.info("trading", `${source} ${leg} ${side} filled`);
-      void refreshCollateralBalance();
-      this.notify();
       return { ok: true };
     } finally {
       this.orderInFlight = false;

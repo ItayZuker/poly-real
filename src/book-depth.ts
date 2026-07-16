@@ -57,7 +57,7 @@ function bidsAtOrAbove(bids: BookLevel[], limitPrice: number): BookLevel[] {
 
 /**
  * Maker limit buy: resting order at limitPrice, filled when book has liquidity at or below limit.
- * Makers pay no Polymarket trading fees.
+ * Makers pay no Polymarket trading fees. Requires full size (legacy).
  */
 export function fillMakerLimitBuy(
   asks: BookLevel[],
@@ -68,6 +68,32 @@ export function fillMakerLimitBuy(
   const eligible = asksAtOrBelow(asks, limitPrice);
   if (!canFillAsks(eligible, shares)) return null;
 
+  const cost = shares * limitPrice;
+  return {
+    shares,
+    avgPrice: limitPrice,
+    cost,
+    proceeds: 0,
+    fees: 0,
+    legs: [{ price: limitPrice, shares, fee: 0 }],
+  };
+}
+
+/**
+ * Maker limit buy that accepts partial size (GTD-style resting fills).
+ * Fills up to `maxShares` at `limitPrice` from asks at or below the limit.
+ */
+export function fillMakerLimitBuyAvailable(
+  asks: BookLevel[],
+  maxShares: number,
+  limitPrice: number,
+): WalkFillResult | null {
+  if (!maxShares || maxShares <= 0 || !Number.isFinite(limitPrice) || limitPrice <= 0) return null;
+  const eligible = asksAtOrBelow(asks, limitPrice);
+  const available = totalLevelSize(eligible);
+  if (available <= 0) return null;
+  const shares = Math.min(maxShares, available);
+  if (shares <= 0) return null;
   const cost = shares * limitPrice;
   return {
     shares,
@@ -140,6 +166,48 @@ export function walkAsks(
     shares,
     avgPrice: cost / shares,
     cost,
+    proceeds: 0,
+    fees,
+    legs,
+  };
+}
+
+/** FAK-style taker buy: fill up to maxShares from available asks; partial OK. */
+export function walkAsksAvailable(
+  asks: BookLevel[],
+  maxShares: number,
+  chargeTakerFee: boolean,
+  feeParams: TakerFeeParams = DEFAULT_CRYPTO_TAKER_FEE_PARAMS,
+): WalkFillResult | null {
+  if (!maxShares || maxShares <= 0) return null;
+  let remaining = maxShares;
+  let totalCost = 0;
+  const legs: FillLeg[] = [];
+
+  for (const level of asks) {
+    if (remaining <= 0) break;
+    if (level.size <= 0 || !Number.isFinite(level.price)) continue;
+    const take = Math.min(remaining, level.size);
+    if (take <= 0) continue;
+    totalCost += take * level.price;
+    legs.push({ price: level.price, shares: take, fee: 0 });
+    remaining -= take;
+  }
+
+  const filled = maxShares - remaining;
+  if (filled <= 0) return null;
+
+  const fees = chargeTakerFee ? sumLegFees(legs, feeParams) : 0;
+  if (fees > 0) {
+    for (const leg of legs) {
+      leg.fee = sumLegFees([{ shares: leg.shares, price: leg.price }], feeParams);
+    }
+  }
+
+  return {
+    shares: filled,
+    avgPrice: totalCost / filled,
+    cost: totalCost,
     proceeds: 0,
     fees,
     legs,

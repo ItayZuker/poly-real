@@ -122,12 +122,17 @@
     return state?.sim?.setup || defaultSetup();
   }
 
+  function resolveBuyOrderType(buyOptimize) {
+    return buyOptimize ? "FAK" : "GTD";
+  }
+
   function defaultPhase() {
     return {
       buyEnabled: true,
       buyShares: 10,
       buyTrigger: 40,
       buyOptimize: false,
+      buyOrderType: "GTD",
       minGap: 0,
       maxGap: 0,
       gapVsPtb: "opposite",
@@ -148,6 +153,7 @@
       buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
       buyTrigger: Math.max(1, Math.min(99, Math.floor(Number(raw.buyTrigger)) || base.buyTrigger)),
       buyOptimize,
+      buyOrderType: resolveBuyOrderType(buyOptimize),
       minGap: Number.isFinite(minGap) && minGap > 0 ? Math.round(minGap * 100) / 100 : 0,
       maxGap: Number.isFinite(maxGap) && maxGap > 0 ? Math.round(maxGap * 100) / 100 : 0,
       gapVsPtb: raw.gapVsPtb === "with" ? "with" : "opposite",
@@ -156,6 +162,13 @@
         Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
       ),
     };
+  }
+
+  function syncTriggerOrderTypeLabel() {
+    const text = document.getElementById("phase-buy-trigger-text");
+    if (!text) return;
+    const optimize = Boolean(document.getElementById("phase-buy-optimize")?.checked);
+    text.textContent = `Trigger (¢) ${resolveBuyOrderType(optimize)}`;
   }
 
   function defaultSetup() {
@@ -179,9 +192,59 @@
     label.classList.toggle("is-none", isNone);
   }
 
-  function syncGapLabels() {
+  function gapValuesInactive() {
+    const maxGap = Number(document.getElementById("phase-max-gap")?.value);
+    const minGap = Number(document.getElementById("phase-min-gap")?.value);
+    const maxNone = !Number.isFinite(maxGap) || maxGap <= 0;
+    const minNone = !Number.isFinite(minGap) || minGap <= 0;
+    return maxNone && minNone;
+  }
+
+  function rememberGapVsPtbValue(select) {
+    if (!select) return;
+    if (select.value === "opposite" || select.value === "with") {
+      select.dataset.lastValue = select.value;
+    }
+  }
+
+  function resolvedGapVsPtb(select) {
+    if (!select) return "opposite";
+    if (select.value === "with" || select.value === "opposite") return select.value;
+    const last = select.dataset.lastValue;
+    return last === "with" ? "with" : "opposite";
+  }
+
+  function syncGapVsPtbControl(formLocked = false) {
+    const select = document.getElementById("phase-gap-vs-ptb");
+    const label = document.getElementById("phase-gap-vs-ptb-label");
+    const buyEnabled = Boolean(document.getElementById("phase-buy-enabled")?.checked);
+    if (!select || !label) return;
+
+    rememberGapVsPtbValue(select);
+    const gapsInactive = gapValuesInactive();
+    const disabled = formLocked || !buyEnabled || gapsInactive;
+    const noneOpt = select.querySelector('option[value="none"]');
+
+    if (gapsInactive) {
+      if (noneOpt) noneOpt.hidden = false;
+      select.value = "none";
+      label.classList.add("is-none");
+    } else {
+      if (noneOpt) noneOpt.hidden = true;
+      if (select.value === "none" || select.value === "") {
+        select.value = select.dataset.lastValue === "with" ? "with" : "opposite";
+      }
+      rememberGapVsPtbValue(select);
+      label.classList.remove("is-none");
+    }
+
+    select.disabled = disabled;
+  }
+
+  function syncGapLabels(formLocked = false) {
     syncGapLabel("max");
     syncGapLabel("min");
+    syncGapVsPtbControl(formLocked === true || isPhaseModalReadOnly());
   }
 
   function syncFromState(state) {
@@ -663,12 +726,12 @@
     cfg.buyShares = Math.max(1, Number(document.getElementById("phase-buy-shares").value) || 10);
     cfg.buyTrigger = Number(document.getElementById("phase-buy-trigger").value) || 40;
     cfg.buyOptimize = document.getElementById("phase-buy-optimize").checked;
+    cfg.buyOrderType = resolveBuyOrderType(cfg.buyOptimize);
     const maxGap = Number(document.getElementById("phase-max-gap").value);
     const minGap = Number(document.getElementById("phase-min-gap").value);
     cfg.maxGap = Number.isFinite(maxGap) && maxGap > 0 ? Math.round(maxGap * 100) / 100 : 0;
     cfg.minGap = Number.isFinite(minGap) && minGap > 0 ? Math.round(minGap * 100) / 100 : 0;
-    cfg.gapVsPtb =
-      document.getElementById("phase-gap-vs-ptb").value === "with" ? "with" : "opposite";
+    cfg.gapVsPtb = resolvedGapVsPtb(document.getElementById("phase-gap-vs-ptb"));
     cfg.sellProfitCents = Number(document.getElementById("phase-sell-profit").value) || 20;
     delete cfg.sellOptimize;
     setup.phases[phaseIdx] = normalizePhase(cfg);
@@ -680,11 +743,26 @@
     const hint = document.getElementById("phase-modal-schedule-hint");
     const modal = document.getElementById("phase-modal");
     const external = !!externalPhaseContext;
-    const readOnly = !external && window.windowState?.trading?.phasesEditable === false;
+    const readOnly = isPhaseModalReadOnly();
     if (saveBtn) saveBtn.hidden = external || readOnly;
-    if (hint) hint.hidden = external || !readOnly;
-    if (footer) footer.hidden = external;
+    if (hint) {
+      hint.hidden = !readOnly;
+      if (readOnly) {
+        hint.textContent = external
+          ? "This setup is on the schedule. Remove its placements to edit."
+          : 'To change settings turn off "Use Schedule"';
+      }
+    }
+    // Hide the whole footer when neither Save nor the schedule hint is shown.
+    const saveVisible = Boolean(saveBtn && !saveBtn.hidden);
+    const hintVisible = Boolean(hint && !hint.hidden);
+    if (footer) footer.hidden = !saveVisible && !hintVisible;
     if (modal) modal.classList.toggle("is-view-only", readOnly);
+  }
+
+  function isPhaseModalReadOnly() {
+    if (externalPhaseContext) return Boolean(externalPhaseContext.readOnly);
+    return window.windowState?.trading?.phasesEditable === false;
   }
 
   function openPhaseModal(phaseIdx) {
@@ -697,18 +775,19 @@
     const modal = document.getElementById("phase-modal");
     const cfg = normalizePhase(setup.phases[phaseIdx]);
     setup.phases[phaseIdx] = cfg;
-    const readOnly = !externalPhaseContext && window.windowState?.trading?.phasesEditable === false;
+    const readOnly = isPhaseModalReadOnly();
     document.getElementById("phase-modal-title").textContent = phaseModalTitle(phaseIdx);
     document.getElementById("phase-buy-enabled").checked = cfg.buyEnabled;
     document.getElementById("phase-buy-shares").value = cfg.buyShares;
     document.getElementById("phase-buy-trigger").value = cfg.buyTrigger;
     document.getElementById("phase-buy-optimize").checked = Boolean(cfg.buyOptimize);
+    syncTriggerOrderTypeLabel();
     document.getElementById("phase-max-gap").value = cfg.maxGap ?? 0;
     document.getElementById("phase-min-gap").value = cfg.minGap ?? 0;
-    document.getElementById("phase-gap-vs-ptb").value =
-      cfg.gapVsPtb === "with" ? "with" : "opposite";
+    const gapSelect = document.getElementById("phase-gap-vs-ptb");
+    gapSelect.value = cfg.gapVsPtb === "with" ? "with" : "opposite";
+    gapSelect.dataset.lastValue = gapSelect.value;
     document.getElementById("phase-sell-profit").value = cfg.sellProfitCents;
-    syncGapLabels();
     syncPhaseFormDisabled(readOnly);
     if (externalPhaseContext) modal.classList.add("modal-overlay-stacked");
     else modal.classList.remove("modal-overlay-stacked");
@@ -717,7 +796,7 @@
   }
 
   function closePhaseModal() {
-    if (externalPhaseContext && activePhaseModal != null) {
+    if (externalPhaseContext && !externalPhaseContext.readOnly && activePhaseModal != null) {
       readPhaseFormIntoSetup(externalPhaseContext.setup, activePhaseModal);
       const onChange = externalPhaseContext.onChange;
       if (onChange) onChange();
@@ -733,18 +812,20 @@
 
   function syncPhaseFormDisabled(readOnly = false) {
     const enabled = document.getElementById("phase-buy-enabled").checked;
-    const locked =
-      readOnly ||
-      (!externalPhaseContext && window.windowState?.trading?.phasesEditable === false);
+    // Coerce: event listeners may pass an Event (truthy) — only treat strict true as read-only.
+    const forceReadOnly = readOnly === true || isPhaseModalReadOnly();
+    const locked = forceReadOnly;
     document.getElementById("phase-buy-enabled").disabled = locked;
     document.getElementById("phase-buy-shares").disabled = locked || !enabled;
     document.getElementById("phase-buy-trigger").disabled = locked || !enabled;
     document.getElementById("phase-buy-optimize").disabled = locked || !enabled;
     document.getElementById("phase-max-gap").disabled = locked || !enabled;
     document.getElementById("phase-min-gap").disabled = locked || !enabled;
-    document.getElementById("phase-gap-vs-ptb").disabled = locked || !enabled;
     document.getElementById("phase-sell-profit").disabled = locked;
-    syncGapLabels();
+    const buySection = document.getElementById("phase-buy-section");
+    if (buySection) buySection.classList.toggle("is-buy-disabled", !enabled);
+    syncTriggerOrderTypeLabel();
+    syncGapLabels(locked || !enabled);
   }
 
   async function savePhaseModal() {
@@ -898,9 +979,21 @@
   }
 
   function bindModal() {
-    document.getElementById("phase-buy-enabled").addEventListener("change", syncPhaseFormDisabled);
-    document.getElementById("phase-max-gap").addEventListener("input", syncGapLabels);
-    document.getElementById("phase-min-gap").addEventListener("input", syncGapLabels);
+    document.getElementById("phase-buy-enabled").addEventListener("change", () => {
+      syncPhaseFormDisabled(isPhaseModalReadOnly());
+    });
+    document.getElementById("phase-buy-optimize").addEventListener("change", () => {
+      syncTriggerOrderTypeLabel();
+    });
+    document.getElementById("phase-max-gap").addEventListener("input", () => {
+      syncGapLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
+    });
+    document.getElementById("phase-min-gap").addEventListener("input", () => {
+      syncGapLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
+    });
+    document.getElementById("phase-gap-vs-ptb").addEventListener("change", (e) => {
+      rememberGapVsPtbValue(e.currentTarget);
+    });
     document.getElementById("phase-modal-close").addEventListener("click", closePhaseModal);
     document.getElementById("phase-modal-save").addEventListener("click", () => void savePhaseModal());
     document.getElementById("phase-modal").addEventListener("click", (e) => {
@@ -941,14 +1034,21 @@
       bindModal();
       canvas.style.cursor = "pointer";
     },
-    beginExternalPhaseEdit(setup, onChange) {
-      externalPhaseContext = { setup, onChange };
+    beginExternalPhaseEdit(setup, onChange, options = {}) {
+      externalPhaseContext = {
+        setup,
+        onChange,
+        readOnly: Boolean(options.readOnly),
+      };
     },
     endExternalPhaseEdit() {
       externalPhaseContext = null;
     },
     openPhaseModalExternal(phaseIdx) {
       openPhaseModal(phaseIdx);
+    },
+    isExternalPhaseReadOnly() {
+      return Boolean(externalPhaseContext?.readOnly);
     },
   };
 })();
