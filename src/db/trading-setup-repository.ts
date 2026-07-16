@@ -35,6 +35,7 @@ export interface TradingSetupListItem {
 type TradingSetupDoc = TradingSetupRecord & { _id: ObjectId };
 
 let migratePromise: Promise<void> | null = null;
+let ensureUserIdPromise: Promise<void> | null = null;
 
 /**
  * One-time: if `trading_setups_real` is empty and legacy `trading_setups` has
@@ -75,6 +76,43 @@ async function ensureTradingSetupsMigrated(): Promise<void> {
   await migratePromise;
 }
 
+/** One-time: assign bootstrap owner to setups missing userId. */
+export async function ensureTradingSetupsUserId(bootstrapUserId: string): Promise<void> {
+  if (!ensureUserIdPromise) {
+    ensureUserIdPromise = (async () => {
+      const mongo = await getMongoClient();
+      const result = await mongo
+        .db(getMongoDbName())
+        .collection(COLLECTION)
+        .updateMany(
+          {
+            $or: [
+              { userId: { $exists: false } },
+              { userId: null },
+              { userId: "" },
+            ],
+          },
+          { $set: { userId: bootstrapUserId } },
+        );
+      if (result.modifiedCount > 0) {
+        console.log(
+          `[trading-setups] Assigned userId to ${result.modifiedCount} legacy setup(s)`,
+        );
+      }
+    })().catch((err) => {
+      ensureUserIdPromise = null;
+      throw err;
+    });
+  }
+  await ensureUserIdPromise;
+}
+
+async function ensureReady(): Promise<void> {
+  await ensureTradingSetupsMigrated();
+  const { getBootstrapUserId } = await import("./user-repository.js");
+  await ensureTradingSetupsUserId(await getBootstrapUserId());
+}
+
 function resolveSetupColor(doc: TradingSetupDoc): string {
   const normalized = doc.color ? normalizeSetupColor(doc.color) : null;
   if (normalized) return normalized;
@@ -109,8 +147,12 @@ function serializeTradingSetup(doc: TradingSetupDoc): TradingSetupListItem {
 }
 
 /** Marks whether a setup is referenced by any live schedule placement. */
-export async function setLiveScheduleInUse(setupId: string, inUse: boolean): Promise<void> {
-  await ensureTradingSetupsMigrated();
+export async function setLiveScheduleInUse(
+  userId: string,
+  setupId: string,
+  inUse: boolean,
+): Promise<void> {
+  await ensureReady();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -123,34 +165,37 @@ export async function setLiveScheduleInUse(setupId: string, inUse: boolean): Pro
     await mongo
       .db(getMongoDbName())
       .collection<TradingSetupDoc>(COLLECTION)
-      .updateOne({ _id: oid }, { $set: { liveScheduleInUse: true } });
+      .updateOne({ _id: oid, userId }, { $set: { liveScheduleInUse: true } });
     return;
   }
   await mongo
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
-    .updateOne({ _id: oid }, { $unset: { liveScheduleInUse: "" } });
+    .updateOne({ _id: oid, userId }, { $unset: { liveScheduleInUse: "" } });
 }
 
-export async function listTradingSetups(): Promise<TradingSetupListItem[]> {
-  await ensureTradingSetupsMigrated();
+export async function listTradingSetups(userId: string): Promise<TradingSetupListItem[]> {
+  await ensureReady();
   const mongo = await getMongoClient();
   const docs = await mongo
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
-    .find({})
+    .find({ userId })
     .sort({ createdAt: -1 })
     .toArray();
   return docs.map(serializeTradingSetup);
 }
 
-export async function insertTradingSetup(input: CreateTradingSetupInput): Promise<TradingSetupListItem> {
-  await ensureTradingSetupsMigrated();
+export async function insertTradingSetup(
+  userId: string,
+  input: CreateTradingSetupInput,
+): Promise<TradingSetupListItem> {
+  await ensureReady();
   const mongo = await getMongoClient();
   const existing = await mongo
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
-    .find({})
+    .find({ userId })
     .project({ color: 1 })
     .toArray();
   const usedColors = new Set(
@@ -163,6 +208,7 @@ export async function insertTradingSetup(input: CreateTradingSetupInput): Promis
   if (!setup) throw new Error("Invalid setup phases");
 
   const doc: TradingSetupRecord = {
+    userId,
     title: input.title,
     color: pickUniqueSetupColor(usedColors, existing.length),
     setup,
@@ -176,8 +222,11 @@ export async function insertTradingSetup(input: CreateTradingSetupInput): Promis
   return serializeTradingSetup({ ...doc, _id: result.insertedId });
 }
 
-export async function getTradingSetupById(id: string): Promise<TradingSetupListItem | null> {
-  await ensureTradingSetupsMigrated();
+export async function getTradingSetupById(
+  userId: string,
+  id: string,
+): Promise<TradingSetupListItem | null> {
+  await ensureReady();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -189,7 +238,7 @@ export async function getTradingSetupById(id: string): Promise<TradingSetupListI
   const doc = await mongo
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
-    .findOne({ _id: oid });
+    .findOne({ _id: oid, userId });
   return doc ? serializeTradingSetup(doc) : null;
 }
 
@@ -205,10 +254,11 @@ export function normalizePhaseSetup(setup: TradingPhaseSetup): TradingPhaseSetup
 }
 
 export async function updateTradingSetup(
+  userId: string,
   id: string,
   input: UpdateTradingSetupInput,
 ): Promise<TradingSetupListItem | null> {
-  await ensureTradingSetupsMigrated();
+  await ensureReady();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -221,8 +271,9 @@ export async function updateTradingSetup(
   const existing = await mongo
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
-    .findOne({ _id: oid });
+    .findOne({ _id: oid, userId });
   if (!existing) return null;
+  if (existing.userId !== userId) return null;
 
   const update: Partial<TradingSetupRecord> = {};
   if (input.title != null) {
@@ -237,6 +288,11 @@ export async function updateTradingSetup(
   if (input.color != null) {
     const color = normalizeSetupColor(input.color);
     if (!color) throw new Error("Invalid color");
+    const conflict = await mongo
+      .db(getMongoDbName())
+      .collection<TradingSetupDoc>(COLLECTION)
+      .findOne({ userId, color, _id: { $ne: oid } });
+    if (conflict) throw new Error("Color already in use");
     update.color = color;
   }
   if (input.setup != null) {
@@ -258,19 +314,19 @@ export async function updateTradingSetup(
   }
 
   await mongo.db(getMongoDbName()).collection<TradingSetupDoc>(COLLECTION).updateOne(
-    { _id: oid },
+    { _id: oid, userId },
     mongoUpdate,
   );
 
   const refreshed = await mongo
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
-    .findOne({ _id: oid });
+    .findOne({ _id: oid, userId });
   return refreshed ? serializeTradingSetup(refreshed) : null;
 }
 
-export async function deleteTradingSetup(id: string): Promise<boolean> {
-  await ensureTradingSetupsMigrated();
+export async function deleteTradingSetup(userId: string, id: string): Promise<boolean> {
+  await ensureReady();
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -279,6 +335,9 @@ export async function deleteTradingSetup(id: string): Promise<boolean> {
     return false;
   }
   const mongo = await getMongoClient();
-  const result = await mongo.db(getMongoDbName()).collection(COLLECTION).deleteOne({ _id: oid });
+  const result = await mongo
+    .db(getMongoDbName())
+    .collection(COLLECTION)
+    .deleteOne({ _id: oid, userId });
   return result.deletedCount === 1;
 }

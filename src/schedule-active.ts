@@ -36,18 +36,19 @@ export function isScheduleContextActive(
 }
 
 export async function findActiveScheduleContext(
+  userId: string,
   now = new Date(),
 ): Promise<ActiveScheduleContext | null> {
   const { day, hour } = getUtcScheduleClock(now);
   if (!VALID_DAYS.includes(day)) return null;
 
-  const placements = await listSchedulePlacements();
+  const placements = await listSchedulePlacements(userId);
   const placement = placements.find(
     (p) => p.day === day && hour >= p.startHour && hour < p.startHour + p.durationHours,
   );
   if (!placement) return null;
 
-  const doc = await getTradingSetupById(placement.setupId);
+  const doc = await getTradingSetupById(userId, placement.setupId);
   if (!doc?.setup) return null;
 
   return {

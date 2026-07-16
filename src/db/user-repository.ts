@@ -46,6 +46,8 @@ export interface UserPublic {
   email?: string;
   name?: string;
   hasPassword: boolean;
+  /** True when funder + private key are both stored. */
+  walletReady: boolean;
   trading: TradingConfig;
   wallet: {
     funderAddress?: string;
@@ -142,18 +144,21 @@ async function collection() {
 }
 
 function toPublic(doc: UserDocument): UserPublic {
+  const hasPrivateKey = Boolean(doc.wallet?.privateKeyEnc);
+  const funderAddress = doc.wallet?.funderAddress;
   return {
     id: String(doc._id),
     slug: doc.slug,
     email: doc.email,
     name: doc.name,
     hasPassword: Boolean(doc.passwordHash),
+    walletReady: hasPrivateKey && Boolean(funderAddress?.trim()),
     trading: normalizeTrading(doc.trading),
     wallet: {
-      funderAddress: doc.wallet?.funderAddress,
+      funderAddress,
       signerAddress: doc.wallet?.signerAddress,
       signatureType: doc.wallet?.signatureType ?? 1,
-      hasPrivateKey: Boolean(doc.wallet?.privateKeyEnc),
+      hasPrivateKey,
       privateKeyHint: doc.wallet?.privateKeyHint,
     },
   };
@@ -453,6 +458,15 @@ export async function updateDefaultUserTrading(
   patch: Partial<TradingConfig>,
 ): Promise<TradingConfig> {
   const user = await getDefaultUser();
+  return updateUserTrading(user._id, patch);
+}
+
+export async function updateUserTrading(
+  userId: string | ObjectId,
+  patch: Partial<TradingConfig>,
+): Promise<TradingConfig> {
+  const user = await getUserById(userId);
+  if (!user) throw new Error("User not found");
   const next = normalizeTrading({ ...user.trading, ...patch });
   const now = new Date();
   const col = await collection();
@@ -461,6 +475,20 @@ export async function updateDefaultUserTrading(
     { $set: { trading: next, updatedAt: now } },
   );
   return next;
+}
+
+/** Users that may need a live engine (wallet configured and/or trading armed). */
+export async function listUsersForLiveTrading(): Promise<UserDocument[]> {
+  const col = await collection();
+  return col
+    .find({
+      $or: [
+        { "wallet.privateKeyEnc": { $type: "string" }, "wallet.funderAddress": { $type: "string" } },
+        { "trading.autoTrade": true },
+        { "trading.startTrading": true },
+      ],
+    })
+    .toArray();
 }
 
 export interface UpdateUserProfileInput {
@@ -554,6 +582,15 @@ export async function updateDefaultUserWallet(
   input: UpdateWalletInput,
 ): Promise<UserPublic> {
   const user = await getDefaultUser();
+  return updateUserWallet(user._id, input);
+}
+
+export async function updateUserWallet(
+  userId: string | ObjectId,
+  input: UpdateWalletInput,
+): Promise<UserPublic> {
+  const user = await getUserById(userId);
+  if (!user) throw new Error("User not found");
   const wallet: UserWalletStored = {
     ...user.wallet,
     signatureType: user.wallet?.signatureType ?? defaultSignatureTypeFromEnv(),
@@ -575,10 +612,6 @@ export async function updateDefaultUserWallet(
     wallet.signerAddress = account.address;
   }
 
-  if (!wallet.funderAddress && !wallet.privateKeyEnc) {
-    // Allow clearing nothing — require at least one field when patching.
-  }
-
   const now = new Date();
   const col = await collection();
   await col.updateOne(
@@ -594,6 +627,14 @@ export async function updateDefaultUserWallet(
 /** Decrypt wallet credentials for CLOB client init. Returns null if incomplete. */
 export async function getDefaultWalletCredentials(): Promise<WalletCredentials | null> {
   const user = await getDefaultUser();
+  return getWalletCredentials(user._id);
+}
+
+export async function getWalletCredentials(
+  userId: string | ObjectId,
+): Promise<WalletCredentials | null> {
+  const user = await getUserById(userId);
+  if (!user) return null;
   const wallet = user.wallet;
   if (!wallet?.privateKeyEnc || !wallet.funderAddress) {
     return null;
@@ -612,6 +653,15 @@ export async function getDefaultWalletCredentials(): Promise<WalletCredentials |
 
 export async function cacheDefaultSignerAddress(signerAddress: string): Promise<void> {
   const user = await getDefaultUser();
+  return cacheSignerAddress(user._id, signerAddress);
+}
+
+export async function cacheSignerAddress(
+  userId: string | ObjectId,
+  signerAddress: string,
+): Promise<void> {
+  const user = await getUserById(userId);
+  if (!user) return;
   if (user.wallet?.signerAddress === signerAddress) return;
   const col = await collection();
   await col.updateOne(
@@ -623,4 +673,10 @@ export async function cacheDefaultSignerAddress(signerAddress: string): Promise<
       },
     },
   );
+}
+
+/** Resolve bootstrap/default user id for one-time ownership migration. */
+export async function getBootstrapUserId(): Promise<string> {
+  const user = await getDefaultUser();
+  return String(user._id);
 }

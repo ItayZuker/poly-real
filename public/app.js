@@ -230,7 +230,9 @@ async function loadWalletAccount() {
   try {
     const res = await fetch("/api/account", { credentials: "same-origin" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    renderWalletAccount(await res.json());
+    const data = await res.json();
+    renderWalletAccount(data);
+    applyWalletGate(isWalletReadyFromAccount(data));
   } catch {
     renderWalletAccount({ connected: false, error: "Failed to load" });
   }
@@ -240,7 +242,9 @@ async function loadSettingsUser() {
   try {
     const res = await fetch("/api/user", { credentials: "same-origin" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    renderSettingsUser(await res.json());
+    const user = await res.json();
+    renderSettingsUser(user);
+    applyWalletGate(isWalletReadyFromUser(user));
   } catch (err) {
     setSettingsUserStatus(err instanceof Error ? err.message : String(err), true);
   }
@@ -259,9 +263,50 @@ async function saveWalletField(body) {
     if (payload?.account) renderWalletAccount(payload.account);
     throw new Error(payload?.error || `HTTP ${res.status}`);
   }
-  if (payload?.account) renderWalletAccount(payload.account);
-  else await loadWalletAccount();
+  if (payload?.account) {
+    renderWalletAccount(payload.account);
+    applyWalletGate(isWalletReadyFromAccount(payload.account));
+  } else {
+    await loadWalletAccount();
+  }
+  if (payload?.user) {
+    renderSettingsUser(payload.user);
+    applyWalletGate(isWalletReadyFromUser(payload.user));
+  } else {
+    void loadSettingsUser();
+  }
   return payload;
+}
+
+let walletReady = false;
+let showAppPage = null;
+
+function isWalletReadyFromUser(user) {
+  if (!user) return false;
+  if (typeof user.walletReady === "boolean") return user.walletReady;
+  return Boolean(user.wallet?.hasPrivateKey && user.wallet?.funderAddress);
+}
+
+function isWalletReadyFromAccount(account) {
+  if (!account) return false;
+  return Boolean(account.hasPrivateKey && account.funderAddress);
+}
+
+function applyWalletGate(ready) {
+  walletReady = Boolean(ready);
+  const buttons = document.querySelectorAll(".page-toggle-btn");
+  for (const btn of buttons) {
+    const page = btn.dataset.page;
+    const locked = !walletReady && (page === "simulator" || page === "schedule");
+    btn.disabled = locked;
+    btn.classList.toggle("is-wallet-locked", locked);
+    btn.title = locked
+      ? "Add funder address and private key in Settings first"
+      : "";
+  }
+  if (!walletReady && typeof showAppPage === "function") {
+    showAppPage("settings");
+  }
 }
 
 function setSettingsInfoPanelOpen(panel, open) {
@@ -2432,66 +2477,6 @@ async function applySetupToSimulator(setup) {
   }
 }
 
-async function applySetupToSchedule(setup) {
-  closeSetupMenus();
-  if (!setup?._id) return;
-
-  let existing = [];
-  try {
-    const listRes = await fetch("/api/schedule-placements");
-    if (listRes.ok) existing = await listRes.json();
-  } catch {
-    // ignore
-  }
-  if (!existing.length) {
-    appendLogEntry({
-      level: "warn",
-      source: "sim",
-      message: "No placements on the schedule",
-    });
-    return;
-  }
-
-  const confirmed = window.confirm(
-    `Apply "${setup.title}" to all schedule placements? Times will stay the same; only the setup will change.`,
-  );
-  if (!confirmed) return;
-
-  try {
-    const res = await fetch("/api/schedule-placements/apply-setup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        setupId: setup._id,
-        title: setup.title,
-      }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(body.error || `Apply failed (${res.status})`);
-    }
-    if (window.SchedulePlacements?.setPlacements) {
-      window.SchedulePlacements.setPlacements(body);
-    }
-    if (window.SchedulePlacements?.refreshAllPlacementStats) {
-      void window.SchedulePlacements.refreshAllPlacementStats();
-    }
-    window.updateSetupListPlacementCounts?.();
-    void loadScheduleSetups();
-    appendLogEntry({
-      level: "success",
-      source: "sim",
-      message: `Applied "${setup.title}" to all schedule placements`,
-    });
-  } catch (err) {
-    appendLogEntry({
-      level: "error",
-      source: "sim",
-      message: `Failed to apply setup to schedule: ${err.message || err}`,
-    });
-  }
-}
-
 function bindSetupListMenus() {
   document.addEventListener("click", (e) => {
     if (
@@ -2625,16 +2610,6 @@ function renderScheduleSetupsList(setups, errorMessage) {
         void applySetupToSimulator(setup);
       });
 
-      const applyScheduleBtn = document.createElement("button");
-      applyScheduleBtn.type = "button";
-      applyScheduleBtn.className = "schedule-setup-menu-item";
-      applyScheduleBtn.setAttribute("role", "menuitem");
-      applyScheduleBtn.textContent = "Apply to Schedule";
-      applyScheduleBtn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        void applySetupToSchedule(setup);
-      });
-
       const deleteBtn = document.createElement("button");
       deleteBtn.type = "button";
       deleteBtn.className = "schedule-setup-menu-item schedule-setup-menu-item-danger";
@@ -2645,7 +2620,7 @@ function renderScheduleSetupsList(setups, errorMessage) {
         void deleteTradingSetup(setup);
       });
 
-      menu.append(editBtn, duplicateBtn, applyBtn, applyScheduleBtn, deleteBtn);
+      menu.append(editBtn, duplicateBtn, applyBtn, deleteBtn);
       document.body.appendChild(menu);
       positionSetupMenu(menu, menuBtn);
     });
@@ -3124,6 +3099,9 @@ function bindPageToggle() {
   if (!simulatorPage || !schedulePage || !settingsPage || !buttons.length) return;
 
   const showPage = (page) => {
+    if (!walletReady && (page === "simulator" || page === "schedule")) {
+      page = "settings";
+    }
     const isSimulator = page === "simulator";
     const isSchedule = page === "schedule";
     const isSettings = page === "settings";
@@ -3162,11 +3140,12 @@ function bindPageToggle() {
       }
     }
   };
+  showAppPage = showPage;
 
   for (const btn of buttons) {
     btn.addEventListener("click", () => {
       const page = btn.dataset.page;
-      if (!page || btn.classList.contains("is-active")) return;
+      if (!page || btn.disabled || btn.classList.contains("is-active")) return;
       showPage(page);
     });
   }
@@ -3178,6 +3157,8 @@ function bindPageToggle() {
       showPage("settings");
     });
   }
+
+  applyWalletGate(walletReady);
 }
 
 async function init() {
@@ -3235,7 +3216,10 @@ let appInitialized = false;
 
 async function enterApp(user) {
   showAppShell();
-  if (user) renderSettingsUser(user);
+  if (user) {
+    renderSettingsUser(user);
+    applyWalletGate(isWalletReadyFromUser(user));
+  }
   if (appInitialized) {
     void loadWalletAccount();
     void loadSettingsUser();
@@ -3243,6 +3227,9 @@ async function enterApp(user) {
   }
   appInitialized = true;
   await init();
+  if (!walletReady && typeof showAppPage === "function") {
+    showAppPage("settings");
+  }
 }
 
 async function boot() {

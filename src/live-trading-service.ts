@@ -10,7 +10,7 @@ import {
   placeMarketOrder,
   type MarketOrderType,
 } from "./order-service.js";
-import { getTradingClient, refreshCollateralBalance } from "./trading-client.js";
+import { getTradingClient, initTradingClient, refreshCollateralBalance } from "./trading-client.js";
 import { SimulatorEngine } from "./simulator-engine.js";
 import { simulatorService, phaseSetupToSimSetup } from "./simulator-service.js";
 import { logService } from "./log-service.js";
@@ -40,10 +40,11 @@ import {
   type TradingStatEvent,
 } from "./db/trading-session-memory-repository.js";
 import {
-  ensureDefaultUser,
-  getDefaultUserPublic,
-  updateDefaultUserTrading,
+  getUserPublicById,
+  listUsersForLiveTrading,
+  updateUserTrading,
 } from "./db/user-repository.js";
+import { isTradingExecutor } from "./trading-executor.js";
 import {
   centsToPrice,
   gapAllowsBuy,
@@ -146,6 +147,7 @@ function feeAwarePlSold(card: TradingPositionCard): number {
 }
 
 async function estimateLiveTakerFee(
+  userId: string,
   tokenId: string | undefined,
   shares: number,
   price: number,
@@ -153,12 +155,22 @@ async function estimateLiveTakerFee(
   if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(price) || price <= 0 || price >= 1) {
     return 0;
   }
-  const client = getTradingClient();
+  const client = getTradingClient(userId);
   const params =
     tokenId && client
       ? await resolveTakerFeeParams(client, tokenId)
       : DEFAULT_CRYPTO_TAKER_FEE_PARAMS;
   return estimateTakerFeeUsd(shares, price, params);
+}
+
+let loggedNonExecutorSkip = false;
+function logNonExecutorSkipOnce(): void {
+  if (loggedNonExecutorSkip) return;
+  loggedNonExecutorSkip = true;
+  logService.warn(
+    "trading",
+    "TRADING_EXECUTOR is not set — live order placement disabled in this process",
+  );
 }
 
 function eventFingerprint(
@@ -327,6 +339,12 @@ export class LiveTradingService {
   private confirmLoopTimer: ReturnType<typeof setInterval> | null = null;
   private confirmInFlight = false;
 
+  constructor(private readonly userId: string) {}
+
+  getUserId(): string {
+    return this.userId;
+  }
+
   onUpdate(listener: UpdateListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -342,8 +360,10 @@ export class LiveTradingService {
 
   async loadPersistedConfig(): Promise<TradingConfig> {
     try {
-      await ensureDefaultUser();
-      const user = await getDefaultUserPublic();
+      const user = await getUserPublicById(this.userId);
+      if (!user) {
+        throw new Error(`User not found: ${this.userId}`);
+      }
       this.config = normalizeTradingConfig(user.trading);
     } catch (err) {
       logService.warn("trading", `Failed to load trading config: ${String(err)}`);
@@ -356,8 +376,8 @@ export class LiveTradingService {
   /** Reload Live-range settled events from Mongo (after boot / reset). */
   async hydrateLiveStatsFromMongo(): Promise<void> {
     try {
-      const events = await listTradingStatEvents({ afterLiveReset: true });
-      const activated = await listActivatedPlacementIds();
+      const events = await listTradingStatEvents(this.userId, { afterLiveReset: true });
+      const activated = await listActivatedPlacementIds(this.userId);
       this.liveStatLedger.clear();
       this.lastPersistedStatFingerprint.clear();
       this.knownPlacementIds.clear();
@@ -396,7 +416,7 @@ export class LiveTradingService {
     if (!placementId || this.knownPlacementIds.has(placementId)) return;
     this.knownPlacementIds.add(placementId);
     this.statsPersistChain = this.statsPersistChain
-      .then(() => addActivatedPlacementId(placementId))
+      .then(() => addActivatedPlacementId(this.userId, placementId))
       .catch((err) => {
         logService.warn(
           "trading",
@@ -435,7 +455,7 @@ export class LiveTradingService {
 
     this.statsPersistChain = this.statsPersistChain
       .then(async () => {
-        await upsertTradingStatEvent({
+        await upsertTradingStatEvent(this.userId, {
           cardId: event.cardId,
           placementId: event.placementId,
           status: event.status,
@@ -457,7 +477,7 @@ export class LiveTradingService {
   private persistConfig(): void {
     const snapshot = this.getConfig();
     this.persistChain = this.persistChain
-      .then(() => updateDefaultUserTrading(snapshot).then(() => undefined))
+      .then(() => updateUserTrading(this.userId, snapshot).then(() => undefined))
       .catch((err) => {
         logService.warn("trading", `Failed to save trading config: ${String(err)}`);
       });
@@ -504,12 +524,19 @@ export class LiveTradingService {
   }
 
   private isPreviewMode(): boolean {
-    return this.config.autoTrade && !this.config.startTrading;
+    // startTrading alone is not enough — non-executor processes stay in preview.
+    return this.config.autoTrade && !(this.config.startTrading && isTradingExecutor());
   }
 
   private canExecuteOrders(): boolean {
+    if (!isTradingExecutor()) return false;
     if (!this.config.autoTrade) return true;
     return this.config.startTrading;
+  }
+
+  /** True when this process may place/cancel live orders for the current config. */
+  private isLiveArmed(): boolean {
+    return this.config.startTrading && isTradingExecutor();
   }
 
   private getDisplayMarkers(): SimMarker[] {
@@ -730,7 +757,7 @@ export class LiveTradingService {
     this.liveStatLedger.clear();
     this.lastPersistedStatFingerprint.clear();
     this.statsPersistChain = this.statsPersistChain
-      .then(() => markLiveReset())
+      .then(() => markLiveReset(this.userId))
       .catch((err) => {
         logService.warn("trading", `Failed to mark live stats reset: ${String(err)}`);
       });
@@ -771,7 +798,7 @@ export class LiveTradingService {
     for (const card of openCards) {
       const closed = await pollUntil(
         async () => {
-          const rows = await fetchClosedPositions({
+          const rows = await fetchClosedPositions(this.userId, {
             conditionId: card.conditionId,
             limit: 20,
           });
@@ -796,7 +823,7 @@ export class LiveTradingService {
           card.shares = Number(closed.totalBought);
           card.buyCost = card.shares * card.buyPrice;
         }
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
         const marketOutcome = outcomeFromIndex(closed.outcomeIndex, closed.outcome);
         // Position outcome token that won if curPrice ~ 1
         const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : grossPl >= 0;
@@ -810,7 +837,7 @@ export class LiveTradingService {
 
       const openPos = await pollUntil(
         async () => {
-          const rows = await fetchUserPositions({
+          const rows = await fetchUserPositions(this.userId, {
             conditionId: card.conditionId,
             sizeThreshold: 0,
           });
@@ -836,7 +863,7 @@ export class LiveTradingService {
           card.shares = Number(openPos.size);
           card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
         }
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
         const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome =
@@ -859,7 +886,7 @@ export class LiveTradingService {
       card.status = won ? "win" : "loss";
       card.outcome = outcome;
       if (card.buyFees == null) {
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
       }
       card.pl = feeAwarePlHeld(card, won);
       card.confirmed = false;
@@ -877,8 +904,8 @@ export class LiveTradingService {
     const prevKey = this.sessionKey;
     const prevResting = this.restingBuy;
     this.restingBuy = null;
-    if (prevResting?.orderId) {
-      void cancelOpenOrder(prevResting.orderId);
+    if (prevResting?.orderId && isTradingExecutor()) {
+      void cancelOpenOrder(this.userId, prevResting.orderId);
     }
     this.positions = { up: null, down: null };
     this.quoteLocks = emptyQuoteLocks();
@@ -928,7 +955,7 @@ export class LiveTradingService {
       this.activePhaseSetup = null;
     } else {
       try {
-        const next = await findActiveScheduleContext();
+        const next = await findActiveScheduleContext(this.userId);
         if (next) {
           this.scheduleContext = next;
           this.activePhaseSetup = next.setup;
@@ -992,12 +1019,12 @@ export class LiveTradingService {
 
     const currentCount = this.autoEngine.getMarkers().filter((m) => m.windowKey === key).length;
 
-    if (this.config.startTrading) {
+    if (this.isLiveArmed()) {
       await this.mirrorNewSimMarkers(state, autoSetup, prevMarkerCount);
       await this.manageRestingGtdBuys(state, autoSetup, nowMs);
     } else {
       this.mirroredMarkerCount = currentCount;
-      if (this.restingBuy) {
+      if (this.restingBuy && !this.config.startTrading) {
         await this.cancelRestingBuy("startTrading off");
       }
     }
@@ -1039,7 +1066,8 @@ export class LiveTradingService {
     if (!resting) return;
     this.restingBuy = null;
     logService.info("trading", `Cancel resting GTD (${reason})`);
-    await cancelOpenOrder(resting.orderId);
+    if (!isTradingExecutor()) return;
+    await cancelOpenOrder(this.userId, resting.orderId);
   }
 
   private async manageRestingGtdBuys(
@@ -1095,7 +1123,7 @@ export class LiveTradingService {
 
     this.orderInFlight = true;
     try {
-      const result = await placeLimitGtdBuy({
+      const result = await placeLimitGtdBuy(this.userId, {
         series: state.series,
         side: chosenSide,
         size: shares,
@@ -1145,7 +1173,7 @@ export class LiveTradingService {
     const resting = this.restingBuy;
     if (!resting) return;
 
-    const snap = await fetchOpenOrder(resting.orderId);
+    const snap = await fetchOpenOrder(this.userId, resting.orderId);
     // Transient fetch failures — keep tracking so we don't double-place.
     if (!snap) return;
 
@@ -1195,7 +1223,7 @@ export class LiveTradingService {
   ): Promise<void> {
     const nowSec = Math.floor(Date.now() / 1000);
     const cost = usdcAmount ?? fillShares * fillPrice;
-    const buyFees = await estimateLiveTakerFee(tokenId, fillShares, fillPrice);
+    const buyFees = await estimateLiveTakerFee(this.userId, tokenId, fillShares, fillPrice);
 
     const existing = existingCardId ? this.findCard(existingCardId) : undefined;
     const pos = this.positions[side];
@@ -1273,7 +1301,7 @@ export class LiveTradingService {
       fees: buyFees,
       total: cost + buyFees,
     });
-    void refreshCollateralBalance();
+    void refreshCollateralBalance(this.userId);
     this.notify();
   }
 
@@ -1424,7 +1452,7 @@ export class LiveTradingService {
     if (!card.asset && !card.conditionId) return;
 
     try {
-      const trades = await fetchUserTrades({
+      const trades = await fetchUserTrades(this.userId, {
         asset: card.asset,
         conditionId: card.conditionId,
         limit: 40,
@@ -1442,14 +1470,14 @@ export class LiveTradingService {
         card.shares = size;
         card.buyPrice = price;
         card.buyCost = size * price;
-        card.buyFees = await estimateLiveTakerFee(card.asset ?? trade.asset, size, price);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset ?? trade.asset, size, price);
         card.asset = card.asset ?? trade.asset;
         card.conditionId = card.conditionId ?? trade.conditionId;
         card.slug = card.slug ?? trade.slug;
         if (trade.timestamp != null) card.buyAt = Number(trade.timestamp);
         card.confirmed = true;
       } else {
-        const rows = await fetchUserPositions({
+        const rows = await fetchUserPositions(this.userId, {
           conditionId: card.conditionId,
           sizeThreshold: 0,
         });
@@ -1462,6 +1490,7 @@ export class LiveTradingService {
           card.buyPrice = Number(pos.avgPrice);
           card.buyCost = Number(pos.initialValue ?? card.shares * card.buyPrice);
           card.buyFees = await estimateLiveTakerFee(
+            this.userId,
             card.asset ?? pos.asset,
             card.shares,
             card.buyPrice,
@@ -1511,7 +1540,7 @@ export class LiveTradingService {
 
     try {
       const soldAt = card.soldAt ?? card.buyAt;
-      const trades = await fetchUserTrades({
+      const trades = await fetchUserTrades(this.userId, {
         asset: card.asset,
         conditionId: card.conditionId,
         limit: 40,
@@ -1541,8 +1570,8 @@ export class LiveTradingService {
         card.sellPrice = price;
         card.sellProceeds = size * price;
         card.buyCost = size * card.buyPrice;
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
-        card.sellFees = await estimateLiveTakerFee(card.asset ?? trade.asset, size, price);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
+        card.sellFees = await estimateLiveTakerFee(this.userId, card.asset ?? trade.asset, size, price);
         card.asset = card.asset ?? trade.asset;
         card.conditionId = card.conditionId ?? trade.conditionId;
         card.slug = card.slug ?? trade.slug;
@@ -1553,7 +1582,7 @@ export class LiveTradingService {
         }
       }
 
-      const rows = await fetchClosedPositions({
+      const rows = await fetchClosedPositions(this.userId, {
         conditionId: card.conditionId,
         limit: 30,
       });
@@ -1575,9 +1604,9 @@ export class LiveTradingService {
             card.sellProceeds = bought * card.sellPrice;
           }
         }
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
         if (card.sellPrice != null) {
-          card.sellFees = await estimateLiveTakerFee(card.asset, card.shares, card.sellPrice);
+          card.sellFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.sellPrice);
         }
         card.asset = card.asset ?? closed.asset;
         card.conditionId = card.conditionId ?? closed.conditionId;
@@ -1596,7 +1625,7 @@ export class LiveTradingService {
     if (!card.asset && !card.conditionId) return;
 
     try {
-      const closedRows = await fetchClosedPositions({
+      const closedRows = await fetchClosedPositions(this.userId, {
         conditionId: card.conditionId,
         limit: 30,
       });
@@ -1614,7 +1643,7 @@ export class LiveTradingService {
           card.shares = Number(closed.totalBought);
           card.buyCost = card.shares * card.buyPrice;
         }
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
         const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome =
@@ -1627,7 +1656,7 @@ export class LiveTradingService {
         return;
       }
 
-      const openRows = await fetchUserPositions({
+      const openRows = await fetchUserPositions(this.userId, {
         conditionId: card.conditionId,
         sizeThreshold: 0,
       });
@@ -1647,7 +1676,7 @@ export class LiveTradingService {
         card.buyPrice = Number(openPos.avgPrice);
         card.shares = Number(openPos.size);
         card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
-        card.buyFees = await estimateLiveTakerFee(card.asset, card.shares, card.buyPrice);
+        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
         const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : grossPl >= 0;
         card.status = won ? "win" : "loss";
         card.outcome =
@@ -1690,10 +1719,14 @@ export class LiveTradingService {
     sizeUnit: "shares" | "usdc" = "shares",
     orderType: MarketOrderType = "FOK",
   ): Promise<{ ok: boolean; error?: string }> {
+    if (!isTradingExecutor()) {
+      logNonExecutorSkipOnce();
+      return { ok: false, error: "Trading executor not enabled in this process" };
+    }
     if (this.orderInFlight) return { ok: false, error: "Order already in progress" };
     this.orderInFlight = true;
     try {
-      const result = await placeMarketOrder({
+      const result = await placeMarketOrder(this.userId, {
         series: state.series,
         side,
         leg,
@@ -1726,6 +1759,7 @@ export class LiveTradingService {
         const pos = this.positions[side]!;
         const proceeds = result.usdcAmount ?? fillShares * fillPrice;
         const sellFees = await estimateLiveTakerFee(
+          this.userId,
           result.tokenId ?? pos.asset,
           fillShares,
           fillPrice,
@@ -1763,7 +1797,7 @@ export class LiveTradingService {
           total: proceeds,
         });
         this.positions[side] = null;
-        void refreshCollateralBalance();
+        void refreshCollateralBalance(this.userId);
         this.notify();
       }
 
@@ -1775,4 +1809,81 @@ export class LiveTradingService {
   }
 }
 
-export const liveTradingService = new LiveTradingService();
+class LiveTradingRegistry {
+  private engines = new Map<string, LiveTradingService>();
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly listeners = new Set<UpdateListener>();
+  private readonly fanOut = (): void => {
+    for (const listener of this.listeners) listener();
+  };
+
+  get(userId: string): LiveTradingService {
+    let engine = this.engines.get(userId);
+    if (!engine) {
+      engine = new LiveTradingService(userId);
+      engine.onUpdate(this.fanOut);
+      this.engines.set(userId, engine);
+    }
+    return engine;
+  }
+
+  async ensureLoaded(userId: string): Promise<LiveTradingService> {
+    const engine = this.get(userId);
+    await engine.loadPersistedConfig();
+    if (isTradingExecutor()) {
+      try {
+        await initTradingClient(userId);
+      } catch {
+        /* logged in client */
+      }
+    }
+    return engine;
+  }
+
+  async tickAll(state: LiveWindowState, nowMs?: number): Promise<void> {
+    const engines = [...this.engines.values()];
+    await Promise.all(engines.map((e) => e.tick(state, nowMs).catch(() => {})));
+  }
+
+  async syncFromMongo(): Promise<void> {
+    const users = await listUsersForLiveTrading();
+    for (const user of users) {
+      const id = String(user._id);
+      const engine = this.get(id);
+      await engine.loadPersistedConfig();
+      if (isTradingExecutor() && user.wallet?.privateKeyEnc && user.wallet?.funderAddress) {
+        try {
+          await initTradingClient(id);
+        } catch {
+          /* logged in client */
+        }
+      }
+    }
+  }
+
+  startPolling(intervalMs = 5000): void {
+    if (this.pollTimer) return;
+    void this.syncFromMongo();
+    this.pollTimer = setInterval(() => {
+      void this.syncFromMongo();
+    }, intervalMs);
+  }
+
+  stopPolling(): void {
+    if (!this.pollTimer) return;
+    clearInterval(this.pollTimer);
+    this.pollTimer = null;
+  }
+
+  /** Forward engine updates — same contract as LiveTradingService.onUpdate. */
+  onUpdate(listener: UpdateListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  listEngines(): LiveTradingService[] {
+    return [...this.engines.values()];
+  }
+}
+
+export const liveTradingRegistry = new LiveTradingRegistry();

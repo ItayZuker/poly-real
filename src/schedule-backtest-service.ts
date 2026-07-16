@@ -395,6 +395,7 @@ async function buildPlacementPlan(
 }
 
 export async function backtestSchedulePlacements(
+  userId: string,
   market: MarketDocument,
   placements: SchedulePlacementListItem[],
   latencyMs: number,
@@ -419,7 +420,7 @@ export async function backtestSchedulePlacements(
   const uniqueSetupIds = [...new Set(placements.map((p) => p.setupId))];
   await Promise.all(
     uniqueSetupIds.map(async (setupId) => {
-      const setup = await getTradingSetupById(setupId);
+      const setup = await getTradingSetupById(userId, setupId);
       setupCache.set(setupId, setup?.setup ?? null);
     }),
   );

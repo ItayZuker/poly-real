@@ -2365,9 +2365,15 @@ body.is-schedule-resizing {
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 
-.page-toggle-btn:hover:not(.is-active) {
+.page-toggle-btn:hover:not(.is-active):not(:disabled) {
   color: var(--text);
   background: rgba(88, 166, 255, 0.08);
+}
+
+.page-toggle-btn:disabled,
+.page-toggle-btn.is-wallet-locked {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .page-toggle-btn.is-active {

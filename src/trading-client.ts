@@ -9,8 +9,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 import { getClobHost, getChainId } from "./clob-service.js";
 import {
-  cacheDefaultSignerAddress,
-  getDefaultWalletCredentials,
+  cacheSignerAddress,
+  getWalletCredentials,
   type WalletCredentials,
 } from "./db/user-repository.js";
 import { logService } from "./log-service.js";
@@ -26,11 +26,15 @@ export interface TradingAccountStatus {
   error?: string;
 }
 
-let tradingClient: ClobClient | null = null;
-let accountStatus: TradingAccountStatus = { connected: false };
-let cachedCredentials: WalletCredentials | null = null;
+type ClientSlot = {
+  client: ClobClient | null;
+  status: TradingAccountStatus;
+  credentials: WalletCredentials | null;
+};
 
-type BalanceListener = (status: TradingAccountStatus) => void;
+const slots = new Map<string, ClientSlot>();
+
+type BalanceListener = (userId: string, status: TradingAccountStatus) => void;
 const balanceListeners = new Set<BalanceListener>();
 
 export function onBalanceRefresh(listener: BalanceListener): () => void {
@@ -38,17 +42,22 @@ export function onBalanceRefresh(listener: BalanceListener): () => void {
   return () => balanceListeners.delete(listener);
 }
 
-function emitBalanceRefresh(status: TradingAccountStatus): void {
-  for (const listener of balanceListeners) listener(status);
+function emitBalanceRefresh(userId: string, status: TradingAccountStatus): void {
+  for (const listener of balanceListeners) listener(userId, status);
 }
 
-function normalizePrivateKey(raw: string): `0x${string}` {
-  const trimmed = raw.trim();
-  const hex = trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
-  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
-    throw new Error("PRIVATE_KEY must be a 32-byte hex string");
+function slotKey(userId: string): string {
+  return String(userId);
+}
+
+function getSlot(userId: string): ClientSlot {
+  const key = slotKey(userId);
+  let slot = slots.get(key);
+  if (!slot) {
+    slot = { client: null, status: { connected: false }, credentials: null };
+    slots.set(key, slot);
   }
-  return `0x${hex}`;
+  return slot;
 }
 
 function parseSignatureType(raw: number | string | undefined): SignatureTypeV2 {
@@ -65,46 +74,25 @@ function formatUsdcBalance(raw: string): string {
   return (value / 1_000_000).toFixed(2);
 }
 
-/** Env fallback when Mongo wallet is empty (pre-migration / emergency). */
-function credentialsFromEnv(): WalletCredentials | null {
-  const key = process.env.PRIVATE_KEY?.trim();
-  const funder = process.env.FUNDER_ADDRESS?.trim();
-  if (!key || !funder) return null;
-  try {
-    return {
-      privateKey: normalizePrivateKey(key),
-      funderAddress: funder,
-      signatureType: parseSignatureType(process.env.SIGNATURE_TYPE ?? "1"),
-    };
-  } catch {
-    return null;
-  }
+export function isTradingConfigured(userId: string): boolean {
+  const slot = getSlot(userId);
+  if (slot.credentials?.privateKey && slot.credentials.funderAddress) return true;
+  return Boolean(slot.status.hasPrivateKey && slot.status.funderAddress);
 }
 
-export function isTradingConfigured(): boolean {
-  if (cachedCredentials?.privateKey && cachedCredentials.funderAddress) return true;
-  return Boolean(process.env.PRIVATE_KEY?.trim() && process.env.FUNDER_ADDRESS?.trim());
-}
-
-async function resolveCredentials(): Promise<WalletCredentials | null> {
-  const fromUser = await getDefaultWalletCredentials();
-  if (fromUser) return fromUser;
-  return credentialsFromEnv();
-}
-
-export async function initTradingClient(): Promise<TradingAccountStatus> {
-  const creds = await resolveCredentials();
-  cachedCredentials = creds;
+export async function initTradingClient(userId: string): Promise<TradingAccountStatus> {
+  const slot = getSlot(userId);
+  const creds = await getWalletCredentials(userId);
+  slot.credentials = creds;
 
   if (!creds) {
-    tradingClient = null;
-    accountStatus = {
+    slot.client = null;
+    slot.status = {
       connected: false,
       hasPrivateKey: false,
-      error: "Set private key and funder address in Wallet",
+      error: "Set private key and funder address in Settings",
     };
-    logService.warn("trading", "Trading account not configured");
-    return accountStatus;
+    return slot.status;
   }
 
   const { privateKey, funderAddress, signatureType: sigTypeRaw } = creds;
@@ -135,7 +123,7 @@ export async function initTradingClient(): Promise<TradingAccountStatus> {
       apiCreds = await bootstrapClient.createApiKey();
     }
 
-    tradingClient = new ClobClient({
+    slot.client = new ClobClient({
       host,
       chain,
       signer,
@@ -146,11 +134,11 @@ export async function initTradingClient(): Promise<TradingAccountStatus> {
     });
 
     const [apiKeys, balance] = await Promise.all([
-      tradingClient.getApiKeys(),
-      tradingClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }),
+      slot.client.getApiKeys(),
+      slot.client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }),
     ]);
 
-    accountStatus = {
+    slot.status = {
       connected: true,
       signerAddress: account.address,
       funderAddress,
@@ -160,66 +148,72 @@ export async function initTradingClient(): Promise<TradingAccountStatus> {
       hasPrivateKey: true,
     };
 
-    void cacheDefaultSignerAddress(account.address).catch(() => {});
+    void cacheSignerAddress(userId, account.address).catch(() => {});
 
     logService.success(
       "trading",
-      `Account connected — signer ${account.address}, funder ${funderAddress}, ` +
+      `Account connected (user ${userId.slice(0, 8)}…) — signer ${account.address}, funder ${funderAddress}, ` +
         `balance $${formatUsdcBalance(balance.balance)} USDC`,
     );
 
-    emitBalanceRefresh(getTradingAccountStatus());
-    return accountStatus;
+    emitBalanceRefresh(userId, getTradingAccountStatus(userId));
+    return slot.status;
   } catch (err) {
-    tradingClient = null;
+    slot.client = null;
     const message = err instanceof Error ? err.message : String(err);
-    accountStatus = {
+    slot.status = {
       connected: false,
       funderAddress,
       hasPrivateKey: true,
       error: message,
     };
-    logService.error("trading", `Account connection failed: ${message}`);
-    emitBalanceRefresh(getTradingAccountStatus());
+    logService.error("trading", `Account connection failed (user ${userId.slice(0, 8)}…): ${message}`);
+    emitBalanceRefresh(userId, getTradingAccountStatus(userId));
     throw err;
   }
 }
 
-/** Re-read wallet from Mongo/env and reconnect the CLOB client. */
-export async function reconnectTradingClient(): Promise<TradingAccountStatus> {
-  tradingClient = null;
-  cachedCredentials = null;
-  return initTradingClient();
+/** Re-read wallet from Mongo and reconnect the CLOB client for this user. */
+export async function reconnectTradingClient(userId: string): Promise<TradingAccountStatus> {
+  const slot = getSlot(userId);
+  slot.client = null;
+  slot.credentials = null;
+  return initTradingClient(userId);
 }
 
-export function getTradingClient(): ClobClient | null {
-  return tradingClient;
+export function getTradingClient(userId: string): ClobClient | null {
+  return getSlot(userId).client;
 }
 
-export function getTradingAccountStatus(): TradingAccountStatus {
-  return { ...accountStatus };
+export function getTradingAccountStatus(userId: string): TradingAccountStatus {
+  return { ...getSlot(userId).status };
 }
 
 /** Re-fetch USDC collateral balance from the CLOB and update cached account status. */
-export async function refreshCollateralBalance(): Promise<TradingAccountStatus> {
-  if (!tradingClient || !accountStatus.connected) {
-    return getTradingAccountStatus();
+export async function refreshCollateralBalance(userId: string): Promise<TradingAccountStatus> {
+  const slot = getSlot(userId);
+  if (!slot.client || !slot.status.connected) {
+    return getTradingAccountStatus(userId);
   }
 
   try {
-    const balance = await tradingClient.getBalanceAllowance({
+    const balance = await slot.client.getBalanceAllowance({
       asset_type: AssetType.COLLATERAL,
     });
-    accountStatus = {
-      ...accountStatus,
+    slot.status = {
+      ...slot.status,
       collateralBalance: balance.balance,
     };
-    const status = getTradingAccountStatus();
-    emitBalanceRefresh(status);
+    const status = getTradingAccountStatus(userId);
+    emitBalanceRefresh(userId, status);
     return status;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logService.warn("trading", `Balance refresh failed: ${message}`);
-    return getTradingAccountStatus();
+    logService.warn("trading", `Balance refresh failed (user ${userId.slice(0, 8)}…): ${message}`);
+    return getTradingAccountStatus(userId);
   }
+}
+
+export function dropTradingClient(userId: string): void {
+  slots.delete(slotKey(userId));
 }

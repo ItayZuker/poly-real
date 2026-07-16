@@ -14,7 +14,7 @@ import {
 import { takeLevels } from "./book-depth.js";
 import { pickDisplayPrice } from "./quote-price.js";
 import { simulatorService } from "./simulator-service.js";
-import { liveTradingService } from "./live-trading-service.js";
+import { liveTradingRegistry } from "./live-trading-service.js";
 import { resolveTakerFeeParams } from "./taker-fee.js";
 import { logService } from "./log-service.js";
 import type { LiveWindowState } from "./types.js";
@@ -136,7 +136,7 @@ export class DisplayService {
       this.state.feedLatencyMs = feedLatency;
     }
     void (async () => {
-      await liveTradingService.tick(this.state, tickMs);
+      await liveTradingRegistry.tickAll(this.state, tickMs);
       this.notify();
     })();
   }

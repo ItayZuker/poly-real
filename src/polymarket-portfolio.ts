@@ -47,8 +47,8 @@ export interface PolymarketClosedPosition {
   outcomeIndex?: number;
 }
 
-function funderAddress(): string | undefined {
-  const addr = getTradingAccountStatus().funderAddress?.trim();
+function funderAddress(userId: string): string | undefined {
+  const addr = getTradingAccountStatus(userId).funderAddress?.trim();
   return addr || process.env.FUNDER_ADDRESS?.trim() || undefined;
 }
 
@@ -61,12 +61,15 @@ async function fetchJsonArray<T>(url: string): Promise<T[]> {
   return Array.isArray(payload) ? (payload as T[]) : [];
 }
 
-export async function fetchUserTrades(options: {
-  asset?: string;
-  conditionId?: string;
-  limit?: number;
-}): Promise<PolymarketTrade[]> {
-  const user = funderAddress();
+export async function fetchUserTrades(
+  userId: string,
+  options: {
+    asset?: string;
+    conditionId?: string;
+    limit?: number;
+  },
+): Promise<PolymarketTrade[]> {
+  const user = funderAddress(userId);
   if (!user) return [];
   const params = new URLSearchParams({
     user,
@@ -77,11 +80,14 @@ export async function fetchUserTrades(options: {
   return fetchJsonArray<PolymarketTrade>(`${DATA_API_BASE}/trades?${params}`);
 }
 
-export async function fetchUserPositions(options: {
-  conditionId?: string;
-  sizeThreshold?: number;
-}): Promise<PolymarketPosition[]> {
-  const user = funderAddress();
+export async function fetchUserPositions(
+  userId: string,
+  options: {
+    conditionId?: string;
+    sizeThreshold?: number;
+  },
+): Promise<PolymarketPosition[]> {
+  const user = funderAddress(userId);
   if (!user) return [];
   const params = new URLSearchParams({
     user,
@@ -92,11 +98,14 @@ export async function fetchUserPositions(options: {
   return fetchJsonArray<PolymarketPosition>(`${DATA_API_BASE}/positions?${params}`);
 }
 
-export async function fetchClosedPositions(options: {
-  conditionId?: string;
-  limit?: number;
-}): Promise<PolymarketClosedPosition[]> {
-  const user = funderAddress();
+export async function fetchClosedPositions(
+  userId: string,
+  options: {
+    conditionId?: string;
+    limit?: number;
+  },
+): Promise<PolymarketClosedPosition[]> {
+  const user = funderAddress(userId);
   if (!user) return [];
   const params = new URLSearchParams({
     user,

@@ -254,6 +254,8 @@ export interface TradingPhaseSetup {
 }
 
 export interface TradingSetupRecord {
+  /** Owner — required for multi-user isolation. */
+  userId: string;
   title: string;
   description?: string;
   color?: string;
@@ -274,6 +276,8 @@ export interface TradingSetupRecord {
 export type ScheduleDayId = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
 export interface SchedulePlacementRecord {
+  /** Owner — required for multi-user isolation. */
+  userId: string;
   setupId: string;
   title: string;
   day: ScheduleDayId;
@@ -423,5 +427,5 @@ export interface TradingPublicState {
 
 export interface EnrichedLiveWindowState extends LiveWindowState {
   sim: SimPublicState;
-  trading: TradingPublicState;
+  trading: TradingPublicState | null;
 }

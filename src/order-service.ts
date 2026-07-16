@@ -161,12 +161,15 @@ function parseOpenOrder(raw: Record<string, unknown> | null | undefined, fallbac
   };
 }
 
-export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
-  if (!isTradingConfigured()) {
+export async function placeMarketOrder(
+  userId: string,
+  input: PlaceOrderInput,
+): Promise<PlaceOrderResult> {
+  if (!isTradingConfigured(userId)) {
     return { success: false, error: "Trading account not configured" };
   }
 
-  const client = getTradingClient();
+  const client = getTradingClient(userId);
   if (!client) {
     return { success: false, error: "Trading client not initialized" };
   }
@@ -262,12 +265,15 @@ export async function placeMarketOrder(input: PlaceOrderInput): Promise<PlaceOrd
 }
 
 /** Place a resting GTD limit buy (shares @ price) that expires at expirationSec. */
-export async function placeLimitGtdBuy(input: PlaceLimitOrderInput): Promise<PlaceOrderResult> {
-  if (!isTradingConfigured()) {
+export async function placeLimitGtdBuy(
+  userId: string,
+  input: PlaceLimitOrderInput,
+): Promise<PlaceOrderResult> {
+  if (!isTradingConfigured(userId)) {
     return { success: false, error: "Trading account not configured" };
   }
 
-  const client = getTradingClient();
+  const client = getTradingClient(userId);
   if (!client) {
     return { success: false, error: "Trading client not initialized" };
   }
@@ -339,9 +345,12 @@ export async function placeLimitGtdBuy(input: PlaceLimitOrderInput): Promise<Pla
   }
 }
 
-export async function cancelOpenOrder(orderId: string): Promise<{ ok: boolean; error?: string }> {
+export async function cancelOpenOrder(
+  userId: string,
+  orderId: string,
+): Promise<{ ok: boolean; error?: string }> {
   if (!orderId) return { ok: false, error: "Missing order id" };
-  const client = getTradingClient();
+  const client = getTradingClient(userId);
   if (!client) return { ok: false, error: "Trading client not initialized" };
   try {
     await client.cancelOrder({ orderID: orderId });
@@ -354,9 +363,12 @@ export async function cancelOpenOrder(orderId: string): Promise<{ ok: boolean; e
   }
 }
 
-export async function fetchOpenOrder(orderId: string): Promise<OpenOrderSnapshot | null> {
+export async function fetchOpenOrder(
+  userId: string,
+  orderId: string,
+): Promise<OpenOrderSnapshot | null> {
   if (!orderId) return null;
-  const client = getTradingClient();
+  const client = getTradingClient(userId);
   if (!client) return null;
   try {
     const raw = (await client.getOrder(orderId)) as unknown as Record<string, unknown> | null;

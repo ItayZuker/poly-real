@@ -17,6 +17,7 @@ import { logService } from "./log-service.js";
 import {
   deleteSchedulePlacement,
   deletePlacementsBySetupId,
+  ensureSchedulePlacementsUserId,
   getSchedulePlacementById,
   insertSchedulePlacement,
   listSchedulePlacements,
@@ -32,39 +33,43 @@ import {
   updateTradingSetup,
   deleteTradingSetup,
   normalizePhaseSetup,
+  ensureTradingSetupsUserId,
 } from "./db/trading-setup-repository.js";
 import {
   reconcileLiveScheduleInUseFlags,
   syncLiveScheduleInUseForSetup,
 } from "./db/live-schedule-setup-usage.js";
-import { sumTradingSessionMemory } from "./db/trading-session-memory-repository.js";
+import {
+  ensureTradingSessionMemoryUserId,
+  sumTradingSessionMemory,
+} from "./db/trading-session-memory-repository.js";
 import { closeMongoClient } from "./db/mongo-client.js";
 import {
   getHeatmapState,
   loadAllHeatmapWindows,
   setHeatmapUpdateListener,
 } from "./heatmap-service.js";
-import type { EnrichedLiveWindowState, ReplayTickDocument, SimSetup } from "./types.js";
-import { createPublicClient, getClobHost, getChainId } from "./clob-service.js";
+import type { EnrichedLiveWindowState, SimSetup } from "./types.js";
 import {
+  dropTradingClient,
   getTradingAccountStatus,
-  initTradingClient,
   isTradingConfigured,
   onBalanceRefresh,
   reconnectTradingClient,
   refreshCollateralBalance,
 } from "./trading-client.js";
-import { liveTradingService } from "./live-trading-service.js";
+import { liveTradingRegistry } from "./live-trading-service.js";
+import { isTradingExecutor } from "./trading-executor.js";
 import {
   authenticateUser,
   deleteUserById,
   ensureDefaultUser,
   ensureUserIndexes,
-  getDefaultUserPublic,
+  getBootstrapUserId,
   getUserPublicById,
   maybeBootstrapDefaultPassword,
-  updateDefaultUserWallet,
   updateUserProfile,
+  updateUserWallet,
   type UserPublic,
 } from "./db/user-repository.js";
 import {
@@ -91,7 +96,17 @@ app.use(express.static(path.join(__dirname, "../public")));
 
 type AuthedRequest = express.Request & { authUser?: UserPublic };
 
-type SseClient = { id: number; res: express.Response };
+function requireUserId(req: express.Request): string {
+  const user = (req as AuthedRequest).authUser;
+  if (!user?.id) throw new Error("Unauthorized");
+  return user.id;
+}
+
+function tradingFor(req: express.Request) {
+  return liveTradingRegistry.get(requireUserId(req));
+}
+
+type SseClient = { id: number; res: express.Response; userId?: string };
 let sseClients: SseClient[] = [];
 let sseId = 0;
 
@@ -175,29 +190,23 @@ app.post("/api/auth/logout", async (req, res) => {
 
 app.delete("/api/auth/account", async (req, res) => {
   try {
-    const authUser = (req as AuthedRequest).authUser;
-    if (!authUser) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    const userId = new ObjectId(authUser.id);
-    const defaultUser = await getDefaultUserPublic();
-    const deletingDefault = authUser.id === defaultUser.id;
+    const userId = requireUserId(req);
+    const oid = new ObjectId(userId);
 
-    await destroySessionsForUser(userId);
-    const deleted = await deleteUserById(userId);
+    await destroySessionsForUser(oid);
+    const deleted = await deleteUserById(oid);
     if (!deleted) {
       res.status(404).json({ error: "User not found" });
       return;
     }
 
-    if (deletingDefault) {
-      liveTradingService.setConfig({
-        autoTrade: false,
-        useSchedule: false,
-        startTrading: false,
-      });
+    dropTradingClient(userId);
+
+    // Keep a bootstrap default user if the DB is empty after delete.
+    try {
       await ensureDefaultUser();
+    } catch {
+      // ignore
     }
 
     res.setHeader("Set-Cookie", buildClearSessionCookie(isSecureRequest(req)));
@@ -207,9 +216,10 @@ app.delete("/api/auth/account", async (req, res) => {
   }
 });
 
-function broadcast(event: string, data: unknown): void {
+function broadcast(event: string, data: unknown, userId?: string): void {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
+    if (userId != null && client.userId !== userId) continue;
     client.res.write(payload);
   }
 }
@@ -223,16 +233,31 @@ function windowDurationSec(state: { windowStart?: number; windowEnd?: number }):
   return 300;
 }
 
-function enrichWindowState(state: ReturnType<typeof displayService.getState>): EnrichedLiveWindowState {
+function enrichWindowStateForUser(
+  userId: string | undefined,
+  state: ReturnType<typeof displayService.getState>,
+): EnrichedLiveWindowState {
+  const trading = userId
+    ? liveTradingRegistry.get(userId).getPublicState()
+    : undefined;
   return {
     ...state,
     sim: simulatorService.getPublicState(),
-    trading: liveTradingService.getPublicState(),
+    trading: trading ?? null,
   };
 }
 
 function pushWindowState(): void {
-  broadcast("window", enrichWindowState(displayService.getState()));
+  const state = displayService.getState();
+  for (const client of sseClients) {
+    const payload = `event: window\ndata: ${JSON.stringify(enrichWindowStateForUser(client.userId, state))}\n\n`;
+    client.res.write(payload);
+  }
+}
+
+async function broadcastSchedulePlacements(userId: string): Promise<void> {
+  const placements = await listSchedulePlacements(userId);
+  broadcast("schedule-placements", placements, userId);
 }
 
 function getDisplaySeries(req: express.Request): string {
@@ -256,10 +281,12 @@ function filterSchedulePlacements(
   return all.filter((p) => idSet.has(p._id));
 }
 
-app.get("/api/account", async (_req, res) => {
+app.get("/api/account", async (req, res) => {
   try {
-    const status = await refreshCollateralBalance();
-    const user = await getDefaultUserPublic();
+    const userId = requireUserId(req);
+    const authUser = (req as AuthedRequest).authUser!;
+    const status = await refreshCollateralBalance(userId);
+    const user = (await getUserPublicById(userId)) ?? authUser;
     res.json({
       ...status,
       hasPrivateKey: user.wallet.hasPrivateKey || Boolean(status.hasPrivateKey),
@@ -269,8 +296,10 @@ app.get("/api/account", async (_req, res) => {
     });
   } catch {
     try {
-      const user = await getDefaultUserPublic();
-      const status = getTradingAccountStatus();
+      const userId = requireUserId(req);
+      const authUser = (req as AuthedRequest).authUser!;
+      const user = (await getUserPublicById(userId)) ?? authUser;
+      const status = getTradingAccountStatus(userId);
       res.json({
         ...status,
         hasPrivateKey: user.wallet.hasPrivateKey,
@@ -279,7 +308,11 @@ app.get("/api/account", async (_req, res) => {
         privateKeyHint: user.wallet.privateKeyHint,
       });
     } catch {
-      res.json(getTradingAccountStatus());
+      try {
+        res.json(getTradingAccountStatus(requireUserId(req)));
+      } catch {
+        res.json({ connected: false });
+      }
     }
   }
 });
@@ -322,6 +355,7 @@ app.patch("/api/user", async (req, res) => {
 
 app.patch("/api/account/wallet", async (req, res) => {
   try {
+    const userId = requireUserId(req);
     const body = (req.body ?? {}) as {
       funderAddress?: string;
       privateKey?: string;
@@ -336,17 +370,18 @@ app.patch("/api/account/wallet", async (req, res) => {
       return;
     }
 
-    const user = await updateDefaultUserWallet({
+    const user = await updateUserWallet(userId, {
       funderAddress: body.funderAddress,
       privateKey: body.privateKey,
       signatureType: body.signatureType,
     });
 
-    let status = getTradingAccountStatus();
+    let status = getTradingAccountStatus(userId);
     try {
-      status = await reconnectTradingClient();
+      status = await reconnectTradingClient(userId);
+      await liveTradingRegistry.ensureLoaded(userId);
     } catch (err) {
-      status = getTradingAccountStatus();
+      status = getTradingAccountStatus(userId);
       res.status(400).json({
         error: err instanceof Error ? err.message : String(err),
         wallet: user.wallet,
@@ -361,18 +396,25 @@ app.patch("/api/account/wallet", async (req, res) => {
       return;
     }
 
-    broadcast("account", {
-      ...status,
-      hasPrivateKey: user.wallet.hasPrivateKey,
-      privateKeyHint: user.wallet.privateKeyHint,
-    });
+    broadcast(
+      "account",
+      {
+        ...status,
+        hasPrivateKey: user.wallet.hasPrivateKey,
+        privateKeyHint: user.wallet.privateKeyHint,
+      },
+      userId,
+    );
 
     res.json({
       ok: true,
+      user,
       wallet: user.wallet,
       account: {
         ...status,
         hasPrivateKey: user.wallet.hasPrivateKey,
+        funderAddress: status.funderAddress ?? user.wallet.funderAddress,
+        signerAddress: status.signerAddress ?? user.wallet.signerAddress,
         privateKeyHint: user.wallet.privateKeyHint,
       },
     });
@@ -381,15 +423,20 @@ app.patch("/api/account/wallet", async (req, res) => {
   }
 });
 
-app.get("/api/trading/config", (_req, res) => {
-  res.json(liveTradingService.getConfig());
+app.get("/api/trading/config", (req, res) => {
+  try {
+    res.json(tradingFor(req).getConfig());
+  } catch (err) {
+    res.status(401).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.put("/api/trading/config", (req, res) => {
   try {
+    const engine = tradingFor(req);
     const body = req.body as Partial<import("./types.js").TradingConfig>;
-    const config = liveTradingService.setConfig(body);
-    void liveTradingService.refreshScheduleContext(true);
+    const config = engine.setConfig(body);
+    void engine.refreshScheduleContext(true);
     pushWindowState();
     res.json(config);
   } catch (err) {
@@ -399,7 +446,8 @@ app.put("/api/trading/config", (req, res) => {
 
 app.post("/api/trading/order", async (req, res) => {
   try {
-    if (!isTradingConfigured()) {
+    const userId = requireUserId(req);
+    if (!isTradingConfigured(userId)) {
       res.status(400).json({ error: "Trading account not configured" });
       return;
     }
@@ -414,7 +462,7 @@ app.post("/api/trading/order", async (req, res) => {
       return;
     }
     const state = displayService.getState();
-    const result = await liveTradingService.manualOrder(state, side, leg);
+    const result = await tradingFor(req).manualOrder(state, side, leg);
     pushWindowState();
     if (!result.ok) {
       res.status(400).json({ error: result.error ?? "Order failed" });
@@ -426,10 +474,10 @@ app.post("/api/trading/order", async (req, res) => {
   }
 });
 
-app.post("/api/trading/positions/clear", async (_req, res) => {
+app.post("/api/trading/positions/clear", async (req, res) => {
   try {
     // Reset Live counters only — history stays in Mongo for Week / All time.
-    liveTradingService.clearPositionCards();
+    tradingFor(req).clearPositionCards();
     pushWindowState();
     res.json({ ok: true, archived: false });
   } catch (err) {
@@ -439,8 +487,9 @@ app.post("/api/trading/positions/clear", async (_req, res) => {
 
 app.get("/api/trading/session-memory", async (req, res) => {
   try {
+    const userId = requireUserId(req);
     const mode = String(req.query.mode ?? "live").toLowerCase();
-    const live = liveTradingService.getLiveSessionTotals();
+    const live = tradingFor(req).getLiveSessionTotals();
     const liveTotals = {
       green: live.green,
       red: live.red,
@@ -471,7 +520,7 @@ app.get("/api/trading/session-memory", async (req, res) => {
     }
 
     // Events are written on each settled-stat update — do not add live again (would double-count).
-    const archived = await sumTradingSessionMemory({ fromMs, toMs });
+    const archived = await sumTradingSessionMemory(userId, { fromMs, toMs });
 
     res.json({
       mode: mode === "alltime" || mode === "all-time" ? "all" : mode,
@@ -553,7 +602,8 @@ app.get("/api/window", async (req, res) => {
   try {
     const series = getDisplaySeries(req);
     displayService.setSeries(series);
-    res.json(enrichWindowState(displayService.getState()));
+    const userId = (req as AuthedRequest).authUser?.id;
+    res.json(enrichWindowStateForUser(userId, displayService.getState()));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -581,6 +631,7 @@ app.put("/api/sim/setup", (req, res) => {
 
 app.post("/api/trading-setups", async (req, res) => {
   try {
+    const userId = requireUserId(req);
     const title = String(req.body?.title ?? "").trim();
     if (!title) {
       res.status(400).json({ error: "title is required" });
@@ -602,7 +653,7 @@ app.post("/api/trading-setups", async (req, res) => {
       phaseSetup = parsed;
     }
 
-    const saved = await insertTradingSetup({
+    const saved = await insertTradingSetup(userId, {
       title,
       description,
       setup: phaseSetup,
@@ -619,9 +670,9 @@ app.post("/api/trading-setups", async (req, res) => {
   }
 });
 
-app.get("/api/trading-setups", async (_req, res) => {
+app.get("/api/trading-setups", async (req, res) => {
   try {
-    const setups = await listTradingSetups();
+    const setups = await listTradingSetups(requireUserId(req));
     res.json(setups);
   } catch (err) {
     const message = String(err);
@@ -635,7 +686,7 @@ app.get("/api/trading-setups", async (_req, res) => {
 
 app.get("/api/trading-setups/:id", async (req, res) => {
   try {
-    const setup = await getTradingSetupById(req.params.id);
+    const setup = await getTradingSetupById(requireUserId(req), req.params.id);
     if (!setup) {
       res.status(404).json({ error: "Setup not found" });
       return;
@@ -653,8 +704,9 @@ app.get("/api/trading-setups/:id", async (req, res) => {
 
 app.patch("/api/trading-setups/:id", async (req, res) => {
   try {
+    const userId = requireUserId(req);
     const descriptionRaw = req.body?.description;
-    const updated = await updateTradingSetup(req.params.id, {
+    const updated = await updateTradingSetup(userId, req.params.id, {
       title: req.body?.title != null ? String(req.body.title) : undefined,
       description:
         descriptionRaw === undefined
@@ -670,10 +722,11 @@ app.patch("/api/trading-setups/:id", async (req, res) => {
       return;
     }
     if (req.body?.title != null) {
-      await updatePlacementTitlesBySetupId(req.params.id, updated.title);
+      await updatePlacementTitlesBySetupId(userId, req.params.id, updated.title);
+      await broadcastSchedulePlacements(userId);
     }
     if (req.body?.setup != null) {
-      await liveTradingService.refreshScheduleContext(true);
+      await tradingFor(req).refreshScheduleContext(true);
       pushWindowState();
     }
     logService.success("sim", `Trading setup updated: "${updated.title}"`);
@@ -694,22 +747,24 @@ app.patch("/api/trading-setups/:id", async (req, res) => {
 
 app.delete("/api/trading-setups/:id", async (req, res) => {
   try {
-    const existing = await getTradingSetupById(req.params.id);
+    const userId = requireUserId(req);
+    const existing = await getTradingSetupById(userId, req.params.id);
     if (!existing) {
       res.status(404).json({ error: "Setup not found" });
       return;
     }
     const setupId = String(req.params.id);
-    const linked = (await listSchedulePlacements()).filter((p) => p.setupId === setupId);
-    await deletePlacementsBySetupId(setupId);
+    const linked = (await listSchedulePlacements(userId)).filter((p) => p.setupId === setupId);
+    await deletePlacementsBySetupId(userId, setupId);
     for (const placement of linked) {
-      liveTradingService.forgetPlacement(placement._id);
+      tradingFor(req).forgetPlacement(placement._id);
     }
-    const ok = await deleteTradingSetup(setupId);
+    const ok = await deleteTradingSetup(userId, setupId);
     if (!ok) {
       res.status(404).json({ error: "Setup not found" });
       return;
     }
+    await broadcastSchedulePlacements(userId);
     pushWindowState();
     logService.success("sim", `Trading setup deleted: "${existing.title}"`);
     res.status(204).send();
@@ -731,9 +786,9 @@ app.get("/api/heatmap", (_req, res) => {
   }
 });
 
-app.get("/api/schedule-placements", async (_req, res) => {
+app.get("/api/schedule-placements", async (req, res) => {
   try {
-    const placements = await listSchedulePlacements();
+    const placements = await listSchedulePlacements(requireUserId(req));
     res.json(placements);
   } catch (err) {
     const message = String(err);
@@ -747,14 +802,16 @@ app.get("/api/schedule-placements", async (_req, res) => {
 
 app.post("/api/schedule-placements", async (req, res) => {
   try {
-    const saved = await insertSchedulePlacement({
+    const userId = requireUserId(req);
+    const saved = await insertSchedulePlacement(userId, {
       setupId: String(req.body?.setupId ?? ""),
       title: String(req.body?.title ?? ""),
       day: String(req.body?.day ?? ""),
       startHour: Number(req.body?.startHour),
       durationHours: Number(req.body?.durationHours),
     });
-    await syncLiveScheduleInUseForSetup(saved.setupId);
+    await syncLiveScheduleInUseForSetup(userId, saved.setupId);
+    await broadcastSchedulePlacements(userId);
     res.status(201).json(saved);
   } catch (err) {
     const message = String(err);
@@ -772,15 +829,17 @@ app.post("/api/schedule-placements", async (req, res) => {
 
 app.post("/api/schedule-placements/apply-setup", async (req, res) => {
   try {
+    const userId = requireUserId(req);
     const setupId = String(req.body?.setupId ?? "");
     const title = String(req.body?.title ?? "");
-    const setup = await getTradingSetupById(setupId);
+    const setup = await getTradingSetupById(userId, setupId);
     if (!setup) {
       res.status(404).json({ error: "Trading setup not found" });
       return;
     }
-    const placements = await replaceAllPlacementsSetup(setupId, title || setup.title);
-    await reconcileLiveScheduleInUseFlags();
+    const placements = await replaceAllPlacementsSetup(userId, setupId, title || setup.title);
+    await reconcileLiveScheduleInUseFlags(userId);
+    await broadcastSchedulePlacements(userId);
     res.json(placements);
   } catch (err) {
     const message = String(err);
@@ -798,7 +857,8 @@ app.post("/api/schedule-placements/apply-setup", async (req, res) => {
 
 app.patch("/api/schedule-placements/:id", async (req, res) => {
   try {
-    const updated = await updateSchedulePlacement(req.params.id, {
+    const userId = requireUserId(req);
+    const updated = await updateSchedulePlacement(userId, req.params.id, {
       day: req.body?.day != null ? String(req.body.day) : undefined,
       startHour: req.body?.startHour != null ? Number(req.body.startHour) : undefined,
       durationHours: req.body?.durationHours != null ? Number(req.body.durationHours) : undefined,
@@ -807,6 +867,7 @@ app.patch("/api/schedule-placements/:id", async (req, res) => {
       res.status(404).json({ error: "Placement not found" });
       return;
     }
+    await broadcastSchedulePlacements(userId);
     res.json(updated);
   } catch (err) {
     const message = String(err);
@@ -824,17 +885,19 @@ app.patch("/api/schedule-placements/:id", async (req, res) => {
 
 app.delete("/api/schedule-placements/:id", async (req, res) => {
   try {
+    const userId = requireUserId(req);
     const id = String(req.params.id);
-    const existing = await getSchedulePlacementById(id);
-    const ok = await deleteSchedulePlacement(id);
+    const existing = await getSchedulePlacementById(userId, id);
+    const ok = await deleteSchedulePlacement(userId, id);
     if (!ok) {
       res.status(404).json({ error: "Placement not found" });
       return;
     }
     if (existing?.setupId) {
-      await syncLiveScheduleInUseForSetup(existing.setupId);
+      await syncLiveScheduleInUseForSetup(userId, existing.setupId);
     }
-    liveTradingService.forgetPlacement(id);
+    tradingFor(req).forgetPlacement(id);
+    await broadcastSchedulePlacements(userId);
     pushWindowState();
     res.status(204).send();
   } catch (err) {
@@ -849,10 +912,11 @@ app.delete("/api/schedule-placements/:id", async (req, res) => {
 
 app.get("/api/schedule-placement-stats", async (req, res) => {
   try {
-    const allPlacements = await listSchedulePlacements();
+    const userId = requireUserId(req);
+    const allPlacements = await listSchedulePlacements(userId);
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
-    const stats = liveTradingService.getPlacementStats(placements.map((p) => p._id));
+    const stats = tradingFor(req).getPlacementStats(placements.map((p) => p._id));
     res.json(stats);
   } catch (err) {
     const message = String(err);
@@ -883,11 +947,12 @@ app.get("/api/schedule-placement-stats/stream", async (req, res) => {
   };
 
   try {
+    const userId = requireUserId(req);
     writeEvent("progress", { completed: 1, total: 1 });
-    const allPlacements = await listSchedulePlacements();
+    const allPlacements = await listSchedulePlacements(userId);
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
-    const stats = liveTradingService.getPlacementStats(placements.map((p) => p._id));
+    const stats = tradingFor(req).getPlacementStats(placements.map((p) => p._id));
     if (!closed) {
       writeEvent("done", stats);
       res.end();
@@ -935,18 +1000,23 @@ app.get("/api/stream", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const client: SseClient = { id: ++sseId, res };
+  const userId = (req as AuthedRequest).authUser?.id;
+  const client: SseClient = { id: ++sseId, res, userId };
   sseClients.push(client);
 
   void (async () => {
     try {
       const markets = await listMarkets();
       res.write(`event: markets\ndata: ${JSON.stringify(markets)}\n\n`);
-      res.write(`event: window\ndata: ${JSON.stringify(enrichWindowState(displayService.getState()))}\n\n`);
+      res.write(
+        `event: window\ndata: ${JSON.stringify(enrichWindowStateForUser(userId, displayService.getState()))}\n\n`,
+      );
       res.write(`event: log-history\ndata: ${JSON.stringify(logService.getRecent())}\n\n`);
       res.write(`event: heatmap\ndata: ${JSON.stringify(getHeatmapState())}\n\n`);
-      const placements = await listSchedulePlacements();
-      res.write(`event: schedule-placements\ndata: ${JSON.stringify(placements)}\n\n`);
+      if (userId) {
+        const placements = await listSchedulePlacements(userId);
+        res.write(`event: schedule-placements\ndata: ${JSON.stringify(placements)}\n\n`);
+      }
     } catch {
       // ignore
     }
@@ -965,26 +1035,32 @@ async function main(): Promise<void> {
     await ensureSessionIndexes();
     await ensureDefaultUser();
     await maybeBootstrapDefaultPassword();
+    const bootstrapId = await getBootstrapUserId();
+    await ensureTradingSetupsUserId(bootstrapId);
+    await ensureSchedulePlacementsUserId(bootstrapId);
+    await ensureTradingSessionMemoryUserId(bootstrapId);
+    await reconcileLiveScheduleInUseFlags(bootstrapId);
   } catch (err) {
     logService.warn("server", `Failed to ensure default user / auth indexes: ${String(err)}`);
   }
-  await liveTradingService.loadPersistedConfig();
-  try {
-    await reconcileLiveScheduleInUseFlags();
-  } catch (err) {
-    logService.warn("server", `Failed to reconcile liveScheduleInUse flags: ${String(err)}`);
+
+  liveTradingRegistry.startPolling(5000);
+  liveTradingRegistry.onUpdate(() => {
+    pushWindowState();
+  });
+
+  if (isTradingExecutor()) {
+    logService.info("server", "TRADING_EXECUTOR enabled — this process may place orders");
+  } else {
+    logService.info("server", "TRADING_EXECUTOR off — settings only, no order placement");
   }
 
   logService.onEntry((entry) => {
     broadcastLog(entry);
   });
 
-  onBalanceRefresh((status) => {
-    broadcast("account", status);
-  });
-
-  liveTradingService.onUpdate(() => {
-    pushWindowState();
+  onBalanceRefresh((userId, status) => {
+    broadcast("account", status, userId);
   });
 
   setHeatmapUpdateListener((state) => {
@@ -997,12 +1073,6 @@ async function main(): Promise<void> {
     });
   }, HEATMAP_REFRESH_MS);
   heatmapRefreshTimer.unref?.();
-
-  try {
-    await initTradingClient();
-  } catch (err) {
-    logService.warn("server", `Trading client init skipped/failed: ${String(err)}`);
-  }
 
   chainlinkPriceFeed.start();
   clobMarketFeed.start();
@@ -1027,6 +1097,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     clearInterval(heatmapRefreshTimer);
+    liveTradingRegistry.stopPolling();
     displayService.stop();
     clobMarketFeed.stop();
     chainlinkPriceFeed.stop();

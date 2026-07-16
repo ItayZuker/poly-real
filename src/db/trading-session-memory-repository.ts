@@ -7,7 +7,7 @@ import { getMongoClient, getMongoDbName } from "./mongo-client.js";
 
 const META_COLLECTION = "trading_session_memory";
 const EVENTS_COLLECTION = "trading_stat_events";
-const META_DOC_ID = "live";
+const LEGACY_META_DOC_ID = "live";
 
 /** @deprecated Snapshot shape from archive-on-reset; still summed for week/all. */
 export interface TradingSessionMemoryEntry {
@@ -74,7 +74,7 @@ type TradingSessionMemoryDoc = {
   updatedAt: string;
 };
 
-type TradingStatEventDoc = TradingStatEvent & { _id: string };
+type TradingStatEventDoc = TradingStatEvent & { _id: string; userId: string };
 
 export type SessionMemoryTotals = {
   green: number;
@@ -84,6 +84,61 @@ export type SessionMemoryTotals = {
   sessionCount: number;
   hasData: boolean;
 };
+
+let ensureUserIdPromise: Promise<void> | null = null;
+
+/**
+ * One-time: migrate legacy meta `_id: "live"` → bootstrap userId, and stamp
+ * userId on events missing it.
+ */
+export async function ensureTradingSessionMemoryUserId(bootstrapUserId: string): Promise<void> {
+  if (!ensureUserIdPromise) {
+    ensureUserIdPromise = (async () => {
+      const mongo = await getMongoClient();
+      const db = mongo.db(getMongoDbName());
+      const meta = db.collection<TradingSessionMemoryDoc>(META_COLLECTION);
+      const events = db.collection(EVENTS_COLLECTION);
+
+      const legacy = await meta.findOne({ _id: LEGACY_META_DOC_ID });
+      if (legacy) {
+        const existing = await meta.findOne({ _id: bootstrapUserId });
+        if (!existing) {
+          const { _id: _legacyId, ...rest } = legacy;
+          await meta.insertOne({ _id: bootstrapUserId, ...rest });
+          console.log(
+            `[trading-session-memory] Migrated meta doc "${LEGACY_META_DOC_ID}" → user ${bootstrapUserId.slice(0, 8)}…`,
+          );
+        }
+        await meta.deleteOne({ _id: LEGACY_META_DOC_ID });
+      }
+
+      const eventResult = await events.updateMany(
+        {
+          $or: [
+            { userId: { $exists: false } },
+            { userId: null },
+            { userId: "" },
+          ],
+        },
+        { $set: { userId: bootstrapUserId } },
+      );
+      if (eventResult.modifiedCount > 0) {
+        console.log(
+          `[trading-session-memory] Assigned userId to ${eventResult.modifiedCount} legacy event(s)`,
+        );
+      }
+    })().catch((err) => {
+      ensureUserIdPromise = null;
+      throw err;
+    });
+  }
+  await ensureUserIdPromise;
+}
+
+async function ensureReady(): Promise<void> {
+  const { getBootstrapUserId } = await import("./user-repository.js");
+  await ensureTradingSessionMemoryUserId(await getBootstrapUserId());
+}
 
 function emptyTotals(): SessionMemoryTotals {
   return { green: 0, red: 0, blue: 0, pnl: 0, sessionCount: 0, hasData: false };
@@ -146,37 +201,41 @@ async function eventsCollection() {
   return mongo.db(getMongoDbName()).collection<TradingStatEventDoc>(EVENTS_COLLECTION);
 }
 
-async function loadMeta(): Promise<TradingSessionMemoryDoc | null> {
-  return (await metaCollection()).findOne({ _id: META_DOC_ID });
+async function loadMeta(userId: string): Promise<TradingSessionMemoryDoc | null> {
+  return (await metaCollection()).findOne({ _id: userId });
 }
 
-export async function getLiveResetAt(): Promise<string | null> {
-  const doc = await loadMeta();
+export async function getLiveResetAt(userId: string): Promise<string | null> {
+  await ensureReady();
+  const doc = await loadMeta(userId);
   return doc?.liveResetAt ?? null;
 }
 
 /** Mark Live range start; does not delete historical events (Week / All time keep them). */
-export async function markLiveReset(at = new Date().toISOString()): Promise<void> {
+export async function markLiveReset(userId: string, at = new Date().toISOString()): Promise<void> {
+  await ensureReady();
   const now = new Date().toISOString();
   await (await metaCollection()).updateOne(
-    { _id: META_DOC_ID },
+    { _id: userId },
     { $set: { liveResetAt: at, activatedPlacementIds: [], updatedAt: now } },
     { upsert: true },
   );
 }
 
-export async function listActivatedPlacementIds(): Promise<string[]> {
-  const doc = await loadMeta();
+export async function listActivatedPlacementIds(userId: string): Promise<string[]> {
+  await ensureReady();
+  const doc = await loadMeta(userId);
   const ids = doc?.activatedPlacementIds;
   return Array.isArray(ids) ? ids.filter((id) => typeof id === "string" && id.length > 0) : [];
 }
 
 /** Remember a schedule placement was live this session (zeros until first fill). */
-export async function addActivatedPlacementId(placementId: string): Promise<void> {
+export async function addActivatedPlacementId(userId: string, placementId: string): Promise<void> {
+  await ensureReady();
   if (!placementId) return;
   const now = new Date().toISOString();
   await (await metaCollection()).updateOne(
-    { _id: META_DOC_ID },
+    { _id: userId },
     {
       $addToSet: { activatedPlacementIds: placementId },
       $set: { updatedAt: now },
@@ -190,15 +249,18 @@ export async function addActivatedPlacementId(placementId: string): Promise<void
  * Upsert one settled-trade contribution. Idempotent on cardId — pl/status corrections overwrite.
  */
 export async function upsertTradingStatEvent(
+  userId: string,
   event: Omit<TradingStatEvent, "settledAt" | "updatedAt"> & { settledAt?: string },
 ): Promise<TradingStatEvent> {
+  await ensureReady();
   const col = await eventsCollection();
   const now = new Date().toISOString();
-  const existing = await col.findOne({ _id: event.cardId });
+  const existing = await col.findOne({ _id: event.cardId, userId });
   const settledAt = existing?.settledAt ?? event.settledAt ?? now;
 
   const doc: TradingStatEventDoc = {
     _id: event.cardId,
+    userId,
     cardId: event.cardId,
     status: event.status,
     green: event.green,
@@ -212,34 +274,38 @@ export async function upsertTradingStatEvent(
   if (event.card) doc.card = event.card;
   else if (existing?.card) doc.card = existing.card;
 
-  await col.replaceOne({ _id: event.cardId }, doc, { upsert: true });
+  await col.replaceOne({ _id: event.cardId, userId }, doc, { upsert: true });
 
   await (await metaCollection()).updateOne(
-    { _id: META_DOC_ID },
+    { _id: userId },
     { $set: { updatedAt: now }, $setOnInsert: { liveResetAt: null } },
     { upsert: true },
   );
 
-  const { _id: _, ...out } = doc;
+  const { _id: _, userId: _uid, ...out } = doc;
   return out;
 }
 
-export async function listTradingStatEvents(options: {
-  fromMs?: number;
-  toMs?: number;
-  afterLiveReset?: boolean;
-} = {}): Promise<TradingStatEvent[]> {
+export async function listTradingStatEvents(
+  userId: string,
+  options: {
+    fromMs?: number;
+    toMs?: number;
+    afterLiveReset?: boolean;
+  } = {},
+): Promise<TradingStatEvent[]> {
+  await ensureReady();
   const col = await eventsCollection();
-  const docs = await col.find({}).toArray();
+  const docs = await col.find({ userId }).toArray();
   let liveResetMs: number | null = null;
   if (options.afterLiveReset) {
-    const resetAt = await getLiveResetAt();
+    const resetAt = await getLiveResetAt(userId);
     liveResetMs = resetAt ? Date.parse(resetAt) : null;
     if (liveResetMs != null && !Number.isFinite(liveResetMs)) liveResetMs = null;
   }
 
   return docs
-    .map(({ _id, ...rest }) => rest)
+    .map(({ _id, userId: _uid, ...rest }) => rest)
     .filter((event) => {
       const at = settledMs(event);
       if (liveResetMs != null && at <= liveResetMs) return false;
@@ -251,15 +317,17 @@ export async function listTradingStatEvents(options: {
 
 /** @deprecated Prefer upsertTradingStatEvent — kept for any callers of archive-on-reset. */
 export async function appendTradingSessionMemory(
+  userId: string,
   entry: TradingSessionMemoryEntry,
 ): Promise<void> {
+  await ensureReady();
   const mongo = await getMongoClient();
   const now = new Date().toISOString();
   await mongo
     .db(getMongoDbName())
     .collection<TradingSessionMemoryDoc>(META_COLLECTION)
     .updateOne(
-      { _id: META_DOC_ID },
+      { _id: userId },
       {
         $push: { sessions: entry },
         $set: { updatedAt: now },
@@ -268,22 +336,26 @@ export async function appendTradingSessionMemory(
     );
 }
 
-export async function listTradingSessionMemory(): Promise<TradingSessionMemoryEntry[]> {
-  const doc = await loadMeta();
+export async function listTradingSessionMemory(userId: string): Promise<TradingSessionMemoryEntry[]> {
+  await ensureReady();
+  const doc = await loadMeta(userId);
   return Array.isArray(doc?.sessions) ? doc.sessions : [];
 }
 
-export async function sumTradingSessionMemory(options: {
-  fromMs?: number;
-  toMs?: number;
-} = {}): Promise<SessionMemoryTotals> {
-  const events = await listTradingStatEvents({
+export async function sumTradingSessionMemory(
+  userId: string,
+  options: {
+    fromMs?: number;
+    toMs?: number;
+  } = {},
+): Promise<SessionMemoryTotals> {
+  const events = await listTradingStatEvents(userId, {
     fromMs: options.fromMs,
     toMs: options.toMs,
   });
   const eventTotals = sumEvents(events);
 
-  const sessions = await listTradingSessionMemory();
+  const sessions = await listTradingSessionMemory(userId);
   const filteredSessions = sessions.filter((entry) => {
     const closed = sessionClosedMs(entry);
     if (options.fromMs != null && closed < options.fromMs) return false;
@@ -295,7 +367,7 @@ export async function sumTradingSessionMemory(options: {
   return mergeTotals(eventTotals, sessionTotals);
 }
 
-export async function sumLiveTradingStatEvents(): Promise<SessionMemoryTotals> {
-  const events = await listTradingStatEvents({ afterLiveReset: true });
+export async function sumLiveTradingStatEvents(userId: string): Promise<SessionMemoryTotals> {
+  const events = await listTradingStatEvents(userId, { afterLiveReset: true });
   return sumEvents(events);
 }
