@@ -1023,7 +1023,9 @@ function bindMarketColumnRail() {
 
 function initLeftRowSplitter() {
   const leftColumn = document.querySelector(".left-column");
-  const settingsHeader = document.querySelector(".settings-panel-header");
+  const walletHeader = document.querySelector(".wallet-panel-header") || document.querySelector(".settings-panel-header");
+  const tradeHeader = document.querySelector(".trade-panel-header");
+  const tradeBody = document.querySelector(".trade-panel-body");
   const prevHeader = document.querySelector(".positions-panel-header");
   const logHeader = document.querySelector(".log-panel-header");
   const prevBody = document.querySelector(".positions-body");
@@ -1032,7 +1034,9 @@ function initLeftRowSplitter() {
   const logDragHandle = document.querySelector('[data-drag-edge="log"]');
   if (
     !leftColumn ||
-    !settingsHeader ||
+    !walletHeader ||
+    !tradeHeader ||
+    !tradeBody ||
     !prevHeader ||
     !logHeader ||
     !prevDragHandle ||
@@ -1047,7 +1051,7 @@ function initLeftRowSplitter() {
   let dragKind = null;
   let anchorLogHeaderTop = 0;
   let anchorLogContent = 0;
-  let anchorSettingsContent = 0;
+  let anchorTradeContent = 0;
   let activeHandle = null;
 
   const parseHeight = (name, fallback) => {
@@ -1058,34 +1062,44 @@ function initLeftRowSplitter() {
 
   const getMetrics = () => {
     const colRect = leftColumn.getBoundingClientRect();
-    const settingsHeaderH = settingsHeader.offsetHeight;
+    const walletHeaderH = walletHeader.offsetHeight;
+    const tradeHeaderH = tradeHeader.offsetHeight;
     const prevHeaderH = prevHeader.offsetHeight;
     const logHeaderH = logHeader.offsetHeight;
-    const chrome = settingsHeaderH + prevHeaderH + logHeaderH;
+    const chrome = walletHeaderH + tradeHeaderH + prevHeaderH + logHeaderH;
     const maxContent = Math.max(0, colRect.height - chrome);
-    return { colRect, settingsHeaderH, prevHeaderH, logHeaderH, chrome, maxContent };
+    return {
+      colRect,
+      walletHeaderH,
+      tradeHeaderH,
+      prevHeaderH,
+      logHeaderH,
+      chrome,
+      maxContent,
+    };
   };
 
   const readHeights = () => ({
-    settings: parseHeight("--settings-content-height", 140),
+    trade: parseHeight("--trade-content-height", 140),
     prev: parseHeight("--prev-content-height", 0),
     log: parseHeight("--log-content-height", 0),
   });
 
-  const applyHeights = (settings, prev, log) => {
+  const applyHeights = (trade, prev, log) => {
     const { colRect, chrome } = getMetrics();
-    const s = Math.max(0, settings);
+    const t = Math.max(0, trade);
     const p = Math.max(0, prev);
     let l = Math.max(0, log);
 
-    leftColumn.style.setProperty("--settings-content-height", `${s}px`);
+    leftColumn.style.setProperty("--trade-content-height", `${t}px`);
     leftColumn.style.setProperty("--prev-content-height", `${p}px`);
     leftColumn.style.setProperty("--log-content-height", `${l}px`);
 
-    const stackHeight = chrome + s + p + l;
+    const stackHeight = chrome + t + p + l;
     const margin = l <= 0 ? Math.max(0, colRect.height - stackHeight) : 0;
     leftColumn.style.setProperty("--log-margin-top", `${margin}px`);
 
+    tradeBody.classList.toggle("is-collapsed", t <= 0);
     prevBody.classList.toggle("is-collapsed", p <= 0);
     logBody.classList.toggle("is-collapsed", l <= 0);
     const hasPositionCards = Boolean(prevBody.querySelector(".position-card"));
@@ -1103,6 +1117,7 @@ function initLeftRowSplitter() {
       applyHeights(0, 0, maxContent);
       return;
     }
+    // trade / wallet / default — expand Trade content
     applyHeights(maxContent, 0, 0);
   };
 
@@ -1114,15 +1129,16 @@ function initLeftRowSplitter() {
   };
 
   const clampPrevDrag = (clientY) => {
-    const { colRect, settingsHeaderH, prevHeaderH } = getMetrics();
-    const settingsBottom = colRect.top + settingsHeaderH;
+    const { colRect, walletHeaderH, tradeHeaderH, prevHeaderH } = getMetrics();
+    // Positions can cover Trade content, but not Wallet or Trade headers.
+    const tradeHeaderBottom = colRect.top + walletHeaderH + tradeHeaderH;
     const logTop = anchorLogHeaderTop;
-    const minPrevTop = settingsBottom;
+    const minPrevTop = tradeHeaderBottom;
     const maxPrevTop = logTop - prevHeaderH;
     const prevTop = Math.max(minPrevTop, Math.min(clientY, maxPrevTop));
-    const settings = prevTop - settingsBottom;
+    const trade = prevTop - tradeHeaderBottom;
     const prev = logTop - prevTop - prevHeaderH;
-    applyHeights(settings, prev, anchorLogContent);
+    applyHeights(trade, prev, anchorLogContent);
   };
 
   const clampLogDrag = (clientY) => {
@@ -1137,7 +1153,7 @@ function initLeftRowSplitter() {
     }
     const logTopCol = logTop - colRect.top;
     const log = Math.max(0, colRect.height - logTopCol - logHeaderH);
-    applyHeights(anchorSettingsContent, prev, log);
+    applyHeights(anchorTradeContent, prev, log);
   };
 
   const stopDragging = () => {
@@ -1172,7 +1188,7 @@ function initLeftRowSplitter() {
     dragging = true;
     dragKind = "log";
     activeHandle = logDragHandle;
-    anchorSettingsContent = readHeights().settings;
+    anchorTradeContent = readHeights().trade;
     activeHandle.classList.add("is-dragging");
     document.body.classList.add("is-row-resizing");
     try {
@@ -1187,7 +1203,7 @@ function initLeftRowSplitter() {
   initDefaultHeights();
   window.addEventListener("resize", () => {
     const heights = readHeights();
-    applyHeights(heights.settings, heights.prev, heights.log);
+    applyHeights(heights.trade, heights.prev, heights.log);
     syncLeftColumnRail();
     syncMarketColumnRail();
   });

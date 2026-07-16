@@ -2342,7 +2342,7 @@ body.is-schedule-resizing {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  --settings-content-height: 140px;
+  --trade-content-height: 140px;
   --prev-content-height: 0px;
   --log-content-height: 0px;
   --log-margin-top: 0px;
@@ -2360,6 +2360,7 @@ body.is-schedule-resizing {
 }
 
 .settings-panel,
+.trade-panel,
 .positions-panel,
 .log-panel {
   flex: 0 0 auto;
@@ -2431,11 +2432,37 @@ body.is-row-resizing .panel-header-drag-handle {
   color: var(--text);
 }
 
-.settings-panel-body {
-  flex: 0 0 var(--settings-content-height);
+.trade-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--panel, var(--bg));
+}
+
+.trade-panel-body {
+  flex: 0 0 var(--trade-content-height);
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
+  scrollbar-width: thin;
+  scrollbar-color: #484f58 transparent;
+}
+
+.trade-panel-body.is-collapsed {
+  flex: 0 0 0;
+  height: 0;
+  max-height: 0;
+  border: none;
+  overflow: hidden;
+}
+
+.trade-panel-body:not(.is-collapsed) {
+  overflow-y: auto;
 }
 
 .wallet-summary-rows {
@@ -2749,6 +2776,10 @@ body.is-row-resizing .panel-header-drag-handle {
 
 .wallet-control-field--shares:has(#manual-shares:disabled) .wallet-control-label {
   color: #484f58;
+}
+
+.wallet-panel-header {
+  background: var(--panel, var(--bg));
 }
 
 .positions-panel-header {
