@@ -1,6 +1,8 @@
 import type { ObjectId } from "mongodb";
+import { ObjectId as MongoObjectId } from "mongodb";
 import { isAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { hashPassword, verifyPassword } from "../auth/password.js";
 import type { TradingConfig } from "../types.js";
 import { decryptSecret, encryptSecret, privateKeyHint } from "../wallet-crypto.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
@@ -25,7 +27,13 @@ export interface UserDocument {
   _id: ObjectId;
   slug: string;
   email?: string;
+  /** Lowercase trimmed email for unique login lookup. */
+  emailKey?: string;
   name?: string;
+  /** Lowercase trimmed name for unique display-name lookup. */
+  nameKey?: string;
+  /** scrypt password hash — required for login. */
+  passwordHash?: string;
   wallet: UserWalletStored;
   trading: TradingConfig;
   createdAt: Date;
@@ -37,6 +45,7 @@ export interface UserPublic {
   slug: string;
   email?: string;
   name?: string;
+  hasPassword: boolean;
   trading: TradingConfig;
   wallet: {
     funderAddress?: string;
@@ -138,6 +147,7 @@ function toPublic(doc: UserDocument): UserPublic {
     slug: doc.slug,
     email: doc.email,
     name: doc.name,
+    hasPassword: Boolean(doc.passwordHash),
     trading: normalizeTrading(doc.trading),
     wallet: {
       funderAddress: doc.wallet?.funderAddress,
@@ -147,6 +157,68 @@ function toPublic(doc: UserDocument): UserPublic {
       privateKeyHint: doc.wallet?.privateKeyHint,
     },
   };
+}
+
+function normalizeNameKey(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+function normalizeEmailKey(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+function normalizeLoginEmail(raw: unknown): string {
+  const text = String(raw ?? "").trim();
+  if (!text) throw new Error("Email is required");
+  if (text.length > 254) throw new Error("Email must be at most 254 characters");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
+    throw new Error("Email must be a valid address");
+  }
+  return text;
+}
+
+function normalizePassword(raw: unknown): string {
+  const text = String(raw ?? "");
+  if (text.length < 6) throw new Error("Password must be at least 6 characters");
+  if (text.length > 200) throw new Error("Password is too long");
+  return text;
+}
+
+export async function ensureUserIndexes(): Promise<void> {
+  const col = await collection();
+  // Backfill nameKey for legacy docs that only have name.
+  const missingNameKey = await col
+    .find({ name: { $type: "string" }, nameKey: { $exists: false } })
+    .toArray();
+  for (const doc of missingNameKey) {
+    const name = String(doc.name || "").trim();
+    if (!name) continue;
+    await col.updateOne(
+      { _id: doc._id },
+      { $set: { nameKey: normalizeNameKey(name), updatedAt: new Date() } },
+    );
+  }
+  // Backfill emailKey for legacy docs that only have email.
+  const missingEmailKey = await col
+    .find({ email: { $type: "string" }, emailKey: { $exists: false } })
+    .toArray();
+  for (const doc of missingEmailKey) {
+    const email = String(doc.email || "").trim();
+    if (!email) continue;
+    await col.updateOne(
+      { _id: doc._id },
+      { $set: { emailKey: normalizeEmailKey(email), updatedAt: new Date() } },
+    );
+  }
+  await col.createIndex(
+    { nameKey: 1 },
+    { unique: true, partialFilterExpression: { nameKey: { $type: "string" } } },
+  );
+  await col.createIndex(
+    { emailKey: 1 },
+    { unique: true, partialFilterExpression: { emailKey: { $type: "string" } } },
+  );
+  await col.createIndex({ slug: 1 }, { unique: true });
 }
 
 async function migrateTradingConfigFromDisk(): Promise<TradingConfig | null> {
@@ -167,6 +239,23 @@ export async function ensureDefaultUser(): Promise<UserPublic> {
   const col = await collection();
   const existing = await col.findOne({ slug: DEFAULT_SLUG });
   if (existing) {
+    const $set: Record<string, unknown> = {};
+    if (existing.name?.trim() && !existing.nameKey) {
+      $set.nameKey = normalizeNameKey(existing.name);
+    } else if (!existing.name?.trim()) {
+      const bootstrapName = process.env.DEFAULT_USER_NAME?.trim() || "default";
+      $set.name = bootstrapName;
+      $set.nameKey = normalizeNameKey(bootstrapName);
+    }
+    if (existing.email?.trim() && !existing.emailKey) {
+      $set.emailKey = normalizeEmailKey(existing.email);
+    }
+    if (Object.keys($set).length > 0) {
+      $set.updatedAt = new Date();
+      await col.updateOne({ _id: existing._id }, { $set });
+      const updated = await col.findOne({ _id: existing._id });
+      if (updated) return toPublic(updated);
+    }
     return toPublic(existing);
   }
 
@@ -194,13 +283,27 @@ export async function ensureDefaultUser(): Promise<UserPublic> {
     }
   }
 
+  const bootstrapName = process.env.DEFAULT_USER_NAME?.trim() || "default";
+  const bootstrapEmail = process.env.DEFAULT_USER_EMAIL?.trim();
   const doc: Omit<UserDocument, "_id"> & { _id?: ObjectId } = {
     slug: DEFAULT_SLUG,
+    name: bootstrapName,
+    nameKey: normalizeNameKey(bootstrapName),
     wallet,
     trading,
     createdAt: now,
     updatedAt: now,
   };
+  if (bootstrapEmail) {
+    const email = normalizeLoginEmail(bootstrapEmail);
+    doc.email = email;
+    doc.emailKey = normalizeEmailKey(email);
+  }
+
+  const bootstrapPassword = process.env.DEFAULT_USER_PASSWORD?.trim();
+  if (bootstrapPassword) {
+    doc.passwordHash = await hashPassword(normalizePassword(bootstrapPassword));
+  }
 
   const result = await col.insertOne(doc as UserDocument);
   const inserted = await col.findOne({ _id: result.insertedId });
@@ -208,6 +311,42 @@ export async function ensureDefaultUser(): Promise<UserPublic> {
     throw new Error("Failed to create default user");
   }
   return toPublic(inserted);
+}
+
+/** Apply DEFAULT_USER_PASSWORD / DEFAULT_USER_EMAIL to the default user when missing. */
+export async function maybeBootstrapDefaultPassword(): Promise<void> {
+  const bootstrapPassword = process.env.DEFAULT_USER_PASSWORD?.trim();
+  const bootstrapEmail = process.env.DEFAULT_USER_EMAIL?.trim();
+  const user = await getDefaultUser();
+  const col = await collection();
+  const $set: Record<string, unknown> = { updatedAt: new Date() };
+  let changed = false;
+
+  if (bootstrapPassword && !user.passwordHash) {
+    $set.passwordHash = await hashPassword(normalizePassword(bootstrapPassword));
+    changed = true;
+  }
+  if (!user.name?.trim()) {
+    const bootstrapName = process.env.DEFAULT_USER_NAME?.trim() || "default";
+    $set.name = bootstrapName;
+    $set.nameKey = normalizeNameKey(bootstrapName);
+    changed = true;
+  } else if (!user.nameKey) {
+    $set.nameKey = normalizeNameKey(user.name);
+    changed = true;
+  }
+  if (bootstrapEmail && !user.emailKey) {
+    const email = normalizeLoginEmail(bootstrapEmail);
+    $set.email = email;
+    $set.emailKey = normalizeEmailKey(email);
+    changed = true;
+  } else if (user.email?.trim() && !user.emailKey) {
+    $set.emailKey = normalizeEmailKey(user.email);
+    changed = true;
+  }
+
+  if (!changed) return;
+  await col.updateOne({ _id: user._id }, { $set });
 }
 
 /** Current single-tenant user until auth lands. */
@@ -223,6 +362,91 @@ export async function getDefaultUser(): Promise<UserDocument> {
 
 export async function getDefaultUserPublic(): Promise<UserPublic> {
   return toPublic(await getDefaultUser());
+}
+
+export async function getUserById(id: string | ObjectId): Promise<UserDocument | null> {
+  let objectId: ObjectId;
+  try {
+    objectId = typeof id === "string" ? new MongoObjectId(id) : id;
+  } catch {
+    return null;
+  }
+  const col = await collection();
+  return col.findOne({ _id: objectId });
+}
+
+export async function getUserPublicById(id: string | ObjectId): Promise<UserPublic | null> {
+  const doc = await getUserById(id);
+  return doc ? toPublic(doc) : null;
+}
+
+export async function findUserByEmail(email: string): Promise<UserDocument | null> {
+  const emailKey = normalizeEmailKey(email);
+  if (!emailKey) return null;
+  const col = await collection();
+  return col.findOne({ emailKey });
+}
+
+/**
+ * Authenticate an existing user by email + password.
+ * Users without a passwordHash cannot log in.
+ */
+export async function authenticateUser(
+  email: string,
+  password: string,
+): Promise<UserPublic | null> {
+  const loginEmail = normalizeLoginEmail(email);
+  const user = await findUserByEmail(loginEmail);
+  if (!user?.passwordHash) return null;
+  const ok = await verifyPassword(password, user.passwordHash);
+  if (!ok) return null;
+  return toPublic(user);
+}
+
+/**
+ * Set password for a user found by email. If no user has that email, assign
+ * email + password to the default slug user (bootstrap path).
+ */
+export async function setUserPasswordByEmail(email: string, password: string): Promise<UserPublic> {
+  const loginEmail = normalizeLoginEmail(email);
+  const emailKey = normalizeEmailKey(loginEmail);
+  const passwordHash = await hashPassword(normalizePassword(password));
+  const col = await collection();
+  const now = new Date();
+
+  const existing = await col.findOne({ emailKey });
+  if (existing) {
+    await col.updateOne(
+      { _id: existing._id },
+      { $set: { passwordHash, email: loginEmail, emailKey, updatedAt: now } },
+    );
+    const updated = await col.findOne({ _id: existing._id });
+    if (!updated) throw new Error("User missing after password update");
+    return toPublic(updated);
+  }
+
+  await ensureDefaultUser();
+  const defaultUser = await getDefaultUser();
+  if (defaultUser.emailKey && defaultUser.emailKey !== emailKey) {
+    throw new Error(
+      `No user with email "${loginEmail}". Create the user document first, or use the default user's existing email.`,
+    );
+  }
+  await col.updateOne(
+    { _id: defaultUser._id },
+    { $set: { passwordHash, email: loginEmail, emailKey, updatedAt: now } },
+  );
+  const updated = await col.findOne({ _id: defaultUser._id });
+  if (!updated) throw new Error("User missing after password update");
+  return toPublic(updated);
+}
+
+export async function deleteUserById(id: string | ObjectId): Promise<boolean> {
+  const doc = await getUserById(id);
+  if (!doc) return false;
+  const col = await collection();
+  const result = await col.deleteOne({ _id: doc._id });
+  return result.deletedCount === 1;
 }
 
 export async function updateDefaultUserTrading(
@@ -268,18 +492,52 @@ export async function updateDefaultUserProfile(
   input: UpdateUserProfileInput,
 ): Promise<UserPublic> {
   const user = await getDefaultUser();
+  return updateUserProfile(user._id, input);
+}
+
+export async function updateUserProfile(
+  userId: string | ObjectId,
+  input: UpdateUserProfileInput,
+): Promise<UserPublic> {
+  const user = await getUserById(userId);
+  if (!user) throw new Error("User not found");
+
   const $set: Record<string, unknown> = { updatedAt: new Date() };
   const $unset: Record<string, ""> = {};
 
   if ("name" in input) {
     const name = normalizeOptionalText(input.name, 80);
-    if (name === "" || name == null) $unset.name = "";
-    else $set.name = name;
+    if (name === "" || name == null) {
+      $unset.name = "";
+      $unset.nameKey = "";
+    } else {
+      const nameKey = normalizeNameKey(name);
+      const colCheck = await collection();
+      const clash = await colCheck.findOne({
+        nameKey,
+        _id: { $ne: user._id },
+      });
+      if (clash) throw new Error("That name is already taken");
+      $set.name = name;
+      $set.nameKey = nameKey;
+    }
   }
   if ("email" in input) {
     const email = normalizeEmail(input.email);
-    if (email === "" || email == null) $unset.email = "";
-    else $set.email = email;
+    if (email === "" || email == null) {
+      $unset.email = "";
+      $unset.emailKey = "";
+    } else {
+      const emailKey = normalizeEmailKey(email);
+      const colCheck = await collection();
+      const clash = await colCheck.findOne({
+        emailKey,
+        _id: { $ne: user._id },
+      });
+      if (clash) throw new Error("That email is already taken");
+      $set.email = email;
+      $set.emailKey = emailKey;
+    }
   }
 
   const update: Record<string, unknown> = { $set };

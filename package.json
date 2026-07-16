@@ -12,7 +12,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "backfill:outcomes": "tsx src/scripts/backfill-window-outcomes.ts",
-    "migrate:heatmap-to-windows": "tsx src/scripts/migrate-heatmap-to-windows.ts"
+    "migrate:heatmap-to-windows": "tsx src/scripts/migrate-heatmap-to-windows.ts",
+    "set-password": "tsx src/scripts/set-user-password.ts"
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.6",

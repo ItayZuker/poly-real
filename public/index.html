@@ -7,7 +7,45 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <div class="app">
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-panel">
+      <h1 class="auth-brand">Poly Real</h1>
+      <p class="auth-sub">Sign in to continue</p>
+      <form id="auth-login-form" class="auth-form" autocomplete="on">
+        <label class="auth-field">
+          <span class="auth-field-label">Email</span>
+          <input
+            type="email"
+            id="auth-email"
+            class="auth-field-input"
+            name="email"
+            autocomplete="username"
+            required
+            maxlength="254"
+          />
+        </label>
+        <label class="auth-field">
+          <span class="auth-field-label">Password</span>
+          <input
+            type="password"
+            id="auth-password"
+            class="auth-field-input"
+            name="password"
+            autocomplete="current-password"
+            required
+            maxlength="200"
+          />
+        </label>
+        <p id="auth-error" class="auth-error" hidden></p>
+        <button type="submit" id="auth-login-btn" class="auth-primary-btn">Log in</button>
+      </form>
+      <button type="button" id="auth-signup-btn" class="auth-secondary-btn" disabled title="Signup coming soon">
+        Sign up (coming soon)
+      </button>
+    </div>
+  </div>
+
+  <div class="app" id="app-shell" hidden>
     <header class="app-header controls">
       <h1 class="app-title">Poly Real</h1>
       <select id="market-select"></select>
@@ -401,6 +439,16 @@
             <div class="settings-card-actions">
               <button type="button" id="settings-user-save" class="settings-primary-btn">Save profile</button>
               <span id="settings-user-status" class="settings-inline-status" hidden></span>
+            </div>
+          </section>
+
+          <section class="settings-card" aria-label="Session">
+            <h3 class="settings-card-title">Session</h3>
+            <p class="settings-card-desc">Sign out of this browser, or permanently delete your account</p>
+            <div class="settings-card-actions settings-card-actions--stack">
+              <button type="button" id="settings-logout-btn" class="settings-secondary-btn">Log out</button>
+              <button type="button" id="settings-delete-account-btn" class="settings-danger-btn">Delete account</button>
+              <span id="settings-session-status" class="settings-inline-status" hidden></span>
             </div>
           </section>
 

@@ -47,6 +47,108 @@ function setSettingsUserStatus(message, isError = false) {
   el.classList.toggle("settings-inline-status--error", Boolean(isError));
 }
 
+function setSettingsSessionStatus(message, isError = false) {
+  const el = $("settings-session-status");
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    el.classList.remove("settings-inline-status--error");
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+  el.classList.toggle("settings-inline-status--error", Boolean(isError));
+}
+
+function setAuthError(message) {
+  const el = $("auth-error");
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+}
+
+function showAuthScreen() {
+  const auth = $("auth-screen");
+  const app = $("app-shell");
+  if (auth) auth.hidden = false;
+  if (app) app.hidden = true;
+  document.body.style.overflow = "hidden";
+}
+
+function showAppShell() {
+  const auth = $("auth-screen");
+  const app = $("app-shell");
+  if (auth) auth.hidden = true;
+  if (app) app.hidden = false;
+  document.body.style.overflow = "";
+}
+
+async function fetchAuthMe() {
+  const res = await fetch("/api/auth/me", { credentials: "same-origin" });
+  if (!res.ok) return null;
+  const payload = await res.json().catch(() => ({}));
+  return payload?.user ?? null;
+}
+
+async function loginWithCredentials(email, password) {
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
+  return payload.user;
+}
+
+async function logoutSession() {
+  const res = await fetch("/api/auth/logout", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
+}
+
+async function deleteAccount() {
+  const res = await fetch("/api/auth/account", {
+    method: "DELETE",
+    credentials: "same-origin",
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
+}
+
+function bindAuthForm(onLoggedIn) {
+  const form = $("auth-login-form");
+  if (!form || form.dataset.bound === "1") return;
+  form.dataset.bound = "1";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setAuthError("");
+    const email = $("auth-email")?.value?.trim() ?? "";
+    const password = $("auth-password")?.value ?? "";
+    const btn = $("auth-login-btn");
+    if (btn) btn.disabled = true;
+    try {
+      const user = await loginWithCredentials(email, password);
+      if ($("auth-password")) $("auth-password").value = "";
+      await onLoggedIn(user);
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+}
+
 function renderWalletAccount(data) {
   const statusEl = $("wallet-status");
   const balanceEl = $("wallet-balance");
@@ -126,7 +228,7 @@ function renderSettingsUser(user) {
 
 async function loadWalletAccount() {
   try {
-    const res = await fetch("/api/account");
+    const res = await fetch("/api/account", { credentials: "same-origin" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     renderWalletAccount(await res.json());
   } catch {
@@ -136,7 +238,7 @@ async function loadWalletAccount() {
 
 async function loadSettingsUser() {
   try {
-    const res = await fetch("/api/user");
+    const res = await fetch("/api/user", { credentials: "same-origin" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     renderSettingsUser(await res.json());
   } catch (err) {
@@ -148,6 +250,7 @@ async function saveWalletField(body) {
   setSettingsWalletError("");
   const res = await fetch("/api/account/wallet", {
     method: "PATCH",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -242,6 +345,7 @@ function bindSettingsEditors() {
       try {
         const res = await fetch("/api/user", {
           method: "PATCH",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: $("settings-user-name")?.value ?? "",
@@ -256,6 +360,43 @@ function bindSettingsEditors() {
         setSettingsUserStatus(err instanceof Error ? err.message : String(err), true);
       } finally {
         userSave.disabled = false;
+      }
+    });
+  }
+
+  const logoutBtn = $("settings-logout-btn");
+  if (logoutBtn && logoutBtn.dataset.bound !== "1") {
+    logoutBtn.dataset.bound = "1";
+    logoutBtn.addEventListener("click", async () => {
+      setSettingsSessionStatus("");
+      logoutBtn.disabled = true;
+      try {
+        await logoutSession();
+        // Live trading keeps running server-side; only the UI session ends.
+        window.location.reload();
+      } catch (err) {
+        setSettingsSessionStatus(err instanceof Error ? err.message : String(err), true);
+        logoutBtn.disabled = false;
+      }
+    });
+  }
+
+  const deleteBtn = $("settings-delete-account-btn");
+  if (deleteBtn && deleteBtn.dataset.bound !== "1") {
+    deleteBtn.dataset.bound = "1";
+    deleteBtn.addEventListener("click", async () => {
+      const ok = window.confirm(
+        "Delete this account permanently? This cannot be undone.",
+      );
+      if (!ok) return;
+      setSettingsSessionStatus("");
+      deleteBtn.disabled = true;
+      try {
+        await deleteAccount();
+        window.location.reload();
+      } catch (err) {
+        setSettingsSessionStatus(err instanceof Error ? err.message : String(err), true);
+        deleteBtn.disabled = false;
       }
     });
   }
@@ -3076,7 +3217,9 @@ async function init() {
   await loadScheduleSetups();
   if (window.SchedulePlacements) void window.SchedulePlacements.loadPlacements();
   await loadMarkets();
-  const res = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
+  const res = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`, {
+    credentials: "same-origin",
+  });
   if (res.ok) updateWindowUI(await res.json());
   connectSSE();
 
@@ -3088,4 +3231,34 @@ async function init() {
   }, 1000);
 }
 
-init();
+let appInitialized = false;
+
+async function enterApp(user) {
+  showAppShell();
+  if (user) renderSettingsUser(user);
+  if (appInitialized) {
+    void loadWalletAccount();
+    void loadSettingsUser();
+    return;
+  }
+  appInitialized = true;
+  await init();
+}
+
+async function boot() {
+  showAuthScreen();
+  bindAuthForm(enterApp);
+  try {
+    const user = await fetchAuthMe();
+    if (user) {
+      await enterApp(user);
+      return;
+    }
+  } catch {
+    // stay on auth screen
+  }
+  showAuthScreen();
+  $("auth-email")?.focus();
+}
+
+boot();

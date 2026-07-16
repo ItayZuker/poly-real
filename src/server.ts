@@ -56,11 +56,29 @@ import {
 } from "./trading-client.js";
 import { liveTradingService } from "./live-trading-service.js";
 import {
+  authenticateUser,
+  deleteUserById,
   ensureDefaultUser,
+  ensureUserIndexes,
   getDefaultUserPublic,
-  updateDefaultUserProfile,
+  getUserPublicById,
+  maybeBootstrapDefaultPassword,
   updateDefaultUserWallet,
+  updateUserProfile,
+  type UserPublic,
 } from "./db/user-repository.js";
+import {
+  buildClearSessionCookie,
+  buildSessionCookie,
+  createSession,
+  destroySession,
+  destroySessionsForUser,
+  ensureSessionIndexes,
+  getSessionTokenFromRequest,
+  isSecureRequest,
+  resolveSessionUserId,
+} from "./auth/session.js";
+import { ObjectId } from "mongodb";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3848;
@@ -71,9 +89,123 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
+type AuthedRequest = express.Request & { authUser?: UserPublic };
+
 type SseClient = { id: number; res: express.Response };
 let sseClients: SseClient[] = [];
 let sseId = 0;
+
+async function loadAuthUser(req: express.Request): Promise<UserPublic | null> {
+  const token = getSessionTokenFromRequest(req.headers.cookie);
+  const userId = await resolveSessionUserId(token);
+  if (!userId) return null;
+  return getUserPublicById(userId);
+}
+
+function isPublicAuthPath(req: express.Request): boolean {
+  if (req.method === "POST" && req.path === "/api/auth/login") return true;
+  if (req.method === "GET" && req.path === "/api/auth/me") return true;
+  return false;
+}
+
+async function requireAuth(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): Promise<void> {
+  if (!req.path.startsWith("/api/")) {
+    next();
+    return;
+  }
+  if (isPublicAuthPath(req)) {
+    next();
+    return;
+  }
+  try {
+    const user = await loadAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    (req as AuthedRequest).authUser = user;
+    next();
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+app.use(requireAuth);
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { email?: string; password?: string };
+    const user = await authenticateUser(body.email ?? "", body.password ?? "");
+    if (!user) {
+      res.status(401).json({ error: "Invalid email or password" });
+      return;
+    }
+    const { token, expiresAt } = await createSession(new ObjectId(user.id));
+    res.setHeader("Set-Cookie", buildSessionCookie(token, expiresAt, isSecureRequest(req)));
+    res.json({ user });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/auth/me", async (req, res) => {
+  try {
+    const user = await loadAuthUser(req);
+    res.json({ user });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/auth/logout", async (req, res) => {
+  try {
+    const token = getSessionTokenFromRequest(req.headers.cookie);
+    await destroySession(token);
+    res.setHeader("Set-Cookie", buildClearSessionCookie(isSecureRequest(req)));
+    // Live trading continues from server-side config — do not stop it on logout.
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.delete("/api/auth/account", async (req, res) => {
+  try {
+    const authUser = (req as AuthedRequest).authUser;
+    if (!authUser) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const userId = new ObjectId(authUser.id);
+    const defaultUser = await getDefaultUserPublic();
+    const deletingDefault = authUser.id === defaultUser.id;
+
+    await destroySessionsForUser(userId);
+    const deleted = await deleteUserById(userId);
+    if (!deleted) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    if (deletingDefault) {
+      liveTradingService.setConfig({
+        autoTrade: false,
+        useSchedule: false,
+        startTrading: false,
+      });
+      await ensureDefaultUser();
+    }
+
+    res.setHeader("Set-Cookie", buildClearSessionCookie(isSecureRequest(req)));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
 
 function broadcast(event: string, data: unknown): void {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -152,10 +284,15 @@ app.get("/api/account", async (_req, res) => {
   }
 });
 
-app.get("/api/user", async (_req, res) => {
+app.get("/api/user", async (req, res) => {
   try {
-    const user = await getDefaultUserPublic();
-    res.json(user);
+    const authUser = (req as AuthedRequest).authUser;
+    if (!authUser) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const user = await getUserPublicById(authUser.id);
+    res.json(user ?? authUser);
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
@@ -163,12 +300,17 @@ app.get("/api/user", async (_req, res) => {
 
 app.patch("/api/user", async (req, res) => {
   try {
+    const authUser = (req as AuthedRequest).authUser;
+    if (!authUser) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
     const body = (req.body ?? {}) as { name?: string; email?: string };
     if (!("name" in body) && !("email" in body)) {
       res.status(400).json({ error: "Provide name and/or email" });
       return;
     }
-    const user = await updateDefaultUserProfile({
+    const user = await updateUserProfile(authUser.id, {
       name: body.name,
       email: body.email,
     });
@@ -819,9 +961,12 @@ async function main(): Promise<void> {
   await initStorageAndSeed();
   await ensureAllMarketIndexes();
   try {
+    await ensureUserIndexes();
+    await ensureSessionIndexes();
     await ensureDefaultUser();
+    await maybeBootstrapDefaultPassword();
   } catch (err) {
-    logService.warn("server", `Failed to ensure default user: ${String(err)}`);
+    logService.warn("server", `Failed to ensure default user / auth indexes: ${String(err)}`);
   }
   await liveTradingService.loadPersistedConfig();
   try {
