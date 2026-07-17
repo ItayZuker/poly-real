@@ -199,6 +199,42 @@ export class ClobMarketFeed {
     this.connect();
   }
 
+  /**
+   * Keep only these token subscriptions (current window + optional prefetch).
+   * Unsubscribes and drops book state for everything else.
+   */
+  setDesiredSubscriptions(tokenIds: string[]): void {
+    const desired = [...new Set(tokenIds.filter(Boolean))];
+    const desiredSet = new Set(desired);
+
+    const toRemove = [...this.subscribedIds].filter((id) => !desiredSet.has(id));
+    if (toRemove.length > 0) {
+      this.unsubscribe(toRemove);
+    }
+
+    this.ensureSubscribed(desired);
+  }
+
+  unsubscribe(tokenIds: string[]): void {
+    const unique = [...new Set(tokenIds.filter(Boolean))];
+    const toDrop = unique.filter((id) => this.subscribedIds.has(id));
+    if (toDrop.length === 0) return;
+
+    for (const id of toDrop) {
+      this.subscribedIds.delete(id);
+      this.tokens.delete(id);
+    }
+
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(
+        JSON.stringify({
+          assets_ids: toDrop,
+          operation: "unsubscribe",
+        }),
+      );
+    }
+  }
+
   private sendSubscribe(tokenIds: string[]): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || tokenIds.length === 0) {
       return;

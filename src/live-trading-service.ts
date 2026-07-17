@@ -382,7 +382,7 @@ export class LiveTradingService {
     return { ...this.config };
   }
 
-  async loadPersistedConfig(): Promise<TradingConfig> {
+  async loadPersistedConfig(options?: { hydrateStats?: boolean }): Promise<TradingConfig> {
     try {
       const user = await getUserPublicById(this.userId);
       if (!user) {
@@ -393,7 +393,9 @@ export class LiveTradingService {
       logService.warn("trading", `Failed to load trading config: ${String(err)}`);
       this.config = defaultTradingConfig();
     }
-    await this.hydrateLiveStatsFromMongo();
+    if (options?.hydrateStats !== false) {
+      await this.hydrateLiveStatsFromMongo();
+    }
     return this.getConfig();
   }
 
@@ -950,11 +952,11 @@ export class LiveTradingService {
     }
   }
 
-  private async settleOpenCardsForWindow(windowKey: string): Promise<void> {
+  private async settleOpenCardsForWindow(windowKey: string): Promise<boolean> {
     const openCards = this.positionCards.filter(
       (card) => card.windowKey === windowKey && card.status === "open",
     );
-    if (openCards.length === 0) return;
+    if (openCards.length === 0) return false;
 
     for (const card of openCards) {
       const closed = await pollUntil(
@@ -1059,6 +1061,7 @@ export class LiveTradingService {
     }
     this.notify();
     this.ensureConfirmLoop();
+    return true;
   }
 
   private resetWindow(state: LiveWindowState): void {
@@ -1074,7 +1077,12 @@ export class LiveTradingService {
     this.mirroredMarkerCount = 0;
     this.sessionKey = sessionKey(state);
     if (prevKey) {
-      void this.settleOpenCardsForWindow(prevKey);
+      void this.settleOpenCardsForWindow(prevKey).then((hadHits) => {
+        if (hadHits) {
+          // Stats already written via persistCardStat; wait for Mongo flush then refresh placement aggregates.
+          void this.statsPersistChain.then(() => this.syncActivatedSchedulePlacements());
+        }
+      });
     }
     // Keep trying to confirm any pending cards from prior fills
     this.ensureConfirmLoop();
@@ -2033,7 +2041,8 @@ class LiveTradingRegistry {
     for (const user of users) {
       const id = String(user._id);
       const engine = this.get(id);
-      await engine.loadPersistedConfig();
+      // Config / wallet only — full stat hydrate happens at boot and when a window settles with hits.
+      await engine.loadPersistedConfig({ hydrateStats: false });
       if (isTradingExecutor() && user.wallet?.privateKeyEnc && user.wallet?.funderAddress) {
         try {
           await initTradingClient(id);
@@ -2044,7 +2053,8 @@ class LiveTradingRegistry {
     }
   }
 
-  startPolling(intervalMs = 5000): void {
+  /** Discover live users + refresh config. Default 60s (was 5s full hydrate). */
+  startPolling(intervalMs = 60_000): void {
     if (this.pollTimer) return;
     void this.syncFromMongo();
     this.pollTimer = setInterval(() => {

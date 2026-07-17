@@ -8,8 +8,9 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
     "build": "tsc",
+    "start": "node dist/server.js",
+    "heroku-postbuild": "npm run build",
     "typecheck": "tsc --noEmit",
     "backfill:outcomes": "tsx src/scripts/backfill-window-outcomes.ts",
     "migrate:heatmap-to-windows": "tsx src/scripts/migrate-heatmap-to-windows.ts",

@@ -235,6 +235,12 @@ function windowDurationSec(state: { windowStart?: number; windowEnd?: number }):
   return 300;
 }
 
+/** Full window snapshots (history + trading) — paced so book ticks don't re-stringify huge payloads. */
+const FULL_WINDOW_SSE_MS = 200;
+let fullWindowTimer: ReturnType<typeof setTimeout> | null = null;
+let fullWindowDirty = false;
+let lastQuotesPayload = "";
+
 function enrichWindowStateForUser(
   userId: string | undefined,
   state: ReturnType<typeof displayService.getState>,
@@ -249,12 +255,70 @@ function enrichWindowStateForUser(
   };
 }
 
+function quotesPayloadFromState(state: ReturnType<typeof displayService.getState>) {
+  return {
+    series: state.series,
+    windowStart: state.windowStart,
+    windowEnd: state.windowEnd,
+    assetPrice: state.assetPrice,
+    assetGap: state.assetGap,
+    prevCloseAsset: state.prevCloseAsset,
+    yesBid: state.yesBid,
+    yesAsk: state.yesAsk,
+    noBid: state.noBid,
+    noAsk: state.noAsk,
+    yesBidSize: state.yesBidSize,
+    yesAskSize: state.yesAskSize,
+    noBidSize: state.noBidSize,
+    noAskSize: state.noAskSize,
+    yesDisplay: state.yesDisplay,
+    noDisplay: state.noDisplay,
+    feedLatencyMs: state.feedLatencyMs,
+    lastTickMs: state.lastTickMs,
+  };
+}
+
+/** Tick-live quotes for clickable up/down buttons — small payload, every price change. */
+function pushQuotesLive(): void {
+  const state = displayService.getState();
+  const quotes = quotesPayloadFromState(state);
+  const payload = JSON.stringify(quotes);
+  if (payload === lastQuotesPayload) return;
+  lastQuotesPayload = payload;
+  const message = `event: quotes\ndata: ${payload}\n\n`;
+  for (const client of sseClients) {
+    client.res.write(message);
+  }
+}
+
 function pushWindowState(): void {
   const state = displayService.getState();
   for (const client of sseClients) {
     const payload = `event: window\ndata: ${JSON.stringify(enrichWindowStateForUser(client.userId, state))}\n\n`;
     client.res.write(payload);
   }
+}
+
+/** Immediate full snapshot (config/trading changes, HTTP handlers). */
+function pushWindowStateImmediate(): void {
+  fullWindowDirty = false;
+  if (fullWindowTimer) {
+    clearTimeout(fullWindowTimer);
+    fullWindowTimer = null;
+  }
+  pushWindowState();
+}
+
+/** Coalesce chart/history/trading blob after display ticks. */
+function scheduleFullWindowPush(): void {
+  fullWindowDirty = true;
+  if (fullWindowTimer) return;
+  fullWindowTimer = setTimeout(() => {
+    fullWindowTimer = null;
+    if (!fullWindowDirty) return;
+    fullWindowDirty = false;
+    pushWindowState();
+  }, FULL_WINDOW_SSE_MS);
 }
 
 async function broadcastSchedulePlacements(userId: string): Promise<void> {
@@ -439,7 +503,7 @@ app.put("/api/trading/config", (req, res) => {
     const body = req.body as Partial<import("./types.js").TradingConfig>;
     const config = engine.setConfig(body);
     void engine.refreshScheduleContext(true);
-    pushWindowState();
+    pushWindowStateImmediate();
     res.json(config);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -465,7 +529,7 @@ app.post("/api/trading/order", async (req, res) => {
     }
     const state = displayService.getState();
     const result = await tradingFor(req).manualOrder(state, side, leg);
-    pushWindowState();
+    pushWindowStateImmediate();
     if (!result.ok) {
       res.status(400).json({ error: result.error ?? "Order failed" });
       return;
@@ -481,7 +545,7 @@ app.post("/api/trading/positions/clear", async (req, res) => {
     // Reset Live header counters only — history stays in Mongo for Week / All time.
     // Schedule placement card stats keep collecting until cards are removed.
     tradingFor(req).clearPositionCards();
-    pushWindowState();
+    pushWindowStateImmediate();
     res.json({ ok: true, archived: false });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -492,7 +556,7 @@ app.post("/api/trading/positions/clear", async (req, res) => {
 app.post("/api/trading/stats/rehydrate", async (req, res) => {
   try {
     await tradingFor(req).hydrateLiveStatsFromMongo();
-    pushWindowState();
+    pushWindowStateImmediate();
     const live = tradingFor(req).getLiveSessionTotals();
     res.json({
       ok: true,
@@ -644,7 +708,7 @@ app.put("/api/sim/setup", (req, res) => {
     }
     const setup = simulatorService.setSetup(body, windowDurationSec(displayService.getState()));
     logService.info("sim", `Setup updated (latency ${setup.latencyMs} ms)`);
-    pushWindowState();
+    pushWindowStateImmediate();
     res.json(setup);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -749,7 +813,7 @@ app.patch("/api/trading-setups/:id", async (req, res) => {
     }
     if (req.body?.setup != null) {
       await tradingFor(req).refreshScheduleContext(true);
-      pushWindowState();
+      pushWindowStateImmediate();
     }
     logService.success("sim", `Trading setup updated: "${updated.title}"`);
     res.json(updated);
@@ -787,7 +851,7 @@ app.delete("/api/trading-setups/:id", async (req, res) => {
       return;
     }
     await broadcastSchedulePlacements(userId);
-    pushWindowState();
+    pushWindowStateImmediate();
     logService.success("sim", `Trading setup deleted: "${existing.title}"`);
     res.status(204).send();
   } catch (err) {
@@ -920,7 +984,7 @@ app.delete("/api/schedule-placements/:id", async (req, res) => {
     }
     tradingFor(req).forgetPlacement(id);
     await broadcastSchedulePlacements(userId);
-    pushWindowState();
+    pushWindowStateImmediate();
     res.status(204).send();
   } catch (err) {
     const message = String(err);
@@ -1067,9 +1131,10 @@ async function main(): Promise<void> {
     logService.warn("server", `Failed to ensure default user / auth indexes: ${String(err)}`);
   }
 
-  liveTradingRegistry.startPolling(5000);
+  liveTradingRegistry.startPolling(60_000);
   liveTradingRegistry.onUpdate(() => {
-    pushWindowState();
+    // Positions/markers changed — send full snapshot now (not only throttled).
+    pushWindowStateImmediate();
   });
   traderRegistryService.start();
 
@@ -1102,9 +1167,10 @@ async function main(): Promise<void> {
   clobMarketFeed.start();
   displayService.start();
 
-  // Single fan-out path: displayService already reacts to CLOB/Chainlink ticks.
+  // Quotes: every tick (small). Full window (history + trading): coalesced ~200ms.
   displayService.onUpdate(() => {
-    pushWindowState();
+    pushQuotesLive();
+    scheduleFullWindowPush();
   });
 
   app.listen(PORT, () => {

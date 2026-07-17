@@ -36,6 +36,8 @@ export class DisplayService {
   private noTokenId: string | null = null;
   private sampleInFlight = false;
   private prefetchedNextWindowStart: number | null = null;
+  private prefetchedYesTokenId: string | null = null;
+  private prefetchedNoTokenId: string | null = null;
   private nextWindowPrefetchInFlight = false;
 
   private emptyState(series: string): LiveWindowState {
@@ -91,7 +93,19 @@ export class DisplayService {
     this.yesTokenId = null;
     this.noTokenId = null;
     this.prefetchedNextWindowStart = null;
+    this.prefetchedYesTokenId = null;
+    this.prefetchedNoTokenId = null;
     void this.collectSample();
+  }
+
+  private syncClobSubscriptions(): void {
+    const ids = [
+      this.yesTokenId,
+      this.noTokenId,
+      this.prefetchedYesTokenId,
+      this.prefetchedNoTokenId,
+    ].filter((id): id is string => Boolean(id));
+    clobMarketFeed.setDesiredSubscriptions(ids);
   }
 
   getState(): LiveWindowState {
@@ -189,8 +203,10 @@ export class DisplayService {
     this.nextWindowPrefetchInFlight = true;
     try {
       const pair = await fetchUpDownMarketAtWindow(this.series, nextStart);
-      clobMarketFeed.ensureSubscribed([pair.yesTokenId, pair.noTokenId]);
+      this.prefetchedYesTokenId = pair.yesTokenId;
+      this.prefetchedNoTokenId = pair.noTokenId;
       this.prefetchedNextWindowStart = nextStart;
+      this.syncClobSubscriptions();
     } catch {
       // next market may not be listed yet
     } finally {
@@ -217,6 +233,9 @@ export class DisplayService {
         this.state.priceHistory = [];
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
+        this.prefetchedNextWindowStart = null;
+        this.prefetchedYesTokenId = null;
+        this.prefetchedNoTokenId = null;
       }
 
       this.state.series = this.series;
@@ -225,9 +244,9 @@ export class DisplayService {
       this.state.slug = pair.slug;
       this.state.question = pair.question;
 
-      clobMarketFeed.ensureSubscribed([pair.yesTokenId, pair.noTokenId]);
       this.yesTokenId = pair.yesTokenId;
       this.noTokenId = pair.noTokenId;
+      this.syncClobSubscriptions();
 
       // Fee schedule is metadata (not book prices) — REST ok.
       void createPublicClient(getClobHost(), getChainId())
