@@ -343,6 +343,8 @@ export class LiveTradingService {
   private liveStatLedger = new Map<string, TradingStatEvent>();
   /** Last written fingerprints — skip identical Mongo upserts. */
   private lastPersistedStatFingerprint = new Map<string, string>();
+  /** True after the first successful Mongo ledger hydrate for this process. */
+  private statsHydrated = false;
   /** Header "Live" range cut — events at/before this ms are excluded from session totals only. */
   private liveResetAtMs: number | null = null;
   /** Schedule live collection arm time — slots before this stay pre-run (dashes). */
@@ -393,7 +395,9 @@ export class LiveTradingService {
       logService.warn("trading", `Failed to load trading config: ${String(err)}`);
       this.config = defaultTradingConfig();
     }
-    if (options?.hydrateStats !== false) {
+    // Always hydrate once so schedule cards aren't empty after deploy; later polls can skip.
+    const skipHydrate = options?.hydrateStats === false && this.statsHydrated;
+    if (!skipHydrate) {
       await this.hydrateLiveStatsFromMongo();
     }
     return this.getConfig();
@@ -448,6 +452,7 @@ export class LiveTradingService {
 
       restored.sort((a, b) => (b.buyAt ?? 0) - (a.buyAt ?? 0));
       this.positionCards = [...openCards, ...restored].slice(0, 100);
+      this.statsHydrated = true;
       logService.info(
         "trading",
         `Hydrated ${events.length} live stat event(s) from Mongo (${restored.length} position card(s), ${this.knownPlacementIds.size} placement(s))`,
@@ -2041,7 +2046,7 @@ class LiveTradingRegistry {
     for (const user of users) {
       const id = String(user._id);
       const engine = this.get(id);
-      // Config / wallet only — full stat hydrate happens at boot and when a window settles with hits.
+      // Config refresh; first call still hydrates stats once (see loadPersistedConfig).
       await engine.loadPersistedConfig({ hydrateStats: false });
       if (isTradingExecutor() && user.wallet?.privateKeyEnc && user.wallet?.funderAddress) {
         try {

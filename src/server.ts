@@ -999,10 +999,11 @@ app.delete("/api/schedule-placements/:id", async (req, res) => {
 app.get("/api/schedule-placement-stats", async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const engine = await liveTradingRegistry.ensureLoaded(userId);
     const allPlacements = await listSchedulePlacements(userId);
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
-    const stats = tradingFor(req).getPlacementStats(placements.map((p) => p._id));
+    const stats = engine.getPlacementStats(placements.map((p) => p._id));
     res.json(stats);
   } catch (err) {
     const message = String(err);
@@ -1035,10 +1036,11 @@ app.get("/api/schedule-placement-stats/stream", async (req, res) => {
   try {
     const userId = requireUserId(req);
     writeEvent("progress", { completed: 1, total: 1 });
+    const engine = await liveTradingRegistry.ensureLoaded(userId);
     const allPlacements = await listSchedulePlacements(userId);
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
-    const stats = tradingFor(req).getPlacementStats(placements.map((p) => p._id));
+    const stats = engine.getPlacementStats(placements.map((p) => p._id));
     if (!closed) {
       writeEvent("done", stats);
       res.end();
