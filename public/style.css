@@ -2554,10 +2554,8 @@ body.is-schedule-resizing {
 
 .settings-panel-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 16px;
+  flex-direction: column;
+  padding: 0;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -2617,14 +2615,38 @@ body.is-row-resizing .panel-header-drag-handle {
 
 .trade-panel-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--border);
+  flex-direction: column;
+  justify-content: center;
+  /* Match Positions/Log header: 5px handle + 10px pads + 26px controls + border */
+  min-height: calc(5px + 10px + 26px + 10px + 1px);
+  padding: 0;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   background: var(--panel, var(--bg));
+  box-sizing: border-box;
+}
+
+.trade-panel-header .panel-header-main {
+  padding-top: 0;
+  padding-bottom: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.wallet-panel-header {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: calc(5px + 10px + 26px + 10px + 1px);
+  background: var(--panel, var(--bg));
+  box-sizing: border-box;
+}
+
+.wallet-panel-header .panel-header-main {
+  padding-top: 0;
+  padding-bottom: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .trade-panel-body {
@@ -2959,10 +2981,6 @@ body.is-row-resizing .panel-header-drag-handle {
 
 .wallet-control-field--shares:has(#manual-shares:disabled) .wallet-control-label {
   color: #484f58;
-}
-
-.wallet-panel-header {
-  background: var(--panel, var(--bg));
 }
 
 .positions-panel-header {
