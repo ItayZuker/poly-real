@@ -50,10 +50,6 @@
       <h1 class="app-title">Poly Real</h1>
       <select id="market-select"></select>
       <div id="countdown" class="countdown">—</div>
-      <label class="header-field header-field--plain">
-        <span class="header-field-label">Latency (ms)</span>
-        <span id="feed-latency-ms" class="header-field-value">—</span>
-      </label>
       <div id="schedule-highlighted-summary" class="schedule-highlighted-summary" hidden>
         <span class="schedule-summary-label">Custom</span>
         <div class="schedule-highlighted-stats-dots"></div>
@@ -419,7 +415,13 @@
       <div id="page-settings" class="app-page app-page-settings" hidden>
         <div class="settings-page">
           <header class="settings-page-header">
-            <h2 class="settings-page-title">Settings</h2>
+            <div class="settings-page-title-row">
+              <h2 class="settings-page-title">Settings</h2>
+              <label class="header-field header-field--plain settings-page-latency">
+                <span class="header-field-label">Latency (ms)</span>
+                <span id="feed-latency-ms" class="header-field-value">—</span>
+              </label>
+            </div>
             <p class="settings-page-sub">Account profile and trading credentials</p>
           </header>
 

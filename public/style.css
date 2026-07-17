@@ -1718,11 +1718,24 @@ body.is-schedule-resizing {
   gap: 4px;
 }
 
+.settings-page-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .settings-page-title {
   margin: 0;
   font-size: 1.35rem;
   font-weight: 650;
   color: var(--text);
+}
+
+.settings-page-latency {
+  margin-left: 0;
+  height: auto;
+  flex-shrink: 0;
 }
 
 .settings-page-sub {
