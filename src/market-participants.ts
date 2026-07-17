@@ -140,25 +140,25 @@ export async function enrichWindowWithUniqueTraders<T extends {
   const conditionId =
     window.conditionId ??
     (window.slug ? await resolveConditionIdForSlug(window.slug) : undefined);
-  if (!conditionId) return window;
-
-  try {
-    const wallets = await listUniqueTradersForWindow({
-      conditionId,
-      windowStart: window.windowStart,
-      windowEnd: window.windowEnd,
-      slug: window.slug,
-      waitForSettle: options?.waitForSettle ?? true,
-    });
-    const { newWallets, knownWallets } = await registerWindowTraders(marketSeries, wallets);
-    return {
-      ...window,
-      conditionId,
-      uniqueTraders: wallets.length,
-      newWallets,
-      knownWallets,
-    };
-  } catch {
-    return conditionId !== window.conditionId ? { ...window, conditionId } : window;
+  if (!conditionId) {
+    throw new Error(
+      `No conditionId for ${marketSeries} window ${window.windowStart} (slug=${window.slug ?? "none"})`,
+    );
   }
+
+  const wallets = await listUniqueTradersForWindow({
+    conditionId,
+    windowStart: window.windowStart,
+    windowEnd: window.windowEnd,
+    slug: window.slug,
+    waitForSettle: options?.waitForSettle ?? true,
+  });
+  const { newWallets, knownWallets } = await registerWindowTraders(marketSeries, wallets);
+  return {
+    ...window,
+    conditionId,
+    uniqueTraders: wallets.length,
+    newWallets,
+    knownWallets,
+  };
 }

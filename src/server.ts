@@ -61,6 +61,7 @@ import {
 import { liveTradingRegistry } from "./live-trading-service.js";
 import { isTradingExecutor } from "./trading-executor.js";
 import { ensureWalletRegistryReady } from "./wallet-registry.js";
+import { traderRegistryService } from "./trader-registry-service.js";
 import {
   authenticateUser,
   deleteUserById,
@@ -1070,6 +1071,7 @@ async function main(): Promise<void> {
   liveTradingRegistry.onUpdate(() => {
     pushWindowState();
   });
+  traderRegistryService.start();
 
   if (isTradingExecutor()) {
     logService.info("server", "TRADING_EXECUTOR enabled — this process may place orders");
@@ -1111,6 +1113,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     clearInterval(heatmapRefreshTimer);
+    traderRegistryService.stop();
     liveTradingRegistry.stopPolling();
     displayService.stop();
     clobMarketFeed.stop();
