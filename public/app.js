@@ -3233,7 +3233,6 @@ async function enterApp(user) {
 }
 
 async function boot() {
-  showAuthScreen();
   bindAuthForm(enterApp);
   try {
     const user = await fetchAuthMe();
@@ -3242,7 +3241,7 @@ async function boot() {
       return;
     }
   } catch {
-    // stay on auth screen
+    // fall through to auth screen
   }
   showAuthScreen();
   $("auth-email")?.focus();
