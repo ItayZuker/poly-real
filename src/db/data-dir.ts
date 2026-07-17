@@ -17,6 +17,7 @@ export async function initStorage(): Promise<void> {
   await fs.mkdir(getDataDir(), { recursive: true });
 }
 
+/** Legacy path — read once to migrate into Mongo `markets`. */
 export function marketsFilePath(): string {
   return path.join(getDataDir(), "markets.json");
 }
