@@ -5,6 +5,7 @@ import {
   getUpDownDuration,
   parseMarketSeries,
 } from "./market-pair.js";
+import { displayService } from "./display-service.js";
 import { logService } from "./log-service.js";
 
 /** How often to check for rolled windows across all seed markets. */
@@ -81,6 +82,20 @@ class TraderRegistryService {
     return out;
   }
 
+  private isSelectedSeries(series: string): boolean {
+    return displayService.getState().series === series;
+  }
+
+  private logSelected(
+    level: "info" | "warn",
+    series: string,
+    message: string,
+  ): void {
+    if (!this.isSelectedSeries(series)) return;
+    if (level === "warn") logService.warn("traders", message);
+    else logService.info("traders", message);
+  }
+
   private async poll(): Promise<void> {
     const nowSec = Math.floor(Date.now() / 1000);
 
@@ -113,7 +128,7 @@ class TraderRegistryService {
           }
         }
       } catch (err) {
-        logService.warn("traders", `Poll failed for ${series}: ${String(err)}`);
+        this.logSelected("warn", series, `Poll failed for ${series}: ${String(err)}`);
       }
     }
   }
@@ -152,15 +167,17 @@ class TraderRegistryService {
       const traders = enriched.uniqueTraders ?? 0;
       const neu = enriched.newWallets ?? 0;
       const known = enriched.knownWallets ?? 0;
-      logService.info(
-        "traders",
+      this.logSelected(
+        "info",
+        series,
         `${series} window ${window.windowStart}: ${traders} traders (${neu} new, ${known} known)`,
       );
     } catch (err) {
       // Allow retry on next process / later poll if we remove from handled.
       this.handled.delete(key);
-      logService.warn(
-        "traders",
+      this.logSelected(
+        "warn",
+        series,
         `Failed to register traders for ${series} @ ${window.windowStart}: ${String(err)}`,
       );
     } finally {
@@ -168,7 +185,6 @@ class TraderRegistryService {
     }
   }
 }
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
