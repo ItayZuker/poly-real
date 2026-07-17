@@ -60,6 +60,7 @@ import {
 } from "./trading-client.js";
 import { liveTradingRegistry } from "./live-trading-service.js";
 import { isTradingExecutor } from "./trading-executor.js";
+import { ensureWalletRegistryReady } from "./wallet-registry.js";
 import {
   authenticateUser,
   deleteUserById,
@@ -1054,6 +1055,7 @@ async function main(): Promise<void> {
     await ensureUserIndexes();
     await ensureSessionIndexes();
     await ensureDefaultUser();
+    await ensureWalletRegistryReady();
     await maybeBootstrapDefaultPassword();
     const bootstrapId = await getBootstrapUserId();
     await ensureTradingSetupsUserId(bootstrapId);
@@ -1098,16 +1100,8 @@ async function main(): Promise<void> {
   clobMarketFeed.start();
   displayService.start();
 
+  // Single fan-out path: displayService already reacts to CLOB/Chainlink ticks.
   displayService.onUpdate(() => {
-    pushWindowState();
-  });
-
-  chainlinkPriceFeed.onUpdate(() => {
-    pushWindowState();
-  });
-
-  clobMarketFeed.onUpdate(() => {
-    broadcast("book", { series: displayService.getState().series });
     pushWindowState();
   });
 

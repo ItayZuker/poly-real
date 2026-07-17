@@ -10,10 +10,9 @@ import { deleteWindowFilesBefore, listWindowFiles, readJsonFile, writeJsonFile }
 import path from "path";
 
 /**
- * Local JSON window files under data/{series}/windows.
- * Heatmap loading uses Mongo (recorded-window-mongo-repository) instead.
- * Schedule backtest / scripts that need tick-adjacent window files may still
- * call these helpers; they degrade to empty when no files exist.
+ * Local JSON window files under data/{series}/windows — legacy offline helpers.
+ * Live heatmap uses Mongo (`recorded-window-mongo-repository`).
+ * Prefer Mongo for any new code paths.
  */
 
 function windowFilePath(market: MarketDocument, windowStart: number): string {

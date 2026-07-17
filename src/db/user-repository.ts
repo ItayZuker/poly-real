@@ -6,8 +6,6 @@ import { hashPassword, verifyPassword } from "../auth/password.js";
 import type { TradingConfig } from "../types.js";
 import { decryptSecret, encryptSecret, privateKeyHint } from "../wallet-crypto.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
-import { tradingConfigFilePath } from "./data-dir.js";
-import { readJsonFile } from "./file-store.js";
 
 const COLLECTION = "users";
 const DEFAULT_SLUG = "default";
@@ -226,19 +224,9 @@ export async function ensureUserIndexes(): Promise<void> {
   await col.createIndex({ slug: 1 }, { unique: true });
 }
 
-async function migrateTradingConfigFromDisk(): Promise<TradingConfig | null> {
-  try {
-    const loaded = await readJsonFile<Partial<TradingConfig>>(tradingConfigFilePath());
-    if (!loaded) return null;
-    return normalizeTrading(loaded);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Ensure the bootstrap `default` user exists.
- * Migrates trading-config.json and env wallet credentials once when empty.
+ * Seeds wallet credentials from env when empty.
  */
 export async function ensureDefaultUser(): Promise<UserPublic> {
   const col = await collection();
@@ -265,8 +253,7 @@ export async function ensureDefaultUser(): Promise<UserPublic> {
   }
 
   const now = new Date();
-  const diskTrading = await migrateTradingConfigFromDisk();
-  const trading = diskTrading ?? defaultTrading();
+  const trading = defaultTrading();
 
   const wallet: UserWalletStored = {
     signatureType: defaultSignatureTypeFromEnv(),

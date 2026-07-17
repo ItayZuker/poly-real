@@ -1,32 +1,38 @@
-import type { WalletRegistry, WalletRegistryEntry } from "./types.js";
+import type { WalletRegistry } from "./types.js";
 import { walletsFilePath } from "./db/data-dir.js";
-import { readJsonFile, writeJsonFile } from "./db/file-store.js";
+import { readJsonFile } from "./db/file-store.js";
+import {
+  countTraderWallets,
+  ensureTraderWalletIndexes,
+  findTraderWalletsByAddresses,
+  importTraderWalletsFromRegistry,
+  listAllTraderWallets,
+  upsertTraderWalletsForWindow,
+} from "./db/trader-wallet-repository.js";
 
-let cache: WalletRegistry | null = null;
-let writeChain: Promise<void> = Promise.resolve();
+let migratePromise: Promise<void> | null = null;
 
-function normalizeAddress(address: string): string {
-  return address.trim().toLowerCase();
+async function migrateFromDiskIfNeeded(): Promise<void> {
+  if (!migratePromise) {
+    migratePromise = (async () => {
+      try {
+        const loaded = await readJsonFile<WalletRegistry>(walletsFilePath());
+        if (!loaded || Object.keys(loaded).length === 0) return;
+        const imported = await importTraderWalletsFromRegistry(loaded);
+        if (imported > 0) {
+          // Keep the file for backup; Mongo is now source of truth.
+        }
+      } catch {
+        // No legacy file or unreadable — fine.
+      }
+    })();
+  }
+  await migratePromise;
 }
 
-async function loadRegistry(): Promise<WalletRegistry> {
-  if (cache) return cache;
-  const loaded = await readJsonFile<WalletRegistry>(walletsFilePath());
-  cache = loaded ?? {};
-  return cache;
-}
-
-async function persistRegistry(registry: WalletRegistry): Promise<void> {
-  await writeJsonFile(walletsFilePath(), registry);
-}
-
-function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = writeChain.then(fn, fn);
-  writeChain = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
+export async function ensureWalletRegistryReady(): Promise<void> {
+  await ensureTraderWalletIndexes();
+  await migrateFromDiskIfNeeded();
 }
 
 export interface RegisterWindowTradersResult {
@@ -34,21 +40,26 @@ export interface RegisterWindowTradersResult {
   knownWallets: number;
 }
 
+function normalizeAddress(address: string): string {
+  return address.trim().toLowerCase();
+}
+
 /** Classify wallets against the registry without writing (for live UI during a window). */
 export async function classifyWindowTraders(
   addresses: string[],
 ): Promise<RegisterWindowTradersResult> {
+  await migrateFromDiskIfNeeded();
   const unique = [...new Set(addresses.map(normalizeAddress).filter(Boolean))];
   if (unique.length === 0) {
     return { newWallets: 0, knownWallets: 0 };
   }
 
-  const registry = await loadRegistry();
+  const existing = await findTraderWalletsByAddresses(unique);
   let newWallets = 0;
   let knownWallets = 0;
 
   for (const address of unique) {
-    if (registry[address]) {
+    if (existing.has(address)) {
       knownWallets += 1;
     } else {
       newWallets += 1;
@@ -63,49 +74,16 @@ export async function registerWindowTraders(
   marketSeries: string,
   addresses: string[],
 ): Promise<RegisterWindowTradersResult> {
-  const unique = [...new Set(addresses.map(normalizeAddress).filter(Boolean))];
-  if (unique.length === 0) {
-    return { newWallets: 0, knownWallets: 0 };
-  }
-
-  return withRegistryLock(async () => {
-    const registry = await loadRegistry();
-    const nowSec = Math.floor(Date.now() / 1000);
-    let newWallets = 0;
-    let knownWallets = 0;
-
-    for (const address of unique) {
-      const existing = registry[address];
-      if (!existing) {
-        const entry: WalletRegistryEntry = {
-          address,
-          firstSeenAt: nowSec,
-          lastSeenAt: nowSec,
-          markets: { [marketSeries]: 1 },
-          totalSightings: 1,
-        };
-        registry[address] = entry;
-        newWallets += 1;
-        continue;
-      }
-
-      knownWallets += 1;
-      existing.lastSeenAt = nowSec;
-      existing.totalSightings += 1;
-      existing.markets[marketSeries] = (existing.markets[marketSeries] ?? 0) + 1;
-    }
-
-    cache = registry;
-    await persistRegistry(registry);
-    return { newWallets, knownWallets };
-  });
+  await migrateFromDiskIfNeeded();
+  return upsertTraderWalletsForWindow(marketSeries, addresses);
 }
 
 export async function getWalletRegistry(): Promise<WalletRegistry> {
-  return withRegistryLock(async () => loadRegistry());
+  await migrateFromDiskIfNeeded();
+  return listAllTraderWallets();
 }
 
 export async function getWalletCount(): Promise<number> {
-  const registry = await getWalletRegistry();
-  return Object.keys(registry).length;
+  await migrateFromDiskIfNeeded();
+  return countTraderWallets();
 }

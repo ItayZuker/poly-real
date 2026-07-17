@@ -21,12 +21,9 @@ export function marketsFilePath(): string {
   return path.join(getDataDir(), "markets.json");
 }
 
+/** Legacy path — read once to migrate into Mongo `trader_wallets`. */
 export function walletsFilePath(): string {
   return path.join(getDataDir(), "wallets.json");
-}
-
-export function tradingConfigFilePath(): string {
-  return path.join(getDataDir(), "trading-config.json");
 }
 
 export function marketDir(series: string): string {
