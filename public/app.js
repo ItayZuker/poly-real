@@ -2062,6 +2062,23 @@ function updateWindowUI(state) {
   }
 }
 
+/** Tick-live quote fields for clickable up/down buttons — merge without redrawing the full chart. */
+function applyQuotesUpdate(quotes) {
+  if (!quotes) return;
+  if (quotes.series && selectedSeries && quotes.series !== selectedSeries) return;
+
+  if (!windowState) {
+    windowState = { priceHistory: [], ...(quotes || {}) };
+  } else {
+    Object.assign(windowState, quotes);
+  }
+  window.windowState = windowState;
+
+  updateQuoteBoxes(windowState);
+  syncLatencyDisplay(windowState);
+  if (quotes.windowEnd != null) updateCountdown(windowState);
+}
+
 function syncLatencyDisplay(state) {
   const el = $("feed-latency-ms");
   if (!el) return;
@@ -2116,6 +2133,10 @@ function connectSSE() {
         state.trading,
       );
     }
+  });
+
+  es.addEventListener("quotes", (e) => {
+    applyQuotesUpdate(JSON.parse(e.data));
   });
 
   es.addEventListener("account", (e) => {
