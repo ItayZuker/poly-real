@@ -61,3 +61,11 @@ export function privateKeyHint(normalizedHexKey: string): string {
   const hex = normalizedHexKey.startsWith("0x") ? normalizedHexKey.slice(2) : normalizedHexKey;
   return hex.slice(-4).toLowerCase();
 }
+
+/** Short address hint for logs (last 4 hex chars) — never log full funder/signer. */
+export function addressHint(address: string | undefined | null): string {
+  if (!address?.trim()) return "????";
+  const hex = address.trim().startsWith("0x") ? address.trim().slice(2) : address.trim();
+  if (hex.length < 4) return "????";
+  return hex.slice(-4).toLowerCase();
+}

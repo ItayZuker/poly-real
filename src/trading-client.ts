@@ -13,6 +13,7 @@ import {
   getWalletCredentials,
   type WalletCredentials,
 } from "./db/user-repository.js";
+import { addressHint } from "./wallet-crypto.js";
 import { logService } from "./log-service.js";
 
 export interface TradingAccountStatus {
@@ -152,7 +153,7 @@ export async function initTradingClient(userId: string): Promise<TradingAccountS
 
     logService.success(
       "trading",
-      `Account connected (user ${userId.slice(0, 8)}…) — signer ${account.address}, funder ${funderAddress}, ` +
+      `Account connected (user ${userId.slice(0, 8)}…) — signer …${addressHint(account.address)}, funder …${addressHint(funderAddress)}, ` +
         `balance $${formatUsdcBalance(balance.balance)} USDC`,
     );
 
