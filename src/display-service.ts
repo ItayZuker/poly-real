@@ -176,9 +176,12 @@ export class DisplayService {
     const tickMs = live.timestampMs;
     this.state.lastTickMs = tickMs;
 
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (nowSec >= this.state.windowStart && nowSec < this.state.windowEnd) {
-      this.state.priceHistory.push({ t: nowSec, price: live.value });
+    // Preserve Chainlink's source timestamp (including milliseconds). Using the
+    // server's whole-second clock made fast ticks overlap and could place a
+    // boundary tick on the wrong side of a window.
+    const tickSec = live.timestampMs / 1000;
+    if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
+      this.state.priceHistory.push({ t: tickSec, price: live.value });
       if (this.state.priceHistory.length > 2000) {
         this.state.priceHistory.splice(0, this.state.priceHistory.length - 2000);
       }

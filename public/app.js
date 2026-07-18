@@ -7,6 +7,8 @@ let countdownTimer = null;
 let chartCanvas = null;
 let chartCtx = null;
 let chartWindowStart = null;
+let chainlinkChartFrame = null;
+let pendingChainlinkTicks = [];
 
 const MAX_LOG_LINES = 500;
 
@@ -2096,6 +2098,12 @@ function updateWindowUI(state) {
   windowState = state;
   window.windowState = state;
 
+  if (pendingChainlinkTicks.length > 0) {
+    const queued = pendingChainlinkTicks;
+    pendingChainlinkTicks = [];
+    for (const tick of queued) appendChainlinkTick(tick, false);
+  }
+
   if (window.Simulator) window.Simulator.syncFromState(state);
 
   syncLatencyDisplay(state);
@@ -2113,6 +2121,57 @@ function updateWindowUI(state) {
       state.trading,
     );
   }
+}
+
+function selectedAsset() {
+  return String(selectedSeries || "").split("-")[0].toLowerCase();
+}
+
+function appendChainlinkTick(tick, redraw = true) {
+  if (!tick || tick.asset !== selectedAsset()) return;
+
+  const price = Number(tick.price);
+  const timestampMs = Number(tick.timestampMs);
+  if (!Number.isFinite(price) || !Number.isFinite(timestampMs)) return;
+
+  if (!windowState?.windowStart || !windowState?.windowEnd) {
+    pendingChainlinkTicks.push(tick);
+    pendingChainlinkTicks = pendingChainlinkTicks.slice(-100);
+    return;
+  }
+
+  const t = timestampMs / 1000;
+  if (t < windowState.windowStart || t >= windowState.windowEnd) {
+    // Keep boundary ticks briefly until the next full snapshot switches the UI
+    // to the new market window.
+    if (t >= windowState.windowEnd) {
+      pendingChainlinkTicks.push(tick);
+      pendingChainlinkTicks = pendingChainlinkTicks.slice(-100);
+    }
+    return;
+  }
+
+  const history = Array.isArray(windowState.priceHistory)
+    ? windowState.priceHistory
+    : (windowState.priceHistory = []);
+  const last = history[history.length - 1];
+  if (!last || last.t !== t || last.price !== price) {
+    history.push({ t, price });
+    if (history.length > 2000) history.splice(0, history.length - 2000);
+  }
+
+  windowState.assetPrice = price;
+  windowState.lastTickMs = timestampMs;
+  if (Number.isFinite(windowState.prevCloseAsset)) {
+    windowState.assetGap = price - windowState.prevCloseAsset;
+  }
+  window.windowState = windowState;
+
+  if (!redraw || chainlinkChartFrame != null) return;
+  chainlinkChartFrame = requestAnimationFrame(() => {
+    chainlinkChartFrame = null;
+    if (windowState) updateGraphPanel(windowState);
+  });
 }
 
 /** Tick-live quote fields for clickable up/down buttons — merge without redrawing the full chart. */
@@ -2190,6 +2249,10 @@ function connectSSE() {
 
   es.addEventListener("quotes", (e) => {
     applyQuotesUpdate(JSON.parse(e.data));
+  });
+
+  es.addEventListener("chainlink-tick", (e) => {
+    appendChainlinkTick(JSON.parse(e.data));
   });
 
   es.addEventListener("account", (e) => {

@@ -1169,6 +1169,18 @@ async function main(): Promise<void> {
   clobMarketFeed.start();
   displayService.start();
 
+  // Send each Chainlink point as a tiny incremental event. Full window
+  // snapshots remain the recovery path for initial load and reconnects.
+  const chainlinkTickUnsub = chainlinkPriceFeed.onUpdate((asset, timestampMs) => {
+    const live = chainlinkPriceFeed.getLivePrice(asset);
+    if (!live || live.timestampMs !== timestampMs) return;
+    broadcast("chainlink-tick", {
+      asset,
+      price: live.value,
+      timestampMs,
+    });
+  });
+
   // Quotes: every tick (small). Full window (history + trading): coalesced ~200ms.
   displayService.onUpdate(() => {
     pushQuotesLive();
@@ -1184,6 +1196,7 @@ async function main(): Promise<void> {
     traderRegistryService.stop();
     liveTradingRegistry.stopPolling();
     displayService.stop();
+    chainlinkTickUnsub();
     clobMarketFeed.stop();
     chainlinkPriceFeed.stop();
     await closeMongoClient().catch(() => {});
