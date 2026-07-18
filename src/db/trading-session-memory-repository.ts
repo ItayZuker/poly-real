@@ -173,15 +173,32 @@ function sumEvents(events: TradingStatEvent[]): SessionMemoryTotals {
     const card = event.card;
     const identity =
       card?.conditionId && card.asset && Number.isFinite(card.buyAt)
-        ? `${card.conditionId}|${card.asset}|${card.buyAt}|${event.status}`
+        ? `${card.conditionId}|${card.asset}|${card.buyAt}`
         : null;
     if (identity && tradeIdentities.has(identity)) continue;
     if (identity) tradeIdentities.add(identity);
+
+    const pl = Number(event.pnl);
+    if (!Number.isFinite(pl)) continue;
+
+    let green = 0;
+    let red = 0;
+    let blue = 0;
+    if (event.status === "sold") {
+      if (pl > 0) green = 1;
+      else red = 1;
+    } else if (event.status === "win" || event.status === "loss") {
+      if (pl > 1e-9) blue = 1;
+      else red = 1;
+    } else {
+      continue;
+    }
+
     totals.sessionCount += 1;
-    totals.green += event.green ?? 0;
-    totals.red += event.red ?? 0;
-    totals.blue += event.blue ?? 0;
-    totals.pnl += event.pnl ?? 0;
+    totals.green += green;
+    totals.red += red;
+    totals.blue += blue;
+    totals.pnl += pl;
     totals.hasData = true;
   }
   return totals;

@@ -120,17 +120,100 @@ function contributionFromCard(card: TradingPositionCard): SettledStatContributio
   let green = 0;
   let red = 0;
   let blue = 0;
+  let status = card.status;
   if (card.status === "sold") {
     if (pl > 0) green = 1;
     else red = 1;
-  } else if (card.status === "win") {
-    blue = 1;
-  } else if (card.status === "loss") {
-    red = 1;
+  } else if (card.status === "win" || card.status === "loss") {
+    // Never trust a stale status that disagrees with settled P/L.
+    if (pl > 1e-9) {
+      blue = 1;
+      status = "win";
+    } else {
+      red = 1;
+      status = "loss";
+    }
   } else {
     return null;
   }
-  return { green, red, blue, pnl: pl, status: card.status };
+  return { green, red, blue, pnl: pl, status };
+}
+
+/**
+ * Resolve held-to-settlement win/loss.
+ * Polymarket `outcome` on a position is the token held, not the market winner —
+ * derive market outcome from our side + whether that token paid out.
+ */
+function resolveHeldSettlement(
+  card: TradingPositionCard,
+  opts: { curPrice?: number | null; grossPl?: number | null },
+): { won: boolean; pl: number; outcome: "up" | "down"; status: "win" | "loss" } {
+  const cur =
+    opts.curPrice != null && Number.isFinite(Number(opts.curPrice))
+      ? Number(opts.curPrice)
+      : null;
+  const gross =
+    opts.grossPl != null && Number.isFinite(Number(opts.grossPl)) ? Number(opts.grossPl) : null;
+
+  let won: boolean;
+  if (cur != null) {
+    won = cur >= 0.5;
+  } else if (gross != null) {
+    won = gross >= 0;
+  } else {
+    won = false;
+  }
+
+  // Prefer local held P/L when token price clearly resolved — avoids mismatched
+  // closed-position realizedPnl being applied to the wrong / duplicate card.
+  let pl =
+    cur != null
+      ? feeAwarePlHeld(card, won)
+      : gross != null
+        ? feeAwarePlFromGross(gross, card)
+        : feeAwarePlHeld(card, won);
+
+  if (gross != null && cur != null) {
+    const plFromGross = feeAwarePlFromGross(gross, card);
+    if ((plFromGross >= 0) === won) pl = plFromGross;
+  }
+
+  // Final consistency: P/L sign owns the outcome color.
+  if (pl > 1e-9) won = true;
+  else if (pl < -1e-9) won = false;
+
+  return {
+    won,
+    pl,
+    outcome: won ? card.side : card.side === "up" ? "down" : "up",
+    status: won ? "win" : "loss",
+  };
+}
+
+function eventStatContribution(event: TradingStatEvent): SettledStatContribution | null {
+  if (!isConfirmedStatEvent(event)) return null;
+  const pl = Number(event.pnl);
+  if (!Number.isFinite(pl)) return null;
+
+  let green = 0;
+  let red = 0;
+  let blue = 0;
+  let status = event.status;
+  if (event.status === "sold") {
+    if (pl > 0) green = 1;
+    else red = 1;
+  } else if (event.status === "win" || event.status === "loss") {
+    if (pl > 1e-9) {
+      blue = 1;
+      status = "win";
+    } else {
+      red = 1;
+      status = "loss";
+    }
+  } else {
+    return null;
+  }
+  return { green, red, blue, pnl: pl, status };
 }
 
 function confirmedContributionFromCard(
@@ -148,11 +231,11 @@ function isConfirmedStatEvent(event: TradingStatEvent): boolean {
 function cardStatIdentity(
   card: Pick<
     TradingPositionCard,
-    "conditionId" | "asset" | "buyAt" | "status"
+    "conditionId" | "asset" | "buyAt"
   >,
 ): string | null {
   if (!card.conditionId || !card.asset || !Number.isFinite(card.buyAt)) return null;
-  return `${card.conditionId}|${card.asset}|${card.buyAt}|${card.status}`;
+  return `${card.conditionId}|${card.asset}|${card.buyAt}`;
 }
 
 function eventStatIdentity(event: TradingStatEvent): string | null {
@@ -305,12 +388,6 @@ function emptyQuoteLocks(): SimQuoteLocks {
 
 function newCardId(): string {
   return `pos-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function outcomeFromIndex(index?: number, label?: string): "up" | "down" | undefined {
-  if (index === 0 || /^up$/i.test(String(label || ""))) return "up";
-  if (index === 1 || /^down$/i.test(String(label || ""))) return "down";
-  return undefined;
 }
 
 function defaultTradingConfig(): TradingConfig {
@@ -840,15 +917,16 @@ export class LiveTradingService {
     for (const event of this.liveStatLedger.values()) {
       if (event.placementId !== placementId) continue;
       if (cardIdsFromRam.has(event.cardId)) continue;
-      if (!isConfirmedStatEvent(event)) continue;
+      const contrib = eventStatContribution(event);
+      if (!contrib) continue;
       const identity = eventStatIdentity(event);
       if (identity && tradeIdentities.has(identity)) continue;
       if (identity) tradeIdentities.add(identity);
       hasData = true;
-      green += event.green ?? 0;
-      red += event.red ?? 0;
-      blue += event.blue ?? 0;
-      pnl += event.pnl ?? 0;
+      green += contrib.green;
+      red += contrib.red;
+      blue += contrib.blue;
+      pnl += contrib.pnl;
     }
 
     if (!hasData) {
@@ -916,14 +994,15 @@ export class LiveTradingService {
     for (const event of this.liveStatLedger.values()) {
       if (seen.has(event.cardId)) continue;
       if (!this.countsTowardLiveHeader(eventSettledMs(event))) continue;
-      if (!isConfirmedStatEvent(event)) continue;
+      const contrib = eventStatContribution(event);
+      if (!contrib) continue;
       const identity = eventStatIdentity(event);
       if (identity && tradeIdentities.has(identity)) continue;
       if (identity) tradeIdentities.add(identity);
-      green += event.green ?? 0;
-      red += event.red ?? 0;
-      blue += event.blue ?? 0;
-      pnl += event.pnl ?? 0;
+      green += contrib.green;
+      red += contrib.red;
+      blue += contrib.blue;
+      pnl += contrib.pnl;
       const settled = eventSettledMs(event);
       if (Number.isFinite(settled)) {
         const buyAtSec = Math.floor(settled / 1000);
@@ -1034,14 +1113,13 @@ export class LiveTradingService {
           card.buyCost = card.shares * card.buyPrice;
         }
         card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const marketOutcome = outcomeFromIndex(closed.outcomeIndex, closed.outcome);
-        // Position outcome token that won if curPrice ~ 1
-        const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : grossPl >= 0;
-        card.status = won ? "win" : "loss";
-        card.outcome = marketOutcome ?? (won ? card.side : card.side === "up" ? "down" : "up");
-        card.pl = Number.isFinite(grossPl)
-          ? feeAwarePlFromGross(grossPl, card)
-          : feeAwarePlHeld(card, won);
+        const settled = resolveHeldSettlement(card, {
+          curPrice: closed.curPrice,
+          grossPl: Number.isFinite(grossPl) ? grossPl : null,
+        });
+        card.status = settled.status;
+        card.outcome = settled.outcome;
+        card.pl = settled.pl;
         continue;
       }
 
@@ -1074,14 +1152,13 @@ export class LiveTradingService {
           card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
         }
         card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : grossPl >= 0;
-        card.status = won ? "win" : "loss";
-        card.outcome =
-          outcomeFromIndex(openPos.outcomeIndex, openPos.outcome) ??
-          (won ? card.side : card.side === "up" ? "down" : "up");
-        card.pl = Number.isFinite(grossPl)
-          ? feeAwarePlFromGross(grossPl, card)
-          : feeAwarePlHeld(card, won);
+        const settled = resolveHeldSettlement(card, {
+          curPrice: openPos.curPrice,
+          grossPl: Number.isFinite(grossPl) ? grossPl : null,
+        });
+        card.status = settled.status;
+        card.outcome = settled.outcome;
+        card.pl = settled.pl;
         continue;
       }
 
@@ -1462,28 +1539,60 @@ export class LiveTradingService {
     const nowSec = Math.floor(Date.now() / 1000);
     const cost = usdcAmount ?? fillShares * fillPrice;
     const buyFees = await estimateLiveTakerFee(this.userId, tokenId, fillShares, fillPrice);
+    const windowKey = sessionKey(state);
 
-    const existing = existingCardId ? this.findCard(existingCardId) : undefined;
-    const pos = this.positions[side];
+    const existing =
+      (existingCardId ? this.findCard(existingCardId) : undefined) ??
+      this.positionCards.find(
+        (card) => card.status === "open" && card.windowKey === windowKey && card.side === side,
+      );
 
-    if (existing && existing.status === "open" && pos) {
-      const totalShares = pos.shares + fillShares;
-      const totalCost = pos.cost + cost;
-      const totalFees = (pos.buyFees ?? 0) + buyFees;
-      pos.shares = totalShares;
-      pos.avgPrice = totalShares > 0 ? totalCost / totalShares : fillPrice;
-      pos.cost = totalCost;
-      pos.buyFees = totalFees;
-      pos.asset = pos.asset ?? tokenId;
-      pos.conditionId = pos.conditionId ?? conditionId;
+    if (existing && existing.status === "open") {
+      if (!this.positions[side]) {
+        this.positions[side] = {
+          shares: existing.shares,
+          avgPrice: existing.buyPrice,
+          cost: existing.buyCost,
+          buyFees: existing.buyFees ?? 0,
+          cardId: existing.id,
+          asset: existing.asset,
+          conditionId: existing.conditionId,
+        };
+      }
+      const livePos = this.positions[side]!;
+      const totalShares = livePos.shares + fillShares;
+      const totalCost = livePos.cost + cost;
+      const totalFees = (livePos.buyFees ?? 0) + buyFees;
+      livePos.shares = totalShares;
+      livePos.avgPrice = totalShares > 0 ? totalCost / totalShares : fillPrice;
+      livePos.cost = totalCost;
+      livePos.buyFees = totalFees;
+      livePos.asset = livePos.asset ?? tokenId;
+      livePos.conditionId = livePos.conditionId ?? conditionId;
       existing.shares = totalShares;
-      existing.buyPrice = pos.avgPrice;
+      existing.buyPrice = livePos.avgPrice;
       existing.buyCost = totalCost;
       existing.buyFees = totalFees;
       existing.asset = existing.asset ?? tokenId;
       existing.conditionId = existing.conditionId ?? conditionId;
       existing.slug = existing.slug ?? slug;
     } else {
+      // Hard stop: never open a second card for the same window/side/market.
+      const dup = this.positionCards.find(
+        (card) =>
+          card.windowKey === windowKey &&
+          card.side === side &&
+          ((tokenId && card.asset === tokenId) ||
+            (conditionId && card.conditionId === conditionId)),
+      );
+      if (dup) {
+        logService.warn(
+          "trading",
+          `Skipped duplicate buy card for ${windowKey} ${side} (existing ${dup.id})`,
+        );
+        return;
+      }
+
       const cardId = newCardId();
       this.positions[side] = {
         shares: fillShares,
@@ -1497,7 +1606,7 @@ export class LiveTradingService {
       this.lockQuote(side, "buy", fillPrice);
       this.positionCards.unshift({
         id: cardId,
-        windowKey: sessionKey(state),
+        windowKey,
         series: state.series,
         side,
         shares: fillShares,
@@ -1882,12 +1991,13 @@ export class LiveTradingService {
           card.buyCost = card.shares * card.buyPrice;
         }
         card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const won = closed.curPrice != null ? Number(closed.curPrice) >= 0.5 : grossPl >= 0;
-        card.status = won ? "win" : "loss";
-        card.outcome =
-          outcomeFromIndex(closed.outcomeIndex, closed.outcome) ??
-          (won ? card.side : card.side === "up" ? "down" : "up");
-        card.pl = feeAwarePlFromGross(grossPl, card);
+        const settled = resolveHeldSettlement(card, {
+          curPrice: closed.curPrice,
+          grossPl,
+        });
+        card.status = settled.status;
+        card.outcome = settled.outcome;
+        card.pl = settled.pl;
         if (isValidSharePrice(card.buyPrice) && isValidShareSize(card.shares)) {
           card.confirmed = true;
         }
@@ -1915,14 +2025,13 @@ export class LiveTradingService {
         card.shares = Number(openPos.size);
         card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
         card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const won = openPos.curPrice != null ? Number(openPos.curPrice) >= 0.5 : grossPl >= 0;
-        card.status = won ? "win" : "loss";
-        card.outcome =
-          outcomeFromIndex(openPos.outcomeIndex, openPos.outcome) ??
-          (won ? card.side : card.side === "up" ? "down" : "up");
-        card.pl = Number.isFinite(grossPl)
-          ? feeAwarePlFromGross(grossPl, card)
-          : feeAwarePlHeld(card, won);
+        const settled = resolveHeldSettlement(card, {
+          curPrice: openPos.curPrice,
+          grossPl: Number.isFinite(grossPl) ? grossPl : null,
+        });
+        card.status = settled.status;
+        card.outcome = settled.outcome;
+        card.pl = settled.pl;
         card.confirmed = true;
       }
     } catch {
