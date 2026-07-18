@@ -3104,11 +3104,23 @@ body.is-row-resizing .panel-header-drag-handle {
   border-radius: 3px;
 }
 
-/* Waiting for Polymarket settlement — gray out the win/loss badge. */
-.position-card.is-pl-pending.is-win .position-card-status,
-.position-card.is-pl-pending.is-loss .position-card-status {
+/* Open or waiting for Polymarket settlement — gray pulsing badge. */
+.position-card.is-loading .position-card-status {
   color: #fff;
   background: var(--muted);
+  padding: 2px 6px;
+  border-radius: 3px;
+  animation: position-card-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes position-card-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .position-card-row {
@@ -3132,21 +3144,9 @@ body.is-row-resizing .panel-header-drag-handle {
   color: var(--down);
 }
 
-.position-card-pl.is-pending {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.position-card-pl-placeholder {
-  display: inline-block;
-  width: 42px;
-  height: 12px;
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--muted) 25%, transparent);
-  flex-shrink: 0;
+/* Keep the P/L row height stable while its value is empty during loading. */
+.position-card.is-loading .position-card-row strong {
+  min-height: 1em;
 }
 
 .log-panel {

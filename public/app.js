@@ -1764,28 +1764,31 @@ function renderPositionCard(card) {
   const isDemo = card.demo === true || String(card.id || "").startsWith("demo:");
   const settled = status === "sold" || status === "win" || status === "loss";
   const plPending = settled && !isDemo && card.confirmed !== true;
+  // Open and waiting-for-settlement cards render the same skeleton:
+  // all labels present, all values empty, so the card height never changes.
+  const isLoading = !isDemo && (status === "open" || plPending);
 
-  const buyText = plPending ? "" : `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`;
-  let detailHtml = `<div class="position-card-row"><span>Buy</span><strong>${buyText}</strong></div>`;
+  let detailHtml = `<div class="position-card-row"><span>Buy</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`}</strong></div>`;
 
   if (status === "sold") {
-    detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${plPending ? "" : `${card.shares} @ ${fmtPriceCents(card.sellPrice)}`}</strong></div>`;
-  } else if (status === "win" || status === "loss") {
-    detailHtml += `<div class="position-card-row"><span>Settlement</span><strong>${plPending ? "" : (card.outcome || "—").toUpperCase()}</strong></div>`;
+    detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.sellPrice)}`}</strong></div>`;
+  } else {
+    detailHtml += `<div class="position-card-row"><span>Settlement</span><strong>${isLoading ? "" : (card.outcome || "—").toUpperCase()}</strong></div>`;
   }
 
-  if (plPending) {
-    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl is-pending" aria-label="Waiting for settlement"><span class="position-card-pl-placeholder" aria-hidden="true"></span></strong></div>`;
-  } else if (card.pl != null && Number.isFinite(card.pl)) {
-    const plClass = card.pl > 0 ? "is-positive" : card.pl < 0 ? "is-negative" : "";
-    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl ${plClass}">${fmtUsdSigned(card.pl)}</strong></div>`;
+  if (isLoading) {
+    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl"></strong></div>`;
+  } else {
+    const hasPl = card.pl != null && Number.isFinite(card.pl);
+    const plClass = hasPl ? (card.pl > 0 ? "is-positive" : card.pl < 0 ? "is-negative" : "") : "";
+    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl ${plClass}">${hasPl ? fmtUsdSigned(card.pl) : ""}</strong></div>`;
   }
 
   const statusLabel = plPending && (status === "win" || status === "loss")
     ? "Waiting"
     : positionStatusLabel(status);
-  const sourceNote = isDemo ? "Demo" : card.confirmed ? "Confirmed" : "Pending confirm";
-  return `<article class="position-card is-${status}${isDemo ? " is-demo" : ""}${plPending ? " is-pl-pending" : ""}" data-position-id="${card.id}">
+  const sourceNote = isDemo ? "Demo" : isLoading ? "Pending…" : "Confirmed";
+  return `<article class="position-card is-${status}${isDemo ? " is-demo" : ""}${isLoading ? " is-loading" : ""}" data-position-id="${card.id}">
     <div class="position-card-top">
       <span class="position-card-side ${sideClass}">${(card.side || "").toUpperCase()}</span>
       <span class="position-card-status">${statusLabel}</span>
