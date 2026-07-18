@@ -305,7 +305,7 @@ function applyWalletGate(ready) {
       : "";
   }
   if (!walletReady && typeof showAppPage === "function") {
-    showAppPage("settings");
+    showAppPage("settings", { persist: false });
   }
 }
 
@@ -1789,6 +1789,8 @@ function renderPositionCard(card) {
 
 const DEMO_POSITION_CARDS_KEY = "poly-real:demo-position-cards";
 const POSITIONS_VIEW_KEY = "poly-real:positions-view";
+const APP_PAGE_KEY = "poly-real:app-page";
+const SCHEDULE_VIEW_KEY = "poly-real:schedule-view";
 
 let positionsView = "live";
 let demoPositionCards = [];
@@ -1807,6 +1809,46 @@ function loadPositionsViewPref() {
 function savePositionsViewPref() {
   try {
     localStorage.setItem(POSITIONS_VIEW_KEY, positionsView);
+  } catch {
+    // ignore
+  }
+}
+
+function loadAppPagePref() {
+  try {
+    const saved = localStorage.getItem(APP_PAGE_KEY);
+    if (saved === "simulator" || saved === "schedule" || saved === "settings") return saved;
+  } catch {
+    // ignore
+  }
+  return "simulator";
+}
+
+function saveAppPagePref(page) {
+  try {
+    if (page === "simulator" || page === "schedule" || page === "settings") {
+      localStorage.setItem(APP_PAGE_KEY, page);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function loadScheduleViewPref() {
+  try {
+    const saved = localStorage.getItem(SCHEDULE_VIEW_KEY);
+    if (saved === "schedule" || saved === "heatmap") return saved;
+  } catch {
+    // ignore
+  }
+  return "schedule";
+}
+
+function saveScheduleViewPref(view) {
+  try {
+    if (view === "schedule" || view === "heatmap") {
+      localStorage.setItem(SCHEDULE_VIEW_KEY, view);
+    }
   } catch {
     // ignore
   }
@@ -2849,15 +2891,17 @@ function bindScheduleViewToggle() {
   const buttons = document.querySelectorAll(".schedule-view-toggle-btn");
   if (!list || !heatmapPanel || !buttons.length) return;
 
-  const showView = (view) => {
-    const isSchedule = view === "schedule";
+  const showView = (view, options = {}) => {
+    const next = view === "heatmap" ? "heatmap" : "schedule";
+    const isSchedule = next === "schedule";
     const page = $("page-schedule-heatmap");
     page?.classList.toggle("is-heatmap-view", !isSchedule);
     list.hidden = !isSchedule;
     heatmapPanel.hidden = isSchedule;
     for (const btn of buttons) {
-      btn.classList.toggle("is-active", btn.dataset.scheduleView === view);
+      btn.classList.toggle("is-active", btn.dataset.scheduleView === next);
     }
+    if (options.persist !== false) saveScheduleViewPref(next);
     // Keep both UIs mounted. Only load heatmap the first time if not yet available.
     if (!isSchedule && !lastHeatmapState) {
       void loadHeatmap();
@@ -2872,6 +2916,8 @@ function bindScheduleViewToggle() {
       showView(view);
     });
   }
+
+  showView(loadScheduleViewPref(), { persist: false });
 }
 
 function syncWalletControls(config) {
@@ -3119,18 +3165,21 @@ function bindPageToggle() {
   const settingsBtn = $("settings-page-btn");
   if (!simulatorPage || !schedulePage || !settingsPage || !buttons.length) return;
 
-  const showPage = (page) => {
-    if (!walletReady && (page === "simulator" || page === "schedule")) {
-      page = "settings";
+  const showPage = (page, options = {}) => {
+    let next = page;
+    if (!walletReady && (next === "simulator" || next === "schedule")) {
+      next = "settings";
+    } else if (options.persist !== false) {
+      saveAppPagePref(next);
     }
-    const isSimulator = page === "simulator";
-    const isSchedule = page === "schedule";
-    const isSettings = page === "settings";
+    const isSimulator = next === "simulator";
+    const isSchedule = next === "schedule";
+    const isSettings = next === "settings";
     simulatorPage.hidden = !isSimulator;
     schedulePage.hidden = !isSchedule;
     settingsPage.hidden = !isSettings;
     for (const btn of buttons) {
-      btn.classList.toggle("is-active", btn.dataset.page === page);
+      btn.classList.toggle("is-active", btn.dataset.page === next);
     }
     if (settingsBtn) settingsBtn.classList.toggle("is-active", isSettings);
 
@@ -3180,6 +3229,9 @@ function bindPageToggle() {
   }
 
   applyWalletGate(walletReady);
+  showPage(loadAppPagePref(), { persist: false });
+  delete document.documentElement.dataset.initialPage;
+  delete document.documentElement.dataset.initialScheduleView;
 }
 
 async function init() {
@@ -3249,7 +3301,7 @@ async function enterApp(user) {
   appInitialized = true;
   await init();
   if (!walletReady && typeof showAppPage === "function") {
-    showAppPage("settings");
+    showAppPage("settings", { persist: false });
   }
 }
 

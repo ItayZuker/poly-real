@@ -5,6 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Poly Real</title>
   <link rel="stylesheet" href="/style.css" />
+  <script>
+    try {
+      var initialPage = localStorage.getItem("poly-real:app-page");
+      if (initialPage === "schedule" || initialPage === "settings") {
+        document.documentElement.dataset.initialPage = initialPage;
+      }
+      if (localStorage.getItem("poly-real:schedule-view") === "heatmap") {
+        document.documentElement.dataset.initialScheduleView = "heatmap";
+      }
+    } catch (e) {}
+  </script>
+  <style>
+    html[data-initial-page="schedule"] #page-simulator,
+    html[data-initial-page="settings"] #page-simulator {
+      display: none !important;
+    }
+    html[data-initial-page="schedule"] #page-schedule-heatmap {
+      display: flex !important;
+    }
+    html[data-initial-page="settings"] #page-settings {
+      display: flex !important;
+      flex-direction: column;
+    }
+    html[data-initial-page="schedule"][data-initial-schedule-view="heatmap"] #schedule-setups-list {
+      display: none !important;
+    }
+    html[data-initial-page="schedule"][data-initial-schedule-view="heatmap"] #schedule-heatmap-panel {
+      display: block !important;
+    }
+  </style>
 </head>
 <body>
   <div id="auth-screen" class="auth-screen" hidden>
