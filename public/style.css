@@ -3125,6 +3125,34 @@ body.is-row-resizing .panel-header-drag-handle {
   color: var(--down);
 }
 
+.position-card-pl.is-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.position-card-pl-spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: position-card-pl-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.position-card-pl-waiting {
+  letter-spacing: 0.01em;
+}
+
+@keyframes position-card-pl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .log-panel {
   flex: 0 0 auto;
   margin-top: var(--log-margin-top, 0px);
