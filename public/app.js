@@ -1761,21 +1761,21 @@ function positionStatusLabel(status) {
 function renderPositionCard(card) {
   const sideClass = card.side === "up" ? "is-up" : "is-down";
   const status = card.status || "open";
-  const buyText = `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`;
-  let detailHtml = `<div class="position-card-row"><span>Buy</span><strong>${buyText}</strong></div>`;
-
   const isDemo = card.demo === true || String(card.id || "").startsWith("demo:");
   const settled = status === "sold" || status === "win" || status === "loss";
   const plPending = settled && !isDemo && card.confirmed !== true;
 
+  const buyText = plPending ? "" : `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`;
+  let detailHtml = `<div class="position-card-row"><span>Buy</span><strong>${buyText}</strong></div>`;
+
   if (status === "sold") {
-    detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${card.shares} @ ${fmtPriceCents(card.sellPrice)}</strong></div>`;
+    detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${plPending ? "" : `${card.shares} @ ${fmtPriceCents(card.sellPrice)}`}</strong></div>`;
   } else if (status === "win" || status === "loss") {
-    detailHtml += `<div class="position-card-row"><span>Settlement</span><strong>${plPending ? "—" : (card.outcome || "—").toUpperCase()}</strong></div>`;
+    detailHtml += `<div class="position-card-row"><span>Settlement</span><strong>${plPending ? "" : (card.outcome || "—").toUpperCase()}</strong></div>`;
   }
 
   if (plPending) {
-    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl is-pending" aria-label="Waiting for settlement"><span class="position-card-pl-spinner" aria-hidden="true"></span></strong></div>`;
+    detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl is-pending" aria-label="Waiting for settlement"><span class="position-card-pl-placeholder" aria-hidden="true"></span></strong></div>`;
   } else if (card.pl != null && Number.isFinite(card.pl)) {
     const plClass = card.pl > 0 ? "is-positive" : card.pl < 0 ? "is-negative" : "";
     detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl ${plClass}">${fmtUsdSigned(card.pl)}</strong></div>`;

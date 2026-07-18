@@ -3140,20 +3140,13 @@ body.is-row-resizing .panel-header-drag-handle {
   font-weight: 500;
 }
 
-.position-card-pl-spinner {
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid color-mix(in srgb, var(--muted) 35%, transparent);
-  border-top-color: var(--muted);
-  border-radius: 50%;
-  animation: position-card-pl-spin 0.7s linear infinite;
+.position-card-pl-placeholder {
+  display: inline-block;
+  width: 42px;
+  height: 12px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--muted) 25%, transparent);
   flex-shrink: 0;
-}
-
-@keyframes position-card-pl-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .log-panel {
