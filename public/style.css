@@ -3104,6 +3104,13 @@ body.is-row-resizing .panel-header-drag-handle {
   border-radius: 3px;
 }
 
+/* Waiting for Polymarket settlement — gray out the win/loss badge. */
+.position-card.is-pl-pending.is-win .position-card-status,
+.position-card.is-pl-pending.is-loss .position-card-status {
+  color: #fff;
+  background: var(--muted);
+}
+
 .position-card-row {
   display: flex;
   justify-content: space-between;
@@ -3141,10 +3148,6 @@ body.is-row-resizing .panel-header-drag-handle {
   border-radius: 50%;
   animation: position-card-pl-spin 0.7s linear infinite;
   flex-shrink: 0;
-}
-
-.position-card-pl-waiting {
-  letter-spacing: 0.01em;
 }
 
 @keyframes position-card-pl-spin {
