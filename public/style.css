@@ -2444,6 +2444,35 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
   background: rgba(255, 255, 255, 0.06);
 }
 
+/* Reset icon only for Market stats; other ranges show a passive money bag. */
+#schedule-week-reset .schedule-summary-money-icon {
+  display: none;
+}
+
+#schedule-week-reset.is-money-mode .schedule-summary-reset-icon {
+  display: none;
+}
+
+#schedule-week-reset.is-money-mode .schedule-summary-money-icon {
+  display: block;
+}
+
+#schedule-week-reset.is-money-mode,
+#schedule-week-reset.is-money-mode:hover {
+  color: var(--muted);
+  background: transparent;
+  cursor: default;
+  pointer-events: none;
+}
+
+#schedule-week-reset.is-money-mode.is-positive {
+  color: var(--up);
+}
+
+#schedule-week-reset.is-money-mode.is-negative {
+  color: var(--down);
+}
+
 .schedule-highlighted-clear-btn:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.06);

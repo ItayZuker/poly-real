@@ -455,6 +455,10 @@ export class LiveTradingService {
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
+  /** True across the complete manual BUY retry sequence. */
+  private manualBuyPending = false;
+  /** Successful manual BUY suppresses all phase buys until this window rolls. */
+  private manualBuyOverrideWindowKey: string | null = null;
   /** Resting GTD limit buy for the active non-optimize phase. */
   private restingBuy: RestingBuyOrder | null = null;
   private scheduleContext: ActiveScheduleContext | null = null;
@@ -1199,6 +1203,8 @@ export class LiveTradingService {
     this.quoteLocks = emptyQuoteLocks();
     this.markers = [];
     this.mirroredMarkerCount = 0;
+    this.manualBuyPending = false;
+    this.manualBuyOverrideWindowKey = null;
     this.sessionKey = sessionKey(state);
     if (prevKey) {
       void this.settleOpenCardsForWindow(prevKey).then((hadHits) => {
@@ -1374,6 +1380,7 @@ export class LiveTradingService {
     nowMs?: number,
   ): Promise<void> {
     if (this.orderInFlight) return;
+    if (this.manualBuyPending || this.manualBuyOverrideWindowKey === sessionKey(state)) return;
 
     const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
@@ -1663,7 +1670,7 @@ export class LiveTradingService {
   }
 
   canManualTrade(side: "up" | "down", leg: "buy" | "sell"): boolean {
-    if (leg === "buy") return !this.positions[side];
+    if (leg === "buy") return !this.positions.up && !this.positions.down;
     return Boolean(this.positions[side]);
   }
 
@@ -1671,7 +1678,7 @@ export class LiveTradingService {
     state: LiveWindowState,
     side: "up" | "down",
     leg: "buy" | "sell",
-  ): Promise<{ ok: boolean; error?: string }> {
+  ): Promise<{ ok: boolean; error?: string; fillShares?: number; fillPrice?: number }> {
     this.ensureWindow(state);
     if (!this.canExecuteOrders()) {
       return { ok: false, error: "Allow trade to place orders" };
@@ -1687,7 +1694,54 @@ export class LiveTradingService {
           : this.config.manualShares;
     const sizeUnit =
       leg === "sell" || this.config.autoTrade ? "shares" : this.config.manualOrderUnit;
-    return this.executeOrder(state, side, leg, size, "manual", sizeUnit);
+    if (leg === "buy") {
+      this.manualBuyPending = true;
+      this.autoEngine.setExternalBuyPaused(true);
+      await this.cancelRestingBuy("manual buy override");
+    }
+
+    try {
+      const result = await this.executeOrder(state, side, leg, size, "manual", sizeUnit);
+      if (result.ok) {
+        if (leg === "buy") {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const setup = this.resolveAutoSimSetup(state);
+          const phaseIdx = setup
+            ? phaseIndexForState(state, setup.phaseSplit, nowSec)
+            : 0;
+          if (
+            result.fillShares != null &&
+            result.fillPrice != null
+          ) {
+            this.autoEngine.adoptExternalBuy(
+              state,
+              side,
+              result.fillShares,
+              result.fillPrice,
+              phaseIdx,
+              nowSec,
+            );
+          }
+          this.autoEngine.suppressBuysForWindow();
+          this.manualBuyOverrideWindowKey = sessionKey(state);
+        } else {
+          this.autoEngine.clearExternalPosition(side);
+        }
+        return result;
+      }
+      logService.error(
+        "trading",
+        `${leg.toUpperCase()} ${side.toUpperCase()} failed (single attempt)`,
+      );
+      return result;
+    } finally {
+      if (leg === "buy") {
+        this.manualBuyPending = false;
+        if (this.manualBuyOverrideWindowKey !== sessionKey(state)) {
+          this.autoEngine.setExternalBuyPaused(false);
+        }
+      }
+    }
   }
 
   private getPhaseBuyShares(state: LiveWindowState): number | null {
@@ -2075,7 +2129,7 @@ export class LiveTradingService {
     source: "manual" | "auto",
     sizeUnit: "shares" | "usdc" = "shares",
     orderType: MarketOrderType = "FOK",
-  ): Promise<{ ok: boolean; error?: string }> {
+  ): Promise<{ ok: boolean; error?: string; fillShares?: number; fillPrice?: number }> {
     if (!isTradingExecutor()) {
       logNonExecutorSkipOnce();
       return { ok: false, error: "Trading executor not enabled in this process" };
@@ -2159,7 +2213,7 @@ export class LiveTradingService {
       }
 
       logService.info("trading", `${source} ${leg} ${side} filled`);
-      return { ok: true };
+      return { ok: true, fillShares, fillPrice };
     } finally {
       this.orderInFlight = false;
     }

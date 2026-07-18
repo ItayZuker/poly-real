@@ -221,8 +221,31 @@ export async function placeMarketOrder(
 
     if (resp?.success === false || resp?.errorMsg) {
       const err = String(resp?.errorMsg ?? resp?.error ?? "Order rejected");
+      const rejectedOrderId = String(resp?.orderID ?? resp?.orderId ?? "");
+      if (rejectedOrderId) {
+        await cancelOpenOrder(userId, rejectedOrderId);
+      }
       logService.error("trading", `${input.leg} ${input.side} failed: ${err}`);
       return { success: false, error: err };
+    }
+
+    const orderId = String(resp?.orderID ?? resp?.orderId ?? "");
+    const status = String(resp?.status ?? "").toLowerCase();
+    const takingAmount = num(resp?.takingAmount);
+    const makingAmount = num(resp?.makingAmount);
+    const reportedFill = num(resp?.sizeMatched) ?? num(resp?.filledSize);
+    const hasConfirmedFill =
+      status === "matched" ||
+      (takingAmount != null && takingAmount > 0 && makingAmount != null && makingAmount > 0) ||
+      (reportedFill != null && reportedFill > 0);
+
+    if (!hasConfirmedFill) {
+      if (orderId) {
+        await cancelOpenOrder(userId, orderId);
+      }
+      const err = `${clobOrderType} order not settled`;
+      logService.warn("trading", `${input.leg} ${input.side}: ${err}`);
+      return { success: false, orderId, status, error: err };
     }
 
     const fill = parseFillFromResponse(
@@ -248,14 +271,14 @@ export async function placeMarketOrder(
 
     return {
       success: true,
-      orderId: String(resp?.orderID ?? resp?.orderId ?? ""),
+      orderId,
       fillPrice: fill.fillPrice,
       fillShares: fill.fillShares,
       usdcAmount: fill.usdcAmount,
       tokenId: tokenID,
       conditionId: pair.conditionId,
       slug: pair.slug,
-      status: resp?.status != null ? String(resp.status) : undefined,
+      status: status || undefined,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

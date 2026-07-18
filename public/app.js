@@ -661,7 +661,9 @@ function canQuoteAction(trading, side, leg) {
   if (trading && trading.quotesEnabled === false) return false;
   if (!trading) return true;
   const pos = trading.positions?.[side];
-  if (leg === "buy") return !pos;
+  if (leg === "buy") {
+    return !trading.positions?.up && !trading.positions?.down;
+  }
   return Boolean(pos);
 }
 
@@ -699,26 +701,6 @@ function updateQuoteBoxes(state) {
 
 let quoteOrderInFlight = false;
 
-const ORDER_RETRY_BASE_MS = 500;
-const ORDER_RETRY_MAX_MS = 3000;
-
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isNonRetriableOrderError(message) {
-  const msg = String(message || "").toLowerCase();
-  if (!msg) return false;
-  return (
-    msg.includes("not configured") ||
-    msg.includes("start trading") ||
-    msg.includes("already holding") ||
-    msg.includes("no position") ||
-    msg.includes("already in progress") ||
-    msg.includes("invalid share")
-  );
-}
-
 async function postTradingOrder(side, leg) {
   const res = await fetch("/api/trading/order", {
     method: "POST",
@@ -739,53 +721,25 @@ async function clickQuoteBox(side, leg) {
   const box = boxId ? $(boxId) : null;
   if (box) box.classList.add("quote-box-pending");
 
-  let attempt = 0;
   try {
-    while (true) {
-      attempt += 1;
-      try {
-        const { ok, status, body } = await postTradingOrder(side, leg);
-        if (ok) {
-          if (attempt > 1) {
-            appendLogEntry({
-              level: "info",
-              source: "trading",
-              message: `${leg.toUpperCase()} ${side.toUpperCase()} filled after ${attempt} attempts`,
-            });
-          }
-          const winRes = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
-          if (winRes.ok) updateWindowUI(await winRes.json());
-          void loadWalletAccount();
-          return;
-        }
-
-        const errMsg = body.error || `Order failed (${status})`;
-        if (isNonRetriableOrderError(errMsg)) {
-          appendLogEntry({
-            level: "error",
-            source: "trading",
-            message: errMsg,
-          });
-          if (box) box.classList.remove("quote-box-pressing");
-          return;
-        }
-
-        appendLogEntry({
-          level: "warn",
-          source: "trading",
-          message: `${errMsg} — retrying ${leg} ${side} (attempt ${attempt})…`,
-        });
-      } catch (err) {
-        appendLogEntry({
-          level: "warn",
-          source: "trading",
-          message: `Order error: ${err.message || err} — retrying ${leg} ${side} (attempt ${attempt})…`,
-        });
-      }
-
-      const delay = Math.min(ORDER_RETRY_MAX_MS, ORDER_RETRY_BASE_MS * attempt);
-      await sleepMs(delay);
+    const { ok, status, body } = await postTradingOrder(side, leg);
+    if (!ok) {
+      appendLogEntry({
+        level: "error",
+        source: "trading",
+        message: body.error || `Order failed (${status})`,
+      });
+      return;
     }
+    const winRes = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
+    if (winRes.ok) updateWindowUI(await winRes.json());
+    void loadWalletAccount();
+  } catch (err) {
+    appendLogEntry({
+      level: "error",
+      source: "trading",
+      message: `Order error: ${err.message || err}`,
+    });
   } finally {
     quoteOrderInFlight = false;
     if (box) box.classList.remove("quote-box-pending");

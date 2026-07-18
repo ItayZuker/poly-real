@@ -165,6 +165,7 @@ export class SimulatorEngine {
   private pendingSell: PendingSell | null = null;
   private pendingPhaseAborts = new Map<number, number>();
   private abortedBuyPhases = new Set<number>();
+  private externalBuyPaused = false;
   private trackedPhaseIdx = -1;
   private phaseCrossingBaseline = 0;
   private lastPtbCrossings = 0;
@@ -198,6 +199,64 @@ export class SimulatorEngine {
 
   isPhaseBuyAborted(phaseIdx: number): boolean {
     return this.abortedBuyPhases.has(phaseIdx);
+  }
+
+  /** Temporarily pause all automatic buys without stopping an existing sell path. */
+  setExternalBuyPaused(paused: boolean): void {
+    this.externalBuyPaused = paused;
+    if (!paused) return;
+    this.buyWatch = null;
+    this.pendingBuy = null;
+    this.restingGtd = null;
+  }
+
+  /** Permanently suppress all three phase buy paths for the current window. */
+  suppressBuysForWindow(): void {
+    this.setExternalBuyPaused(false);
+    this.abortedBuyPhases.add(0);
+    this.abortedBuyPhases.add(1);
+    this.abortedBuyPhases.add(2);
+    this.buyWatch = null;
+    this.pendingBuy = null;
+    this.restingGtd = null;
+  }
+
+  /** Adopt a real manual fill so configured phase sell logic can manage it. */
+  adoptExternalBuy(
+    state: LiveWindowState,
+    side: Side,
+    shares: number,
+    price: number,
+    phaseIdx: number,
+    nowSec = Math.floor(Date.now() / 1000),
+  ): void {
+    this.resetRuntime(state);
+    this.buyWatch = null;
+    this.pendingBuy = null;
+    this.restingGtd = null;
+    this.pendingSell = null;
+    this.sellWatch = null;
+    this.position = {
+      side,
+      buyPrice: price,
+      buyT: nowSec,
+      phaseIndex: phaseIdx,
+      totalShares: shares,
+      remainingShares: shares,
+      buyCost: shares * price,
+      buyFees: 0,
+    };
+    this.boughtThisWindow = true;
+    this.captureWindowSnapshot(state);
+  }
+
+  /** Reflect a manual sell in the simulator so stale sell markers are not emitted. */
+  clearExternalPosition(side: Side): void {
+    if (this.position?.side !== side) return;
+    this.position = null;
+    this.sellWatch = null;
+    this.pendingSell = null;
+    this.boughtThisWindow = false;
   }
 
   /**
@@ -268,6 +327,7 @@ export class SimulatorEngine {
     this.pendingSell = null;
     this.pendingPhaseAborts.clear();
     this.abortedBuyPhases.clear();
+    this.externalBuyPaused = false;
     this.trackedPhaseIdx = -1;
     this.phaseCrossingBaseline = 0;
     this.lastPtbCrossings = 0;
@@ -723,7 +783,7 @@ export class SimulatorEngine {
     phaseIdx: number,
     state: LiveWindowState,
   ): void {
-    if (phase.buyOptimize || !phase.buyEnabled) return;
+    if (this.externalBuyPaused || phase.buyOptimize || !phase.buyEnabled) return;
     if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (this.position || this.restingGtd || this.pendingBuy) return;
 
@@ -819,7 +879,7 @@ export class SimulatorEngine {
     _setup: SimSetup,
     _simNowMs: number,
   ): void {
-    if (!phase.buyOptimize || !phase.buyEnabled) return;
+    if (this.externalBuyPaused || !phase.buyOptimize || !phase.buyEnabled) return;
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), _setup);
     if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (this.position || this.buyWatch || this.restingGtd || this.pendingBuy) return;

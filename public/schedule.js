@@ -879,6 +879,8 @@
   let headerSummaryRange = "week";
   let headerSummaryFetchTimer = null;
   let headerSummaryRequestId = 0;
+  /** Last successful Week / All time totals from session-memory. */
+  let headerMemoryTotals = { week: null, all: null };
   /** Full Live-range totals (every real outcome since reset), not just schedule cards. */
   let liveSessionTotals = { hasData: false, green: 0, red: 0, blue: 0, pnl: 0 };
   /** Local-only auto-engine hits (survive page refresh; cleared by reset). */
@@ -1001,7 +1003,8 @@
       renderHeaderSummaryTotals(liveSessionTotals);
     } else if (headerSummaryRange === "schedule") {
       renderHeaderSummaryTotals(scheduleTotals());
-    } else if (headerSummaryRange !== "demo") {
+    } else if (headerSummaryRange === "week" || headerSummaryRange === "all") {
+      // Soft-refresh archived ranges when live session changes (new settles).
       scheduleHeaderSummaryRefresh();
     }
   }
@@ -1026,7 +1029,6 @@
         placementStats.set(stats.placementId, stats);
       }
       applyCardStatsStates();
-      return;
     }
     if (sessionTotals) applyLiveSessionTotals(sessionTotals);
     else if (headerSummaryRange === "demo") {
@@ -1088,6 +1090,10 @@
       pnlEl.textContent = formatPlacementPnl(pnl, hasData);
       setPnlSignClass(pnlEl, pnl, hasData);
     }
+
+    // Money bag icon (non-Market ranges) tracks the P/L sign color.
+    const resetBtn = document.getElementById("schedule-week-reset");
+    if (resetBtn) setPnlSignClass(resetBtn, pnl, hasData);
   }
 
   async function fetchHeaderSummaryTotals() {
@@ -1108,6 +1114,10 @@
       return totals;
     }
 
+    // Show last Week/All snapshot immediately so range switches feel responsive.
+    const cached = headerMemoryTotals[mode];
+    if (cached) renderHeaderSummaryTotals(cached);
+
     const params = new URLSearchParams({ mode });
 
     try {
@@ -1125,23 +1135,26 @@
         blue: data.blue ?? 0,
         pnl: data.pnl ?? 0,
       });
+      headerMemoryTotals[mode] = totals;
       renderHeaderSummaryTotals(totals);
       return data;
     } catch (err) {
       console.warn("Header summary fetch failed:", err);
       if (requestId === headerSummaryRequestId) {
-        renderHeaderSummaryTotals(weekTotals());
+        const fallback = headerMemoryTotals[mode] ?? emptyTotals();
+        renderHeaderSummaryTotals(fallback);
       }
       return null;
     }
   }
 
   function scheduleHeaderSummaryRefresh() {
-    if (headerSummaryFetchTimer != null) window.clearTimeout(headerSummaryFetchTimer);
+    if (headerSummaryRange !== "week" && headerSummaryRange !== "all") return;
+    if (headerSummaryFetchTimer != null) return;
     headerSummaryFetchTimer = window.setTimeout(() => {
       headerSummaryFetchTimer = null;
       void fetchHeaderSummaryTotals();
-    }, 80);
+    }, 1500);
   }
 
   function updateWeekHeaderSummary() {
@@ -1157,7 +1170,29 @@
       renderHeaderSummaryTotals(scheduleTotals());
       return;
     }
-    scheduleHeaderSummaryRefresh();
+    // week / all: keep last fetched memory totals. Card-stat paints must not
+    // restart in-flight session-memory requests or the range switch never lands.
+    const cached = headerMemoryTotals[headerSummaryRange];
+    if (cached) renderHeaderSummaryTotals(cached);
+  }
+
+  /** Reset is a Market-only action; other ranges show a passive money bag icon. */
+  function syncHeaderSummaryResetButton() {
+    const btn = document.getElementById("schedule-week-reset");
+    if (!btn) return;
+    const isMarket = headerSummaryRange === "live";
+    btn.classList.toggle("is-money-mode", !isMarket);
+    // Prefer aria-disabled over the disabled attribute so P/L icon colors are not muted by UA styles.
+    btn.disabled = false;
+    btn.setAttribute("aria-disabled", isMarket ? "false" : "true");
+    btn.tabIndex = isMarket ? 0 : -1;
+    if (isMarket) {
+      btn.setAttribute("aria-label", "Reset live counts");
+      btn.title = "Reset live counts and Demo update (Week / All time keep history)";
+    } else {
+      btn.setAttribute("aria-label", "Stats totals");
+      btn.title = "Totals";
+    }
   }
 
   function syncHeaderSummaryControls(options = {}) {
@@ -1185,6 +1220,7 @@
     }
 
     select.value = headerSummaryRange;
+    syncHeaderSummaryResetButton();
   }
 
   function setHeaderSummaryRange(range) {
@@ -1249,8 +1285,10 @@
     if (!btn || btn.dataset.bound === "1") return;
     btn.dataset.bound = "1";
     btn.addEventListener("click", () => {
+      if (headerSummaryRange !== "live") return;
       void resetWeekCounts();
     });
+    syncHeaderSummaryResetButton();
   }
 
   function bindHeaderSummaryRange() {
@@ -1260,6 +1298,10 @@
       select.addEventListener("change", () => {
         headerSummaryRange = select.value;
         saveHeaderSummaryPrefs();
+        if (headerSummaryFetchTimer != null) {
+          window.clearTimeout(headerSummaryFetchTimer);
+          headerSummaryFetchTimer = null;
+        }
         syncHeaderSummaryControls();
         void fetchHeaderSummaryTotals();
       });
