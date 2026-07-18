@@ -79,73 +79,73 @@
     <header class="app-header controls">
       <h1 class="app-title">Poly Real</h1>
       <select id="market-select"></select>
-      <div id="countdown" class="countdown">—</div>
-      <div id="schedule-highlighted-summary" class="schedule-highlighted-summary" hidden>
-        <span class="schedule-summary-label">Custom</span>
-        <div class="schedule-highlighted-stats-dots"></div>
-        <span class="schedule-highlighted-pnl">—</span>
+      <div class="page-toggle" role="group" aria-label="Page">
+        <button type="button" class="page-toggle-btn is-active" data-page="simulator">Market</button>
+        <button type="button" class="page-toggle-btn" data-page="schedule">Schedule / Heatmap</button>
+      </div>
+      <div id="schedule-week-summary" class="schedule-week-summary" title="Trading session totals">
+        <label class="schedule-summary-range-label" for="schedule-summary-range">
+          <select id="schedule-summary-range" class="schedule-summary-range" aria-label="Stats range">
+            <option value="live">Market</option>
+            <option value="demo">Demo update</option>
+            <option value="schedule">Schedule</option>
+            <option value="week" selected>Week</option>
+            <option value="all">All time</option>
+          </select>
+          <svg class="schedule-summary-range-caret" viewBox="0 0 8 8" aria-hidden="true" focusable="false">
+            <path d="M1.5 2.75L4 5.25L6.5 2.75" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </label>
+        <div class="schedule-week-stats-dots"></div>
+        <span class="schedule-week-pnl">—</span>
         <button
           type="button"
-          id="schedule-highlighted-clear"
+          id="schedule-week-reset"
           class="schedule-summary-action-btn"
-          aria-label="Clear highlighted cards"
-          title="Clear highlights"
+          aria-label="Reset live counts"
+          title="Reset live counts and Demo update (Week / All time keep history)"
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h18" />
-            <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-            <path d="M10 11v6" />
-            <path d="M14 11v6" />
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M2.5 3.5v3h3M13.5 12.5v-3h-3"
+            />
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              d="M3.2 9.2A5 5 0 0 0 12.5 11M12.8 6.8A5 5 0 0 0 3.5 5"
+            />
           </svg>
         </button>
       </div>
       <div class="header-right">
-        <div id="schedule-week-summary" class="schedule-week-summary" title="Trading session totals">
-          <label class="schedule-summary-range-label" for="schedule-summary-range">
-            <select id="schedule-summary-range" class="schedule-summary-range" aria-label="Stats range">
-              <option value="live">Market</option>
-              <option value="demo">Demo update</option>
-              <option value="schedule">Schedule</option>
-              <option value="week" selected>Week</option>
-              <option value="all">All time</option>
-            </select>
-            <svg class="schedule-summary-range-caret" viewBox="0 0 8 8" aria-hidden="true" focusable="false">
-              <path d="M1.5 2.75L4 5.25L6.5 2.75" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </label>
-          <div class="schedule-week-stats-dots"></div>
-          <span class="schedule-week-pnl">—</span>
+        <div id="schedule-highlighted-summary" class="schedule-highlighted-summary" hidden>
+          <span class="schedule-summary-label">Custom</span>
+          <div class="schedule-highlighted-stats-dots"></div>
+          <span class="schedule-highlighted-pnl">—</span>
           <button
             type="button"
-            id="schedule-week-reset"
+            id="schedule-highlighted-clear"
             class="schedule-summary-action-btn"
-            aria-label="Reset live counts"
-            title="Reset live counts and Demo update (Week / All time keep history)"
+            aria-label="Clear highlighted cards"
+            title="Clear highlights"
           >
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <path
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M2.5 3.5v3h3M13.5 12.5v-3h-3"
-              />
-              <path
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                d="M3.2 9.2A5 5 0 0 0 12.5 11M12.8 6.8A5 5 0 0 0 3.5 5"
-              />
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18" />
+              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
             </svg>
           </button>
         </div>
-        <div class="page-toggle" role="group" aria-label="Page">
-          <button type="button" class="page-toggle-btn is-active" data-page="simulator">Market</button>
-          <button type="button" class="page-toggle-btn" data-page="schedule">Schedule / Heatmap</button>
-        </div>
+        <div id="countdown" class="countdown">—</div>
         <button
           type="button"
           id="settings-page-btn"
