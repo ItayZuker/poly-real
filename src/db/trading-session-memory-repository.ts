@@ -165,7 +165,18 @@ function sumEntries(entries: TradingSessionMemoryEntry[]): SessionMemoryTotals {
 
 function sumEvents(events: TradingStatEvent[]): SessionMemoryTotals {
   const totals = emptyTotals();
+  const tradeIdentities = new Set<string>();
   for (const event of events) {
+    // Provisional local settlement is retained so it can be confirmed after restart,
+    // but it must not affect real-trade Week / All-time statistics.
+    if (event.card?.confirmed === false) continue;
+    const card = event.card;
+    const identity =
+      card?.conditionId && card.asset && Number.isFinite(card.buyAt)
+        ? `${card.conditionId}|${card.asset}|${card.buyAt}|${event.status}`
+        : null;
+    if (identity && tradeIdentities.has(identity)) continue;
+    if (identity) tradeIdentities.add(identity);
     totals.sessionCount += 1;
     totals.green += event.green ?? 0;
     totals.red += event.red ?? 0;

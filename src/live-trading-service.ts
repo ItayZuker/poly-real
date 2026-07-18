@@ -133,6 +133,32 @@ function contributionFromCard(card: TradingPositionCard): SettledStatContributio
   return { green, red, blue, pnl: pl, status: card.status };
 }
 
+function confirmedContributionFromCard(
+  card: TradingPositionCard,
+): SettledStatContribution | null {
+  if (card.confirmed !== true) return null;
+  return contributionFromCard(card);
+}
+
+function isConfirmedStatEvent(event: TradingStatEvent): boolean {
+  // Older events may predate card snapshots. Only reject events explicitly saved as provisional.
+  return event.card?.confirmed !== false;
+}
+
+function cardStatIdentity(
+  card: Pick<
+    TradingPositionCard,
+    "conditionId" | "asset" | "buyAt" | "status"
+  >,
+): string | null {
+  if (!card.conditionId || !card.asset || !Number.isFinite(card.buyAt)) return null;
+  return `${card.conditionId}|${card.asset}|${card.buyAt}|${card.status}`;
+}
+
+function eventStatIdentity(event: TradingStatEvent): string | null {
+  return event.card ? cardStatIdentity(event.card) : null;
+}
+
 function totalTradeFees(card: Pick<TradingPositionCard, "buyFees" | "sellFees">): number {
   return (card.buyFees ?? 0) + (card.sellFees ?? 0);
 }
@@ -793,12 +819,16 @@ export class LiveTradingService {
     let pnl = 0;
     let hasData = false;
     const cardIdsFromRam = new Set<string>();
+    const tradeIdentities = new Set<string>();
 
     for (const card of this.positionCards) {
       if (card.placementId !== placementId) continue;
       if (card.status === "open") continue;
-      const contrib = contributionFromCard(card);
+      const contrib = confirmedContributionFromCard(card);
       if (!contrib) continue;
+      const identity = cardStatIdentity(card);
+      if (identity && tradeIdentities.has(identity)) continue;
+      if (identity) tradeIdentities.add(identity);
       cardIdsFromRam.add(card.id);
       hasData = true;
       green += contrib.green;
@@ -810,6 +840,10 @@ export class LiveTradingService {
     for (const event of this.liveStatLedger.values()) {
       if (event.placementId !== placementId) continue;
       if (cardIdsFromRam.has(event.cardId)) continue;
+      if (!isConfirmedStatEvent(event)) continue;
+      const identity = eventStatIdentity(event);
+      if (identity && tradeIdentities.has(identity)) continue;
+      if (identity) tradeIdentities.add(identity);
       hasData = true;
       green += event.green ?? 0;
       red += event.red ?? 0;
@@ -858,13 +892,17 @@ export class LiveTradingService {
     let blue = 0;
     let pnl = 0;
     const seen = new Set<string>();
+    const tradeIdentities = new Set<string>();
     let earliestBuyAt: number | null = null;
 
     for (const card of this.positionCards) {
       if (card.status === "open") continue;
       if (!this.countsTowardLiveHeader(cardSettledMs(card))) continue;
-      const contrib = contributionFromCard(card);
+      const contrib = confirmedContributionFromCard(card);
       if (!contrib) continue;
+      const identity = cardStatIdentity(card);
+      if (identity && tradeIdentities.has(identity)) continue;
+      if (identity) tradeIdentities.add(identity);
       seen.add(card.id);
       green += contrib.green;
       red += contrib.red;
@@ -878,6 +916,10 @@ export class LiveTradingService {
     for (const event of this.liveStatLedger.values()) {
       if (seen.has(event.cardId)) continue;
       if (!this.countsTowardLiveHeader(eventSettledMs(event))) continue;
+      if (!isConfirmedStatEvent(event)) continue;
+      const identity = eventStatIdentity(event);
+      if (identity && tradeIdentities.has(identity)) continue;
+      if (identity) tradeIdentities.add(identity);
       green += event.green ?? 0;
       red += event.red ?? 0;
       blue += event.blue ?? 0;
