@@ -47,6 +47,7 @@
           gapVsPtb: "opposite",
           buyStabilizeTicks: 1,
           buyStabilizeRange: 0,
+          buyAbortOnCrossing: 0,
           sellProfitCents: 20,
         },
         {
@@ -60,6 +61,7 @@
           gapVsPtb: "opposite",
           buyStabilizeTicks: 1,
           buyStabilizeRange: 0,
+          buyAbortOnCrossing: 0,
           sellProfitCents: 20,
         },
         {
@@ -73,6 +75,7 @@
           gapVsPtb: "opposite",
           buyStabilizeTicks: 1,
           buyStabilizeRange: 0,
+          buyAbortOnCrossing: 0,
           sellProfitCents: 20,
         },
       ],

@@ -302,6 +302,48 @@ export async function deletePlacementsBySetupId(userId: string, setupId: string)
   return result.deletedCount;
 }
 
+export async function deletePlacementsByDay(userId: string, dayInput: string): Promise<number> {
+  const day = normalizeDay(dayInput);
+  if (!day) throw new Error("Invalid schedule day");
+  const mongo = await getMongoClient();
+  const result = await mongo
+    .db(getMongoDbName())
+    .collection(COLLECTION)
+    .deleteMany({ userId, day });
+  return result.deletedCount;
+}
+
+/** Replace one day with twelve contiguous two-hour placements. */
+export async function replaceDayWithSetup(
+  userId: string,
+  dayInput: string,
+  setupIdInput: string,
+  titleInput: string,
+): Promise<SchedulePlacementListItem[]> {
+  const day = normalizeDay(dayInput);
+  const setupId = String(setupIdInput ?? "").trim();
+  const title = String(titleInput ?? "").trim();
+  if (!day || !setupId || !title) throw new Error("Invalid day fill fields");
+
+  const mongo = await getMongoClient();
+  const collection = mongo.db(getMongoDbName()).collection<SchedulePlacementRecord>(COLLECTION);
+  await collection.deleteMany({ userId, day });
+
+  const now = new Date();
+  const docs: SchedulePlacementRecord[] = Array.from({ length: 12 }, (_, index) => ({
+    userId,
+    setupId,
+    title,
+    day,
+    startHour: index * 2,
+    durationHours: 2,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  await collection.insertMany(docs);
+  return listSchedulePlacements(userId);
+}
+
 export async function updatePlacementTitlesBySetupId(
   userId: string,
   setupId: string,

@@ -138,6 +138,7 @@
       gapVsPtb: "opposite",
       buyStabilizeTicks: 1,
       buyStabilizeRange: 0,
+      buyAbortOnCrossing: 0,
       sellProfitCents: 20,
     };
   }
@@ -168,6 +169,10 @@
       gapVsPtb: raw.gapVsPtb === "with" ? "with" : "opposite",
       buyStabilizeTicks,
       buyStabilizeRange,
+      buyAbortOnCrossing: Math.max(
+        0,
+        Math.min(1000, Math.floor(Number(raw.buyAbortOnCrossing)) || 0),
+      ),
       sellProfitCents: Math.max(
         1,
         Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
@@ -229,14 +234,16 @@
     const select = document.getElementById("phase-gap-vs-ptb");
     const label = document.getElementById("phase-gap-vs-ptb-label");
     const buyEnabled = Boolean(document.getElementById("phase-buy-enabled")?.checked);
+    const optimize = Boolean(document.getElementById("phase-buy-optimize")?.checked);
     if (!select || !label) return;
 
     rememberGapVsPtbValue(select);
     const gapsInactive = gapValuesInactive();
-    const disabled = formLocked || !buyEnabled || gapsInactive;
+    const showNone = optimize || gapsInactive;
+    const disabled = formLocked || !buyEnabled || showNone;
     const noneOpt = select.querySelector('option[value="none"]');
 
-    if (gapsInactive) {
+    if (showNone) {
       if (noneOpt) noneOpt.hidden = false;
       select.value = "none";
       label.classList.add("is-none");
@@ -291,11 +298,29 @@
     rangeInput.disabled = locked || filterOff;
   }
 
+  function syncAbortOnCrossingLabel(formLocked = false) {
+    const input = document.getElementById("phase-abort-on-crossing");
+    const text = document.getElementById("phase-abort-on-crossing-text");
+    const label = document.getElementById("phase-abort-on-crossing-label");
+    if (!input || !text || !label) return;
+    const buyEnabled = Boolean(document.getElementById("phase-buy-enabled")?.checked);
+    const locked = formLocked === true || isPhaseModalReadOnly() || !buyEnabled;
+    let value = Math.floor(Number(input.value));
+    if (!Number.isFinite(value) || value < 0) value = 0;
+    value = Math.min(1000, value);
+    input.value = String(value);
+    const off = value === 0;
+    text.textContent = off ? "Abort on crossing off" : "Abort on crossing";
+    label.classList.toggle("is-none", off);
+    input.disabled = locked;
+  }
+
   function syncGapLabels(formLocked = false) {
     syncGapLabel("max");
     syncGapLabel("min");
     syncGapVsPtbControl(formLocked === true || isPhaseModalReadOnly());
     syncStabilizeLabels(formLocked);
+    syncAbortOnCrossingLabel(formLocked);
   }
 
   function syncFromState(state) {
@@ -794,6 +819,13 @@
         : Number.isFinite(stabilizeRange) && stabilizeRange >= 1
           ? Math.max(1, Math.min(99, stabilizeRange))
           : 1;
+    cfg.buyAbortOnCrossing = Math.max(
+      0,
+      Math.min(
+        1000,
+        Math.floor(Number(document.getElementById("phase-abort-on-crossing").value)) || 0,
+      ),
+    );
     cfg.sellProfitCents = Number(document.getElementById("phase-sell-profit").value) || 20;
     delete cfg.sellOptimize;
     setup.phases[phaseIdx] = normalizePhase(cfg);
@@ -846,6 +878,7 @@
     syncTriggerOrderTypeLabel();
     document.getElementById("phase-stabilize-ticks").value = cfg.buyStabilizeTicks ?? 1;
     document.getElementById("phase-stabilize-range").value = cfg.buyStabilizeRange ?? 0;
+    document.getElementById("phase-abort-on-crossing").value = cfg.buyAbortOnCrossing ?? 0;
     document.getElementById("phase-max-gap").value = cfg.maxGap ?? 0;
     document.getElementById("phase-min-gap").value = cfg.minGap ?? 0;
     const gapSelect = document.getElementById("phase-gap-vs-ptb");
@@ -884,6 +917,7 @@
     document.getElementById("phase-buy-trigger").disabled = locked || !enabled;
     document.getElementById("phase-buy-optimize").disabled = locked || !enabled;
     document.getElementById("phase-stabilize-ticks").disabled = locked || !enabled;
+    document.getElementById("phase-abort-on-crossing").disabled = locked || !enabled;
     document.getElementById("phase-max-gap").disabled = locked || !enabled;
     document.getElementById("phase-min-gap").disabled = locked || !enabled;
     document.getElementById("phase-sell-profit").disabled = locked;
@@ -1049,6 +1083,7 @@
     });
     document.getElementById("phase-buy-optimize").addEventListener("change", () => {
       syncTriggerOrderTypeLabel();
+      syncGapLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
     });
     document.getElementById("phase-max-gap").addEventListener("input", () => {
       syncGapLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
@@ -1058,6 +1093,11 @@
     });
     document.getElementById("phase-stabilize-ticks").addEventListener("input", () => {
       syncStabilizeLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
+    });
+    document.getElementById("phase-abort-on-crossing").addEventListener("input", () => {
+      syncAbortOnCrossingLabel(
+        isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked,
+      );
     });
     document.getElementById("phase-gap-vs-ptb").addEventListener("change", (e) => {
       rememberGapVsPtbValue(e.currentTarget);

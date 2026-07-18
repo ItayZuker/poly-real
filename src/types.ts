@@ -242,6 +242,11 @@ export interface SimPhaseConfig {
    * Forced to 0 when ticks ≤ 1; clamped 1–99 when ticks ≥ 2.
    */
   buyStabilizeRange: number;
+  /**
+   * Abort unfilled buys after this many PTB crossings in the current phase.
+   * 0 = off; clamped 0–1000.
+   */
+  buyAbortOnCrossing: number;
   /** Sell limit = buy + this many cents. */
   sellProfitCents: number;
 }

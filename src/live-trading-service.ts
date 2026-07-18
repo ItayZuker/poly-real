@@ -1379,8 +1379,9 @@ export class LiveTradingService {
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const key = sessionKey(state);
+    const crossingAborted = this.autoEngine.isPhaseBuyAborted(phaseIdx);
 
-    // Phase changed or optimize/disabled/stabilize — cancel prior resting buy.
+    // Phase changed or optimize/disabled/stabilize/crossing abort — cancel prior resting buy.
     if (this.restingBuy) {
       const r = this.restingBuy;
       const restingStabilizeOk = stabilizeAllowsBuyForSide(phase, state, r.side);
@@ -1389,7 +1390,8 @@ export class LiveTradingService {
         r.phaseIdx !== phaseIdx ||
         phase.buyOptimize ||
         !phase.buyEnabled ||
-        !restingStabilizeOk
+        !restingStabilizeOk ||
+        crossingAborted
       ) {
         await this.cancelRestingBuy(
           r.phaseIdx !== phaseIdx
@@ -1398,10 +1400,14 @@ export class LiveTradingService {
               ? "optimize on"
               : !phase.buyEnabled
                 ? "buy disabled"
-                : "stabilize filter",
+                : crossingAborted
+                  ? "PTB crossing abort"
+                  : "stabilize filter",
         );
       }
     }
+
+    if (crossingAborted) return;
 
     // Poll open resting order for fills.
     if (this.restingBuy) {
@@ -1483,6 +1489,10 @@ export class LiveTradingService {
     const nowSec = Math.floor((state.lastTickMs ?? Date.now()) / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+    if (this.autoEngine.isPhaseBuyAborted(phaseIdx)) {
+      await this.cancelRestingBuy("PTB crossing abort");
+      return;
+    }
     if (!stabilizeAllowsBuyForSide(phase, state, resting.side)) {
       await this.cancelRestingBuy("stabilize filter");
       return;

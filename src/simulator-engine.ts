@@ -36,6 +36,7 @@ interface Position {
 
 interface BuyWatch {
   side: Side;
+  phaseIdx: number;
   shares: number;
   triggerCents: number;
   optimize: boolean;
@@ -65,6 +66,7 @@ interface PendingBuy {
   side: Side;
   shares: number;
   executeAtMs: number;
+  phaseIdx: number;
   /** Max price for FAK re-check after latency (¢ → used as trigger). */
   triggerCents: number;
 }
@@ -161,6 +163,11 @@ export class SimulatorEngine {
   private sellWatch: SellWatch | null = null;
   private pendingBuy: PendingBuy | null = null;
   private pendingSell: PendingSell | null = null;
+  private pendingPhaseAborts = new Map<number, number>();
+  private abortedBuyPhases = new Set<number>();
+  private trackedPhaseIdx = -1;
+  private phaseCrossingBaseline = 0;
+  private lastPtbCrossings = 0;
   private markers: SimMarker[] = [];
   private boughtThisWindow = false;
   private windowTrade: WindowTradeResult | null = null;
@@ -187,6 +194,10 @@ export class SimulatorEngine {
 
   getLastWindow(): SimLastWindow | null {
     return this.getWindowResult();
+  }
+
+  isPhaseBuyAborted(phaseIdx: number): boolean {
+    return this.abortedBuyPhases.has(phaseIdx);
   }
 
   /**
@@ -255,6 +266,11 @@ export class SimulatorEngine {
     this.sellWatch = null;
     this.pendingBuy = null;
     this.pendingSell = null;
+    this.pendingPhaseAborts.clear();
+    this.abortedBuyPhases.clear();
+    this.trackedPhaseIdx = -1;
+    this.phaseCrossingBaseline = 0;
+    this.lastPtbCrossings = 0;
     this.markers = [];
     this.boughtThisWindow = false;
     this.windowTrade = null;
@@ -396,6 +412,7 @@ export class SimulatorEngine {
     setup: SimSetup,
     simNowMs: number,
     quote: DepthQuote,
+    phaseIdx: number,
   ): void {
     const latency = this.latencyMs(setup);
     if (latency <= 0) {
@@ -403,11 +420,65 @@ export class SimulatorEngine {
       return;
     }
     if (this.pendingBuy) return;
-    this.pendingBuy = { side, shares, executeAtMs: simNowMs + latency, triggerCents };
+    this.pendingBuy = { side, shares, executeAtMs: simNowMs + latency, phaseIdx, triggerCents };
     logService.info(
       "sim",
       `FAK buy scheduled: ${side} up to ${shares} sh, latency ${latency} ms (ask ${fmtCents(bestAskForSide(quote, side) ?? 0)})`,
     );
+  }
+
+  private executePhaseAbort(phaseIdx: number): void {
+    if (this.abortedBuyPhases.has(phaseIdx)) return;
+    this.abortedBuyPhases.add(phaseIdx);
+    if (this.restingGtd?.phaseIdx === phaseIdx) this.cancelRestingGtd("PTB crossing abort");
+    if (this.pendingBuy?.phaseIdx === phaseIdx) this.pendingBuy = null;
+    if (this.buyWatch?.phaseIdx === phaseIdx) this.buyWatch = null;
+    logService.info("sim", `Phase ${phaseIdx + 1} buys aborted after PTB crossing threshold`);
+  }
+
+  private syncPhaseCrossingAbort(
+    phase: SimSetup["phases"][number],
+    phaseIdx: number,
+    state: LiveWindowState,
+    setup: SimSetup,
+    simNowMs: number,
+  ): void {
+    const crossings = Math.max(0, Math.floor(state.ptbCrossings ?? 0));
+    if (this.trackedPhaseIdx !== phaseIdx) {
+      const firstObservedPhase = this.trackedPhaseIdx < 0;
+      this.trackedPhaseIdx = phaseIdx;
+      this.phaseCrossingBaseline = firstObservedPhase ? crossings : this.lastPtbCrossings;
+    }
+    this.lastPtbCrossings = crossings;
+
+    const threshold = Math.max(0, Math.min(1000, Math.floor(phase.buyAbortOnCrossing || 0)));
+    if (
+      threshold <= 0 ||
+      this.abortedBuyPhases.has(phaseIdx) ||
+      this.pendingPhaseAborts.has(phaseIdx) ||
+      crossings - this.phaseCrossingBaseline < threshold
+    ) {
+      return;
+    }
+
+    const latency = this.latencyMs(setup);
+    if (latency <= 0) {
+      this.executePhaseAbort(phaseIdx);
+      return;
+    }
+    this.pendingPhaseAborts.set(phaseIdx, simNowMs + latency);
+    logService.info(
+      "sim",
+      `Phase ${phaseIdx + 1} buy abort scheduled, latency ${latency} ms`,
+    );
+  }
+
+  private processPendingPhaseAbort(simNowMs: number): void {
+    for (const [phaseIdx, executeAtMs] of this.pendingPhaseAborts) {
+      if (simNowMs < executeAtMs) continue;
+      this.pendingPhaseAborts.delete(phaseIdx);
+      this.executePhaseAbort(phaseIdx);
+    }
   }
 
   private scheduleSell(
@@ -481,6 +552,7 @@ export class SimulatorEngine {
 
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
+    if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (!stabilizeAllowsBuyForSide(phase, state, side)) {
       logService.error("sim", `FAK buy skipped after latency (stabilize filter)`);
       return;
@@ -640,7 +712,9 @@ export class SimulatorEngine {
     const available = totalLevelSize(asksForSide(quote, side));
     const shares = Math.min(maxShares, available);
     if (!(shares > 0)) return;
-    this.scheduleFakBuy(side, shares, triggerCents, nowSec, state, setup, simNowMs, quote);
+    const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
+    if (this.isPhaseBuyAborted(phaseIdx)) return;
+    this.scheduleFakBuy(side, shares, triggerCents, nowSec, state, setup, simNowMs, quote, phaseIdx);
   }
 
   /** Place resting GTD at phase enter when gap allows (optimize off). */
@@ -650,6 +724,7 @@ export class SimulatorEngine {
     state: LiveWindowState,
   ): void {
     if (phase.buyOptimize || !phase.buyEnabled) return;
+    if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (this.position || this.restingGtd || this.pendingBuy) return;
 
     let chosenSide: Side | null = null;
@@ -745,6 +820,8 @@ export class SimulatorEngine {
     _simNowMs: number,
   ): void {
     if (!phase.buyOptimize || !phase.buyEnabled) return;
+    const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), _setup);
+    if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (this.position || this.buyWatch || this.restingGtd || this.pendingBuy) return;
 
     const shares = Math.max(1, phase.buyShares || 1);
@@ -763,6 +840,7 @@ export class SimulatorEngine {
 
       this.buyWatch = {
         side,
+        phaseIdx,
         shares,
         triggerCents,
         optimize: true,
@@ -794,6 +872,14 @@ export class SimulatorEngine {
     const askCents = priceToCents(ask);
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
+    if (w.phaseIdx !== phaseIdx) {
+      this.buyWatch = null;
+      return;
+    }
+    if (this.isPhaseBuyAborted(phaseIdx)) {
+      this.buyWatch = null;
+      return;
+    }
 
     if (askCents > w.triggerCents) {
       // Pause until trigger is touched again.
@@ -879,7 +965,9 @@ export class SimulatorEngine {
     const phase = setup.phases[phaseIdx];
     const quote = depthFromState(state);
 
+    this.syncPhaseCrossingAbort(phase, phaseIdx, state, setup, simNowMs);
     this.processPendingFills(state, setup, quote, nowSec, simNowMs);
+    this.processPendingPhaseAbort(simNowMs);
 
     // GTD resting: cancel on phase/optimize change, fill from book, place when active.
     this.syncRestingGtdForPhase(phase, phaseIdx, state);

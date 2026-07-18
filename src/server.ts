@@ -16,12 +16,14 @@ import { simulatorService } from "./simulator-service.js";
 import { logService } from "./log-service.js";
 import {
   deleteSchedulePlacement,
+  deletePlacementsByDay,
   deletePlacementsBySetupId,
   ensureSchedulePlacementsUserId,
   getSchedulePlacementById,
   insertSchedulePlacement,
   listSchedulePlacements,
   replaceAllPlacementsSetup,
+  replaceDayWithSetup,
   updatePlacementTitlesBySetupId,
   updateSchedulePlacement,
 } from "./db/schedule-placement-repository.js";
@@ -910,6 +912,48 @@ app.post("/api/schedule-placements", async (req, res) => {
       return;
     }
     res.status(500).json({ error: message });
+  }
+});
+
+app.delete("/api/schedule-placements/day/:day", async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const before = await listSchedulePlacements(userId);
+    const removed = before.filter((placement) => placement.day === req.params.day);
+    await deletePlacementsByDay(userId, req.params.day);
+    for (const placement of removed) tradingFor(req).forgetPlacement(placement._id);
+    await reconcileLiveScheduleInUseFlags(userId);
+    await tradingFor(req).refreshScheduleContext(true);
+    const placements = await listSchedulePlacements(userId);
+    await broadcastSchedulePlacements(userId);
+    pushWindowStateImmediate();
+    res.json(placements);
+  } catch (err) {
+    res.status(400).json({ error: String(err) });
+  }
+});
+
+app.post("/api/schedule-placements/replace-day", async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const setupId = String(req.body?.setupId ?? "");
+    const setup = await getTradingSetupById(userId, setupId);
+    if (!setup) {
+      res.status(404).json({ error: "Trading setup not found" });
+      return;
+    }
+    const before = await listSchedulePlacements(userId);
+    const day = String(req.body?.day ?? "");
+    const removed = before.filter((placement) => placement.day === day);
+    const placements = await replaceDayWithSetup(userId, day, setupId, setup.title);
+    for (const placement of removed) tradingFor(req).forgetPlacement(placement._id);
+    await reconcileLiveScheduleInUseFlags(userId);
+    await tradingFor(req).refreshScheduleContext(true);
+    await broadcastSchedulePlacements(userId);
+    pushWindowStateImmediate();
+    res.json(placements);
+  } catch (err) {
+    res.status(400).json({ error: String(err) });
   }
 });
 

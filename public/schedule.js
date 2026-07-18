@@ -27,6 +27,8 @@
   let resizeState = null;
   let openMenuId = null;
   let dropPreviewEl = null;
+  let headerFillPreviewDay = null;
+  const busyDays = new Set();
   let framedPlacementIds = new Set();
   /** Pinned UTC hour rows (0–23). */
   let pinnedUtcHours = new Set();
@@ -241,6 +243,127 @@
     }
   }
 
+  function clearHeaderFillPreview() {
+    document
+      .querySelectorAll(".schedule-day-header.is-fill-drop-target")
+      .forEach((header) => header.classList.remove("is-fill-drop-target"));
+    document.querySelectorAll(".schedule-column-fill-preview").forEach((el) => el.remove());
+    headerFillPreviewDay = null;
+  }
+
+  function showHeaderFillPreview(day, setupId) {
+    if (
+      headerFillPreviewDay === day &&
+      document.querySelector(`.schedule-day-column[data-day="${day}"] .schedule-column-fill-preview`)
+    ) {
+      return;
+    }
+    clearHeaderFillPreview();
+    const column = document.querySelector(`.schedule-day-column[data-day="${day}"]`);
+    const header = column?.querySelector(".schedule-day-header");
+    const layer = getPlacementLayer(day);
+    if (!header || !layer) return;
+    header.classList.add("is-fill-drop-target");
+    const preview = document.createElement("div");
+    preview.className = "schedule-column-fill-preview";
+    preview.style.setProperty(
+      "--setup-color",
+      window.getSetupColorById?.(setupId) || "#58a6ff",
+    );
+    for (let index = 0; index < 12; index += 1) {
+      const card = document.createElement("div");
+      card.className = "schedule-column-fill-preview-card";
+      card.style.top = `${(index / 12) * 100}%`;
+      card.style.height = `${100 / 12}%`;
+      preview.appendChild(card);
+    }
+    layer.appendChild(preview);
+    headerFillPreviewDay = day;
+  }
+
+  function setDayBusy(day, busy) {
+    const column = document.querySelector(`.schedule-day-column[data-day="${day}"]`);
+    const wrap = column?.querySelector(".schedule-day-body-wrap");
+    const button = column?.querySelector(".schedule-day-clear-button");
+    if (!column || !wrap) return;
+    column.classList.toggle("is-day-busy", busy);
+    if (button) button.disabled = busy;
+    wrap.querySelector(".schedule-day-loading")?.remove();
+    if (!busy) return;
+    const overlay = document.createElement("div");
+    overlay.className = "schedule-day-loading";
+    overlay.setAttribute("aria-label", "Updating day schedule");
+    overlay.innerHTML = '<span class="schedule-day-spinner" aria-hidden="true"></span>';
+    wrap.appendChild(overlay);
+  }
+
+  function discardDayPlacementState(day, previous) {
+    for (const placement of previous) {
+      framedPlacementIds.delete(placement._id);
+      removePlacementFromCache(placement._id);
+    }
+    updateDayHeaderPnls();
+    updateWeekHeaderSummary();
+  }
+
+  async function clearDay(day) {
+    if (busyDays.has(day)) return;
+    const previous = placements.filter((placement) => placement.day === day);
+    busyDays.add(day);
+    clearHeaderFillPreview();
+    setDayBusy(day, true);
+    try {
+      const res = await fetch(`/api/schedule-placements/day/${encodeURIComponent(day)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Clear day failed (${res.status})`);
+      }
+      placements = await res.json();
+      discardDayPlacementState(day, previous);
+      renderPlacements({ reloadStats: false });
+      window.updateSetupListPlacementCounts?.();
+    } catch (err) {
+      console.error(err);
+      await loadPlacements();
+    } finally {
+      busyDays.delete(day);
+      setDayBusy(day, false);
+    }
+  }
+
+  async function fillDay(day, setupId, title) {
+    if (busyDays.has(day)) return;
+    const previous = placements.filter((placement) => placement.day === day);
+    busyDays.add(day);
+    clearHeaderFillPreview();
+    setDayBusy(day, true);
+    try {
+      const res = await fetch("/api/schedule-placements/replace-day", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ day, setupId, title }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Fill day failed (${res.status})`);
+      }
+      placements = await res.json();
+      discardDayPlacementState(day, previous);
+      renderPlacements();
+      if (typeof window.refreshScheduleSetupsList === "function") {
+        void window.refreshScheduleSetupsList();
+      }
+    } catch (err) {
+      console.error(err);
+      await loadPlacements();
+    } finally {
+      busyDays.delete(day);
+      setDayBusy(day, false);
+    }
+  }
+
   function showDropPreview(day, startHour, durationHours, setupId) {
     clearDropPreview();
     const layer = getPlacementLayer(day);
@@ -275,6 +398,32 @@
         layer.dataset.day = day;
         body.parentElement.appendChild(layer);
       }
+    });
+  }
+
+  function initDayHeaderControls() {
+    document.querySelectorAll(".schedule-day-column").forEach((column) => {
+      const day = column.dataset.day;
+      const header = column.querySelector(".schedule-day-header");
+      const title = header?.querySelector(".schedule-day-title");
+      if (!day || !header || !title || header.querySelector(".schedule-day-clear-button")) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "schedule-day-clear-button";
+      button.setAttribute("aria-label", `Clear ${title.textContent || day}`);
+      button.title = `Clear ${title.textContent || day}`;
+      const trash = document.createElement("span");
+      trash.className = "schedule-day-clear-icon";
+      trash.setAttribute("aria-hidden", "true");
+      trash.innerHTML =
+        '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6 2.5h4l.5 2H5.5l.5-2ZM4.5 4.5l.6 9h5.8l.6-9M6.7 6.5v5M9.3 6.5v5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      button.append(trash, title);
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void clearDay(day);
+      });
+      header.insertBefore(button, header.firstChild);
     });
   }
 
@@ -1946,7 +2095,7 @@
     if (!isScheduleView()) return;
     if (e.button !== 0) return;
     e.preventDefault();
-    dragState = { setupId, title, preview: null };
+    dragState = { setupId, title, preview: null, headerDay: null };
     document.body.classList.add("is-schedule-dragging");
   }
 
@@ -1955,7 +2104,19 @@
     const el = document.elementFromPoint(clientX, clientY);
     const day = dayFromElement(el);
     clearDropPreview();
-    if (!day) return;
+    dragState.preview = null;
+    dragState.headerDay = null;
+    if (!day || busyDays.has(day)) {
+      clearHeaderFillPreview();
+      return;
+    }
+    const header = el?.closest?.(".schedule-day-header");
+    if (header) {
+      dragState.headerDay = day;
+      showHeaderFillPreview(day, dragState.setupId);
+      return;
+    }
+    clearHeaderFillPreview();
     const body = getDayBody(day);
     if (!body) return;
     const dropTime = startTimeFromPointer(body, clientY);
@@ -1969,17 +2130,24 @@
   }
 
   async function commitDrop() {
-    if (!dragState?.preview) {
+    if (!dragState?.preview && !dragState?.headerDay) {
       dragState = null;
       clearDropPreview();
+      clearHeaderFillPreview();
       document.body.classList.remove("is-schedule-dragging");
       return;
     }
 
-    const { setupId, title, preview } = dragState;
+    const { setupId, title, preview, headerDay } = dragState;
     dragState = null;
     clearDropPreview();
+    clearHeaderFillPreview();
     document.body.classList.remove("is-schedule-dragging");
+
+    if (headerDay) {
+      await fillDay(headerDay, setupId, title);
+      return;
+    }
 
     try {
       const res = await fetch("/api/schedule-placements", {
@@ -2025,6 +2193,7 @@
       if (dragState) {
         dragState = null;
         clearDropPreview();
+        clearHeaderFillPreview();
         document.body.classList.remove("is-schedule-dragging");
       }
       if (moveDragState) {
@@ -2092,6 +2261,7 @@
   function onViewChange() {
     closeMenus();
     clearDropPreview();
+    clearHeaderFillPreview();
     moveDragState = null;
     document.body.classList.remove("is-schedule-moving");
     // Do not re-render placements or setups — view switch is CSS-only.
@@ -2103,6 +2273,7 @@
     demoHitsStore = loadDemoHitsStore();
     loadHeaderSummaryPrefs();
     initPlacementLayers();
+    initDayHeaderControls();
     bindUtcRowHover();
     bindHighlightedSummaryClear();
     bindWeekSummaryReset();

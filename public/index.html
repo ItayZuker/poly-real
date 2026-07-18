@@ -687,13 +687,6 @@
             <span id="phase-buy-trigger-text">Trigger (¢) GTD</span>
             <input type="number" id="phase-buy-trigger" min="1" max="99" step="1" value="40" />
           </label>
-          <label class="modal-toggle" id="phase-buy-optimize-toggle">
-            <span>Optimize</span>
-            <span class="switch">
-              <input type="checkbox" id="phase-buy-optimize" />
-              <span class="switch-slider"></span>
-            </span>
-          </label>
           <label class="modal-field" id="phase-stabilize-ticks-label">
             <span id="phase-stabilize-ticks-text">Stabilize ticks off</span>
             <input type="number" id="phase-stabilize-ticks" min="1" max="500" step="1" value="1" />
@@ -701,6 +694,21 @@
           <label class="modal-field" id="phase-stabilize-range-label">
             <span id="phase-stabilize-range-text">Stabilize range (¢) off</span>
             <input type="number" id="phase-stabilize-range" min="1" max="99" step="1" value="0" disabled />
+          </label>
+          <label
+            class="modal-field is-none"
+            id="phase-abort-on-crossing-label"
+            title="0 = off. Abort unfilled buys when PTB crossings during this phase reach this count. Cancellation uses latency and may arrive after a fill."
+          >
+            <span id="phase-abort-on-crossing-text">Abort on crossing off</span>
+            <input type="number" id="phase-abort-on-crossing" min="0" max="1000" step="1" value="0" />
+          </label>
+          <label class="modal-toggle" id="phase-buy-optimize-toggle">
+            <span>Optimize</span>
+            <span class="switch">
+              <input type="checkbox" id="phase-buy-optimize" />
+              <span class="switch-slider"></span>
+            </span>
           </label>
           <label class="modal-field" id="phase-max-gap-label">
             <span id="phase-max-gap-text">Max gap ($) None</span>

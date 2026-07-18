@@ -16,6 +16,7 @@ export function defaultPhaseConfig(): SimPhaseConfig {
     gapVsPtb: "opposite",
     buyStabilizeTicks: 1,
     buyStabilizeRange: 0,
+    buyAbortOnCrossing: 0,
     sellProfitCents: 20,
   };
 }
@@ -72,6 +73,10 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     gapVsPtb: asGapVsPtb(raw.gapVsPtb, base.gapVsPtb),
     buyStabilizeTicks,
     buyStabilizeRange: asStabilizeRange(buyStabilizeTicks, raw.buyStabilizeRange),
+    buyAbortOnCrossing: Math.max(
+      0,
+      Math.min(1000, Math.floor(Number(raw.buyAbortOnCrossing)) || 0),
+    ),
     sellProfitCents: Math.max(
       1,
       Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
@@ -93,17 +98,23 @@ export function normalizeTradingPhaseSetup(setup: TradingPhaseSetup): TradingPha
   };
 }
 
-/** |asset−PTB| + direction filter. Returns false when PTB gap is required but missing. */
+/**
+ * Gap bounds always use |asset−PTB|. Direction applies only to GTD;
+ * optimize/FAK deliberately ignores it.
+ */
 export function gapAllowsBuy(
   side: "up" | "down",
   phase: SimPhaseConfig,
   assetGap: number | null | undefined,
 ): boolean {
-  if (assetGap == null || !Number.isFinite(assetGap)) return false;
+  if (assetGap == null || !Number.isFinite(assetGap)) {
+    return phase.buyOptimize && phase.minGap <= 0 && phase.maxGap <= 0;
+  }
 
   const abs = Math.abs(assetGap);
   if (phase.minGap > 0 && abs + 1e-9 < phase.minGap) return false;
   if (phase.maxGap > 0 && abs - 1e-9 > phase.maxGap) return false;
+  if (phase.buyOptimize) return true;
 
   const wantAbovePtb =
     side === "up" ? phase.gapVsPtb === "with" : phase.gapVsPtb === "opposite";
