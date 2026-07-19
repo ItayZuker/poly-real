@@ -488,6 +488,10 @@ export class LiveTradingService {
   private restingSell: RestingSellOrder | null = null;
   /** Serialize CLOB + Chainlink tick handlers for this user. */
   private tickQueue: Promise<void> = Promise.resolve();
+  /** Do not hit Polymarket positions API before this time (rate-limit / throttle). */
+  private onChainCheckNotBeforeMs = 0;
+  /** Exponential backoff after Data API 429s (ms). */
+  private onChainBackoffMs = 0;
   private scheduleContext: ActiveScheduleContext | null = null;
   private scheduleContextFetchedAt = 0;
   private activePhaseSetup: TradingPhaseSetup | null = null;
@@ -1236,6 +1240,8 @@ export class LiveTradingService {
     this.manualBuyPending = false;
     this.manualBuyOverrideWindowKey = null;
     this.buyBlockedWindowKey = null;
+    this.onChainCheckNotBeforeMs = 0;
+    this.onChainBackoffMs = 0;
     this.sessionKey = sessionKey(state);
     if (prevKey) {
       void this.settleOpenCardsForWindow(prevKey).then((hadHits) => {
@@ -1295,12 +1301,17 @@ export class LiveTradingService {
   private async adoptOnChainPositionIfAny(state: LiveWindowState): Promise<boolean> {
     if (this.positions.up || this.positions.down) return true;
     if (!isTradingExecutor()) return false;
+    const nowMs = Date.now();
+    if (nowMs < this.onChainCheckNotBeforeMs) return false;
+    // Throttle routine empty checks even when the API is healthy.
+    this.onChainCheckNotBeforeMs = nowMs + Math.max(5_000, this.onChainBackoffMs);
     try {
       const pair = await fetchCurrentUpDownMarket(state.series);
       const rows = await fetchUserPositions(this.userId, {
         conditionId: pair.conditionId,
         sizeThreshold: 0,
       });
+      this.onChainBackoffMs = 0;
       for (const side of SIDES_ORDER) {
         const tokenId = side === "up" ? pair.yesTokenId : pair.noTokenId;
         const match = findPosition(rows, {
@@ -1338,7 +1349,18 @@ export class LiveTradingService {
         return true;
       }
     } catch (err) {
-      logService.warn("trading", `On-chain position check failed: ${String(err)}`);
+      const message = String(err);
+      const isRateLimited = /\b429\b/.test(message) || /rate.?limit/i.test(message);
+      if (isRateLimited) {
+        this.onChainBackoffMs = Math.min(120_000, Math.max(15_000, this.onChainBackoffMs * 2 || 15_000));
+        this.onChainCheckNotBeforeMs = Date.now() + this.onChainBackoffMs;
+        logService.warn(
+          "trading",
+          `On-chain position check rate-limited; backing off ${Math.round(this.onChainBackoffMs / 1000)}s`,
+        );
+      } else {
+        logService.warn("trading", `On-chain position check failed: ${message}`);
+      }
     }
     return false;
   }
@@ -1399,8 +1421,11 @@ export class LiveTradingService {
   }
 
   async tick(state: LiveWindowState, nowMs?: number): Promise<void> {
-    const run = this.tickUnlocked(state, nowMs);
-    const queued = this.tickQueue.then(() => run, () => run);
+    // Defer tickUnlocked until the previous tick fully finishes — do not start it eagerly.
+    const queued = this.tickQueue.then(
+      () => this.tickUnlocked(state, nowMs),
+      () => this.tickUnlocked(state, nowMs),
+    );
     this.tickQueue = queued.then(
       () => undefined,
       () => undefined,
@@ -1584,6 +1609,9 @@ export class LiveTradingService {
     if (this.positions.up || this.positions.down) return;
     if (this.isBuyBlocked(state)) return;
     if (this.restingBuy) return;
+    // Avoid end-of-window spam: Polymarket rejects GTD expirations that are not
+    // sufficiently in the future relative to the live market clock.
+    if (state.windowEnd != null && nowSec >= state.windowEnd - 5) return;
 
     let chosenSide: "up" | "down" | null = null;
     for (const side of SIDES_ORDER) {
