@@ -75,6 +75,10 @@ function defaultTrading(): TradingConfig {
     startTrading: false,
     manualShares: 10,
     manualOrderUnit: "shares",
+    buyOverrideEnabled: false,
+    buyOverridePriceCents: 0,
+    buyOverrideShares: 0,
+    buyOverrideDirection: "with",
   };
 }
 
@@ -87,12 +91,22 @@ function normalizeTrading(raw: Partial<TradingConfig> | null | undefined): Tradi
     unit === "usdc"
       ? Math.max(0.01, Math.min(100000, Math.round((Number.isFinite(amountRaw) ? amountRaw : 10) * 100) / 100))
       : Math.max(1, Math.min(100000, Math.floor(Number.isFinite(amountRaw) ? amountRaw : 10) || 10));
+  const priceRaw = Number(raw.buyOverridePriceCents);
+  const sharesRaw = Number(raw.buyOverrideShares);
   const next: TradingConfig = {
     autoTrade: Boolean(raw.autoTrade),
     useSchedule: Boolean(raw.useSchedule),
     startTrading: Boolean(raw.startTrading),
     manualShares: amount,
     manualOrderUnit: unit,
+    buyOverrideEnabled: Boolean(raw.buyOverrideEnabled),
+    buyOverridePriceCents: Number.isFinite(priceRaw)
+      ? Math.max(0, Math.min(99, Math.floor(priceRaw)))
+      : 0,
+    buyOverrideShares: Number.isFinite(sharesRaw)
+      ? Math.max(0, Math.min(100000, Math.floor(sharesRaw)))
+      : 0,
+    buyOverrideDirection: raw.buyOverrideDirection === "opposite" ? "opposite" : "with",
   };
   if (!next.autoTrade) {
     next.useSchedule = false;

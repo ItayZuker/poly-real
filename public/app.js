@@ -1271,30 +1271,47 @@ function initLeftRowSplitter() {
   };
 
   const clampPrevDrag = (clientY) => {
-    const { colRect, walletHeaderH, tradeHeaderH, prevHeaderH } = getMetrics();
+    const { colRect, walletHeaderH, tradeHeaderH, prevHeaderH, logHeaderH } = getMetrics();
     // Positions can cover Trade content, but not Wallet or Trade headers.
     const tradeHeaderBottom = colRect.top + walletHeaderH + tradeHeaderH;
-    const logTop = anchorLogHeaderTop;
     const minPrevTop = tradeHeaderBottom;
-    const maxPrevTop = logTop - prevHeaderH;
+    // Dragging down past the Log header pushes it down, to the column bottom.
+    const maxPrevTop = colRect.bottom - prevHeaderH - logHeaderH;
     const prevTop = Math.max(minPrevTop, Math.min(clientY, maxPrevTop));
     const trade = prevTop - tradeHeaderBottom;
-    const prev = logTop - prevTop - prevHeaderH;
+    const prevBottom = prevTop + prevHeaderH;
+    if (prevBottom > anchorLogHeaderTop) {
+      // Touching the Log header — push it down and shrink the log content.
+      anchorLogHeaderTop = prevBottom;
+      anchorLogContent = Math.max(0, colRect.bottom - prevBottom - logHeaderH);
+      applyHeights(trade, 0, anchorLogContent);
+      return;
+    }
+    const prev = anchorLogHeaderTop - prevTop - prevHeaderH;
     applyHeights(trade, prev, anchorLogContent);
   };
 
   const clampLogDrag = (clientY) => {
-    const { colRect, logHeaderH } = getMetrics();
+    const { colRect, walletHeaderH, tradeHeaderH, prevHeaderH, logHeaderH } = getMetrics();
+    const tradeHeaderBottom = colRect.top + walletHeaderH + tradeHeaderH;
     const prevBottom = prevHeader.getBoundingClientRect().bottom;
+    // Dragging up past the Positions header pushes it up, down to the Trade header.
+    const minLogTop = tradeHeaderBottom + prevHeaderH;
     const maxLogTop = colRect.bottom - logHeaderH;
-    let logTop = Math.max(prevBottom, Math.min(clientY, maxLogTop));
+    let logTop = Math.max(minLogTop, Math.min(clientY, maxLogTop));
+    if (logTop < prevBottom) {
+      // Touching the Positions header — push it up and shrink the Trade content.
+      anchorTradeContent = Math.max(0, logTop - prevHeaderH - tradeHeaderBottom);
+      const log = Math.max(0, colRect.bottom - logTop - logHeaderH);
+      applyHeights(anchorTradeContent, 0, log);
+      return;
+    }
     let prev = logTop - prevBottom;
     if (prev < 1) {
       prev = 0;
       logTop = prevBottom;
     }
-    const logTopCol = logTop - colRect.top;
-    const log = Math.max(0, colRect.height - logTopCol - logHeaderH);
+    const log = Math.max(0, colRect.bottom - logTop - logHeaderH);
     applyHeights(anchorTradeContent, prev, log);
   };
 
@@ -2948,6 +2965,44 @@ function bindScheduleViewToggle() {
   showView(loadScheduleViewPref(), { persist: false });
 }
 
+function normalizeBuyOverridePriceCents(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(99, Math.floor(n)));
+}
+
+function normalizeBuyOverrideShares(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100000, Math.floor(n)));
+}
+
+function normalizeBuyOverrideDirection(value) {
+  return value === "opposite" ? "opposite" : "with";
+}
+
+function syncBuyOverrideControls(config) {
+  const enabledInput = $("buy-override-enabled");
+  const priceInput = $("buy-override-price");
+  const sharesInput = $("buy-override-shares");
+  const directionSelect = $("buy-override-direction");
+  const enabled = Boolean(config?.buyOverrideEnabled);
+
+  if (enabledInput) enabledInput.checked = enabled;
+  if (priceInput) {
+    priceInput.value = String(normalizeBuyOverridePriceCents(config?.buyOverridePriceCents));
+    priceInput.disabled = !enabled;
+  }
+  if (sharesInput) {
+    sharesInput.value = String(normalizeBuyOverrideShares(config?.buyOverrideShares));
+    sharesInput.disabled = !enabled;
+  }
+  if (directionSelect) {
+    directionSelect.value = normalizeBuyOverrideDirection(config?.buyOverrideDirection);
+    directionSelect.disabled = !enabled;
+  }
+}
+
 function syncWalletControls(config) {
   const autoTradeOn = Boolean(config?.autoTrade);
   const sharesField = $("wallet-shares-field");
@@ -2966,6 +3021,7 @@ function syncWalletControls(config) {
   if (sharesInput && Number.isFinite(config?.manualShares)) {
     sharesInput.value = String(config.manualShares);
   }
+  syncBuyOverrideControls(config);
   window.SchedulePlacements?.syncHeaderSummaryControls?.({
     allowTrade: Boolean(config?.startTrading),
   });
@@ -3008,6 +3064,10 @@ function readLocalTradingConfig() {
       startTrading: autoTrade && Boolean(parsed.startTrading),
       manualOrderUnit,
       manualShares: normalizeManualAmount(parsed.manualShares, manualOrderUnit),
+      buyOverrideEnabled: Boolean(parsed.buyOverrideEnabled),
+      buyOverridePriceCents: normalizeBuyOverridePriceCents(parsed.buyOverridePriceCents),
+      buyOverrideShares: normalizeBuyOverrideShares(parsed.buyOverrideShares),
+      buyOverrideDirection: normalizeBuyOverrideDirection(parsed.buyOverrideDirection),
     };
   } catch {
     return null;
@@ -3026,6 +3086,10 @@ function writeLocalTradingConfig(config) {
         startTrading: Boolean(config.startTrading),
         manualOrderUnit,
         manualShares: normalizeManualAmount(config.manualShares, manualOrderUnit),
+        buyOverrideEnabled: Boolean(config.buyOverrideEnabled),
+        buyOverridePriceCents: normalizeBuyOverridePriceCents(config.buyOverridePriceCents),
+        buyOverrideShares: normalizeBuyOverrideShares(config.buyOverrideShares),
+        buyOverrideDirection: normalizeBuyOverrideDirection(config.buyOverrideDirection),
       }),
     );
   } catch {
@@ -3067,6 +3131,10 @@ function buildTradingConfigPatch(overrides = {}) {
   const startTradingInput = $("start-trading");
   const sharesInput = $("manual-shares");
   const unitSelect = $("manual-order-unit");
+  const buyOverrideEnabled = $("buy-override-enabled");
+  const buyOverridePrice = $("buy-override-price");
+  const buyOverrideShares = $("buy-override-shares");
+  const buyOverrideDirection = $("buy-override-direction");
   const manualOrderUnit = unitSelect?.value === "usdc" ? "usdc" : "shares";
   return {
     autoTrade: Boolean(autoTradeInput?.checked),
@@ -3074,7 +3142,36 @@ function buildTradingConfigPatch(overrides = {}) {
     startTrading: Boolean(startTradingInput?.checked),
     manualOrderUnit,
     manualShares: normalizeManualAmount(sharesInput?.value, manualOrderUnit),
+    buyOverrideEnabled: Boolean(buyOverrideEnabled?.checked),
+    buyOverridePriceCents: normalizeBuyOverridePriceCents(buyOverridePrice?.value),
+    buyOverrideShares: normalizeBuyOverrideShares(buyOverrideShares?.value),
+    buyOverrideDirection: normalizeBuyOverrideDirection(buyOverrideDirection?.value),
     ...overrides,
+  };
+}
+
+function coalesceTradingConfig(serverConfig, localPatch) {
+  if (!serverConfig) return localPatch ?? null;
+  const patch = localPatch ?? {};
+  return {
+    ...patch,
+    ...serverConfig,
+    buyOverrideEnabled:
+      serverConfig.buyOverrideEnabled != null
+        ? Boolean(serverConfig.buyOverrideEnabled)
+        : Boolean(patch.buyOverrideEnabled),
+    buyOverridePriceCents:
+      serverConfig.buyOverridePriceCents != null
+        ? normalizeBuyOverridePriceCents(serverConfig.buyOverridePriceCents)
+        : normalizeBuyOverridePriceCents(patch.buyOverridePriceCents),
+    buyOverrideShares:
+      serverConfig.buyOverrideShares != null
+        ? normalizeBuyOverrideShares(serverConfig.buyOverrideShares)
+        : normalizeBuyOverrideShares(patch.buyOverrideShares),
+    buyOverrideDirection:
+      serverConfig.buyOverrideDirection != null
+        ? normalizeBuyOverrideDirection(serverConfig.buyOverrideDirection)
+        : normalizeBuyOverrideDirection(patch.buyOverrideDirection),
   };
 }
 
@@ -3084,7 +3181,35 @@ function bindTradeToggles() {
   const startTradingInput = $("start-trading");
   const sharesInput = $("manual-shares");
   const unitSelect = $("manual-order-unit");
+  const buyOverrideEnabled = $("buy-override-enabled");
+  const buyOverridePrice = $("buy-override-price");
+  const buyOverrideShares = $("buy-override-shares");
+  const buyOverrideDirection = $("buy-override-direction");
   if (!autoTradeInput || !useScheduleInput || !startTradingInput) return;
+
+  let buyOverrideSaveTimer = null;
+  const flushBuyOverrideSave = async () => {
+    if (buyOverrideSaveTimer != null) {
+      clearTimeout(buyOverrideSaveTimer);
+      buyOverrideSaveTimer = null;
+    }
+    if (buyOverridePrice) {
+      buyOverridePrice.value = String(normalizeBuyOverridePriceCents(buyOverridePrice.value));
+    }
+    if (buyOverrideShares) {
+      buyOverrideShares.value = String(normalizeBuyOverrideShares(buyOverrideShares.value));
+    }
+    const patch = buildTradingConfigPatch();
+    writeLocalTradingConfig(patch);
+    const config = await pushTradingConfig(patch);
+    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+  };
+  const scheduleBuyOverrideSave = () => {
+    if (buyOverrideSaveTimer != null) clearTimeout(buyOverrideSaveTimer);
+    buyOverrideSaveTimer = setTimeout(() => {
+      void flushBuyOverrideSave();
+    }, 300);
+  };
 
   const applyConfig = (config) => {
     if (!config) return;
@@ -3097,7 +3222,7 @@ function bindTradeToggles() {
   // Restore immediately from localStorage, then sync from server
   applyConfig(readLocalTradingConfig());
   void loadTradingConfig().then((config) => {
-    applyConfig(config);
+    applyConfig(coalesceTradingConfig(config, readLocalTradingConfig()) ?? config);
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
   });
@@ -3107,9 +3232,10 @@ function bindTradeToggles() {
       useScheduleInput.checked = false;
       startTradingInput.checked = false;
     }
-    writeLocalTradingConfig(buildTradingConfigPatch());
-    const config = await pushTradingConfig(buildTradingConfigPatch());
-    applyConfig(config ?? buildTradingConfigPatch());
+    const patch = buildTradingConfigPatch();
+    writeLocalTradingConfig(patch);
+    const config = await pushTradingConfig(patch);
+    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
@@ -3120,14 +3246,15 @@ function bindTradeToggles() {
   });
 
   useScheduleInput.addEventListener("change", async () => {
-    writeLocalTradingConfig(buildTradingConfigPatch());
+    const patch = buildTradingConfigPatch();
+    writeLocalTradingConfig(patch);
     const turningOff = !useScheduleInput.checked;
     // Snapshot schedule bars before config flips — otherwise SSE reloads the old sim setup.
     if (turningOff && windowState && window.Simulator?.keepDisplayedSetupAsEditable) {
       window.Simulator.keepDisplayedSetupAsEditable(windowState);
     }
-    const config = await pushTradingConfig(buildTradingConfigPatch());
-    applyConfig(config ?? buildTradingConfigPatch());
+    const config = await pushTradingConfig(patch);
+    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
     if (useScheduleInput.checked && windowState && window.Simulator?.forceSyncSetupFromState) {
       window.Simulator.forceSyncSetupFromState(windowState);
     } else if (turningOff && window.Simulator?.pushSetupToServer) {
@@ -3143,9 +3270,10 @@ function bindTradeToggles() {
   });
 
   startTradingInput.addEventListener("change", async () => {
-    writeLocalTradingConfig(buildTradingConfigPatch());
-    const config = await pushTradingConfig(buildTradingConfigPatch());
-    applyConfig(config ?? buildTradingConfigPatch());
+    const patch = buildTradingConfigPatch();
+    writeLocalTradingConfig(patch);
+    const config = await pushTradingConfig(patch);
+    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
       level: "info",
@@ -3160,8 +3288,9 @@ function bindTradeToggles() {
     syncManualAmountInputAttrs(manualOrderUnit);
     const manualShares = normalizeManualAmount(sharesInput?.value, manualOrderUnit);
     if (sharesInput) sharesInput.value = String(manualShares);
-    writeLocalTradingConfig(buildTradingConfigPatch({ manualOrderUnit, manualShares }));
-    await pushTradingConfig(buildTradingConfigPatch({ manualOrderUnit, manualShares }));
+    const patch = buildTradingConfigPatch({ manualOrderUnit, manualShares });
+    writeLocalTradingConfig(patch);
+    await pushTradingConfig(patch);
   });
 
   sharesInput?.addEventListener("change", async () => {
@@ -3169,8 +3298,46 @@ function bindTradeToggles() {
     const manualOrderUnit = unitSelect?.value === "usdc" ? "usdc" : "shares";
     const manualShares = normalizeManualAmount(sharesInput.value, manualOrderUnit);
     sharesInput.value = String(manualShares);
-    writeLocalTradingConfig(buildTradingConfigPatch({ manualShares, manualOrderUnit }));
-    await pushTradingConfig(buildTradingConfigPatch({ manualShares, manualOrderUnit }));
+    const patch = buildTradingConfigPatch({ manualShares, manualOrderUnit });
+    writeLocalTradingConfig(patch);
+    await pushTradingConfig(patch);
+  });
+
+  buyOverrideEnabled?.addEventListener("change", async () => {
+    const patch = buildTradingConfigPatch();
+    syncBuyOverrideControls(patch);
+    writeLocalTradingConfig(patch);
+    const config = await pushTradingConfig(patch);
+    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    appendLogEntry({
+      level: "info",
+      source: "client",
+      message: buyOverrideEnabled.checked
+        ? "Buy Override enabled"
+        : "Buy Override disabled",
+    });
+  });
+
+  buyOverrideDirection?.addEventListener("change", async () => {
+    const patch = buildTradingConfigPatch();
+    writeLocalTradingConfig(patch);
+    const config = await pushTradingConfig(patch);
+    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+  });
+
+  buyOverridePrice?.addEventListener("input", () => {
+    if (!buyOverrideEnabled?.checked) return;
+    scheduleBuyOverrideSave();
+  });
+  buyOverrideShares?.addEventListener("input", () => {
+    if (!buyOverrideEnabled?.checked) return;
+    scheduleBuyOverrideSave();
+  });
+  buyOverridePrice?.addEventListener("change", () => {
+    void flushBuyOverrideSave();
+  });
+  buyOverrideShares?.addEventListener("change", () => {
+    void flushBuyOverrideSave();
   });
 }
 

@@ -244,6 +244,15 @@
           <div class="trade-panel-header">
             <div class="panel-header-main">
               <h2 class="settings-panel-title">Trade</h2>
+              <div class="trade-panel-actions">
+                <label id="wallet-start-trading-field" class="wallet-control-field wallet-control-field--toggle" for="start-trading" hidden>
+                  <span class="wallet-control-label">Allow trade</span>
+                  <span class="switch">
+                    <input type="checkbox" id="start-trading" />
+                    <span class="switch-slider"></span>
+                  </span>
+                </label>
+              </div>
             </div>
           </div>
           <div id="trade-body" class="trade-panel-body">
@@ -282,13 +291,58 @@
                     <span class="switch-slider"></span>
                   </span>
                 </label>
-                <label id="wallet-start-trading-field" class="wallet-control-field wallet-control-field--toggle" for="start-trading" hidden>
-                  <span class="wallet-control-label">Allow trade</span>
-                  <span class="switch">
-                    <input type="checkbox" id="start-trading" />
-                    <span class="switch-slider"></span>
-                  </span>
-                </label>
+                <div id="wallet-buy-override-field" class="wallet-control-field wallet-control-field--buy-override">
+                  <label class="buy-override-toggle" for="buy-override-enabled">
+                    <span class="wallet-control-label">Buy Override</span>
+                    <span class="switch">
+                      <input type="checkbox" id="buy-override-enabled" />
+                      <span class="switch-slider"></span>
+                    </span>
+                  </label>
+                  <div class="buy-override-params">
+                    <span class="buy-override-param">
+                      At
+                      <input
+                        type="number"
+                        id="buy-override-price"
+                        class="buy-override-price-input"
+                        min="0"
+                        max="99"
+                        step="1"
+                        value="0"
+                        disabled
+                        aria-label="Buy override price in cents"
+                      />
+                      ¢
+                    </span>
+                    <span class="buy-override-param">
+                      <input
+                        type="number"
+                        id="buy-override-shares"
+                        class="buy-override-shares-input"
+                        min="0"
+                        max="100000"
+                        step="1"
+                        value="0"
+                        disabled
+                        aria-label="Buy override shares"
+                      />
+                      shares
+                    </span>
+                    <span class="buy-override-param">
+                      <select
+                        id="buy-override-direction"
+                        class="buy-override-direction"
+                        disabled
+                        aria-label="Buy override direction vs PTB"
+                      >
+                        <option value="with">With</option>
+                        <option value="opposite">Opposite</option>
+                      </select>
+                      PTB
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

@@ -371,6 +371,17 @@ export interface TradingConfig {
   /** Manual buy size (share count or USDC, depending on manualOrderUnit). */
   manualShares: number;
   manualOrderUnit: "shares" | "usdc";
+  /**
+   * Highest-priority resting buy. Any fill cancels phase activity and holds
+   * to settlement (no sell). Inactive while disabled or price/shares are 0.
+   */
+  buyOverrideEnabled: boolean;
+  /** Limit price in cents (0 = inert; live placement uses 1–99). */
+  buyOverridePriceCents: number;
+  /** Share size (0 = inert). */
+  buyOverrideShares: number;
+  /** Side relative to PTB: with = above→UP / below→DOWN; opposite flips. */
+  buyOverrideDirection: "with" | "opposite";
 }
 
 export interface LiveSidePosition {

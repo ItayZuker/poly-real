@@ -104,6 +104,20 @@ interface RestingSellOrder {
   cardId?: string;
 }
 
+/** Highest-priority resting buy that holds to settlement on any fill. */
+interface OverrideRestingBuy {
+  orderId: string;
+  side: "up" | "down";
+  sessionKey: string;
+  shares: number;
+  limitPrice: number;
+  sizeMatched: number;
+  tokenId?: string;
+  conditionId?: string;
+  slug?: string;
+  cardId?: string;
+}
+
 type SettledStatContribution = {
   green: number;
   red: number;
@@ -415,6 +429,10 @@ function defaultTradingConfig(): TradingConfig {
     startTrading: false,
     manualShares: 10,
     manualOrderUnit: "shares",
+    buyOverrideEnabled: false,
+    buyOverridePriceCents: 0,
+    buyOverrideShares: 0,
+    buyOverrideDirection: "with",
   };
 }
 
@@ -427,12 +445,22 @@ function normalizeTradingConfig(raw: Partial<TradingConfig> | null | undefined):
     unit === "usdc"
       ? Math.max(0.01, Math.min(100000, Math.round((Number.isFinite(amountRaw) ? amountRaw : 10) * 100) / 100))
       : Math.max(1, Math.min(100000, Math.floor(Number.isFinite(amountRaw) ? amountRaw : 10) || 10));
+  const priceRaw = Number(raw.buyOverridePriceCents);
+  const sharesRaw = Number(raw.buyOverrideShares);
   const next: TradingConfig = {
     autoTrade: Boolean(raw.autoTrade),
     useSchedule: Boolean(raw.useSchedule),
     startTrading: Boolean(raw.startTrading),
     manualShares: amount,
     manualOrderUnit: unit,
+    buyOverrideEnabled: Boolean(raw.buyOverrideEnabled),
+    buyOverridePriceCents: Number.isFinite(priceRaw)
+      ? Math.max(0, Math.min(99, Math.floor(priceRaw)))
+      : 0,
+    buyOverrideShares: Number.isFinite(sharesRaw)
+      ? Math.max(0, Math.min(100000, Math.floor(sharesRaw)))
+      : 0,
+    buyOverrideDirection: raw.buyOverrideDirection === "opposite" ? "opposite" : "with",
   };
   if (!next.autoTrade) {
     next.useSchedule = false;
@@ -486,6 +514,10 @@ export class LiveTradingService {
   private restingBuy: RestingBuyOrder | null = null;
   /** Resting GTD maker sell for the open auto/manual-managed position. */
   private restingSell: RestingSellOrder | null = null;
+  /** Highest-priority resting buy override (competes with phase buys). */
+  private overrideRestingBuy: OverrideRestingBuy | null = null;
+  /** Window key where override fill owns the position (hold to settlement, no sell). */
+  private overrideHoldWindowKey: string | null = null;
   /** Serialize CLOB + Chainlink tick handlers for this user. */
   private tickQueue: Promise<void> = Promise.resolve();
   /** Do not hit Polymarket positions API before this time (rate-limit / throttle). */
@@ -790,6 +822,7 @@ export class LiveTradingService {
   setConfig(patch: Partial<TradingConfig>): TradingConfig {
     const wasLive =
       this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
+    const wasOverrideActive = this.isBuyOverrideConfigActive();
     if (patch.autoTrade != null) this.config.autoTrade = Boolean(patch.autoTrade);
     if (patch.useSchedule != null) this.config.useSchedule = Boolean(patch.useSchedule);
     if (patch.startTrading != null) this.config.startTrading = Boolean(patch.startTrading);
@@ -810,6 +843,24 @@ export class LiveTradingService {
         );
       }
     }
+    if (patch.buyOverrideEnabled != null) {
+      this.config.buyOverrideEnabled = Boolean(patch.buyOverrideEnabled);
+    }
+    if (patch.buyOverridePriceCents != null) {
+      const price = Number(patch.buyOverridePriceCents);
+      this.config.buyOverridePriceCents = Number.isFinite(price)
+        ? Math.max(0, Math.min(99, Math.floor(price)))
+        : 0;
+    }
+    if (patch.buyOverrideShares != null) {
+      const shares = Number(patch.buyOverrideShares);
+      this.config.buyOverrideShares = Number.isFinite(shares)
+        ? Math.max(0, Math.min(100000, Math.floor(shares)))
+        : 0;
+    }
+    if (patch.buyOverrideDirection === "with" || patch.buyOverrideDirection === "opposite") {
+      this.config.buyOverrideDirection = patch.buyOverrideDirection;
+    }
     // Re-normalize amount if unit changed after amount in the same patch
     if (patch.manualOrderUnit != null && patch.manualShares == null) {
       this.config = normalizeTradingConfig(this.config);
@@ -823,6 +874,9 @@ export class LiveTradingService {
       this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
     if (isLive && (!wasLive || patch.startTrading === true || patch.useSchedule === true)) {
       void this.ensureCollectionStarted().then(() => this.refreshScheduleContext(true));
+    }
+    if (wasOverrideActive && !this.isBuyOverrideConfigActive() && this.overrideRestingBuy) {
+      void this.cancelOverrideRestingBuy("override disabled");
     }
     return this.getConfig();
   }
@@ -1227,11 +1281,15 @@ export class LiveTradingService {
     const prevKey = this.sessionKey;
     const prevResting = this.restingBuy;
     const prevRestingSell = this.restingSell;
+    const prevOverride = this.overrideRestingBuy;
     this.restingBuy = null;
     this.restingSell = null;
+    this.overrideRestingBuy = null;
+    this.overrideHoldWindowKey = null;
     if (isTradingExecutor()) {
       if (prevResting?.orderId) void cancelOpenOrder(this.userId, prevResting.orderId);
       if (prevRestingSell?.orderId) void cancelOpenOrder(this.userId, prevRestingSell.orderId);
+      if (prevOverride?.orderId) void cancelOpenOrder(this.userId, prevOverride.orderId);
     }
     this.positions = { up: null, down: null };
     this.quoteLocks = emptyQuoteLocks();
@@ -1440,12 +1498,16 @@ export class LiveTradingService {
     this.rememberSettlementPrices(state);
     await this.refreshScheduleContext(windowRolled);
 
-    if (!this.config.autoTrade) return;
+    if (!this.config.autoTrade) {
+      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("autoTrade off");
+      return;
+    }
 
     const autoSetup = this.resolveAutoSimSetup(state);
     if (!autoSetup) {
       // Still commit the prior window's demo result when leaving a schedule slot.
       this.autoEngine.rollWindowIfNeeded(state);
+      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("no active setup");
       return;
     }
 
@@ -1457,9 +1519,18 @@ export class LiveTradingService {
     const currentCount = this.autoEngine.getMarkers().filter((m) => m.windowKey === key).length;
 
     if (this.isLiveArmed()) {
+      await this.manageBuyOverride(state, nowMs);
+      if (this.isOverrideHoldActive(state)) {
+        if (this.restingBuy) await this.cancelRestingBuy("buy override hold");
+        if (this.restingSell) await this.cancelRestingSell("buy override hold");
+        this.mirroredMarkerCount = currentCount;
+        return;
+      }
       await this.mirrorNewSimMarkers(state, autoSetup, prevMarkerCount);
       await this.manageRestingGtdBuys(state, autoSetup, nowMs);
-      await this.manageRestingGtdSells(state, autoSetup, nowMs);
+      if (!this.isOverrideHoldActive(state)) {
+        await this.manageRestingGtdSells(state, autoSetup, nowMs);
+      }
     } else {
       this.mirroredMarkerCount = currentCount;
       if (this.restingBuy && !this.config.startTrading) {
@@ -1467,6 +1538,9 @@ export class LiveTradingService {
       }
       if (this.restingSell && !this.config.startTrading) {
         await this.cancelRestingSell("startTrading off");
+      }
+      if (this.overrideRestingBuy) {
+        await this.cancelOverrideRestingBuy("startTrading off");
       }
     }
   }
@@ -1547,6 +1621,214 @@ export class LiveTradingService {
     logService.info("trading", `Cancel resting GTD sell (${reason})`);
     if (!isTradingExecutor()) return;
     await cancelOpenOrder(this.userId, resting.orderId);
+  }
+
+  private isBuyOverrideConfigActive(): boolean {
+    return (
+      this.config.buyOverrideEnabled &&
+      this.config.buyOverridePriceCents >= 1 &&
+      this.config.buyOverridePriceCents <= 99 &&
+      this.config.buyOverrideShares >= 1
+    );
+  }
+
+  private isOverrideHoldActive(state: LiveWindowState): boolean {
+    return this.overrideHoldWindowKey === sessionKey(state);
+  }
+
+  private resolveBuyOverrideSide(state: LiveWindowState): "up" | "down" | null {
+    const gap = state.assetGap;
+    if (gap == null || !Number.isFinite(gap)) return null;
+    const withPtb = this.config.buyOverrideDirection !== "opposite";
+    for (const side of SIDES_ORDER) {
+      const wantAbovePtb = side === "up" ? withPtb : !withPtb;
+      if (wantAbovePtb ? gap >= 0 : gap <= 0) return side;
+    }
+    return null;
+  }
+
+  private async cancelOverrideRestingBuy(reason: string): Promise<void> {
+    const resting = this.overrideRestingBuy;
+    if (!resting) return;
+    this.overrideRestingBuy = null;
+    logService.info("trading", `Cancel buy override GTD (${reason})`);
+    if (!isTradingExecutor()) return;
+    await cancelOpenOrder(this.userId, resting.orderId);
+  }
+
+  private async onBuyOverrideFill(
+    state: LiveWindowState,
+    resting: OverrideRestingBuy,
+    fillShares: number,
+    fillPrice: number,
+    tokenId: string | undefined,
+    conditionId: string | undefined,
+  ): Promise<void> {
+    logService.info(
+      "trading",
+      `Buy override filled ${fillShares} ${resting.side.toUpperCase()} @ ${(fillPrice * 100).toFixed(1)}¢ — holding to settlement`,
+    );
+    this.overrideHoldWindowKey = sessionKey(state);
+    this.overrideRestingBuy = null;
+    this.autoEngine.suppressBuysForWindow();
+    this.autoEngine.suppressSellsForWindow();
+    this.blockFurtherBuys(state, "buy override fill");
+    if (isTradingExecutor()) {
+      await cancelOpenOrder(this.userId, resting.orderId);
+    }
+    await this.cancelRestingBuy("buy override fill");
+    await this.cancelRestingSell("buy override fill");
+    await this.recordBuyFill(
+      state,
+      resting.side,
+      fillShares,
+      fillPrice,
+      fillShares * fillPrice,
+      tokenId ?? resting.tokenId,
+      conditionId ?? resting.conditionId,
+      resting.slug,
+      "auto",
+      resting.cardId,
+      undefined,
+      { holdToSettlement: true },
+    );
+  }
+
+  private async pollOverrideRestingBuy(state: LiveWindowState): Promise<void> {
+    const resting = this.overrideRestingBuy;
+    if (!resting) return;
+
+    const snap = await fetchOpenOrder(this.userId, resting.orderId);
+    if (!snap) return;
+
+    const matched = Math.max(0, snap.sizeMatched);
+    if (matched > resting.sizeMatched + 1e-9) {
+      const delta = matched - resting.sizeMatched;
+      const fillPrice = snap.price > 0 ? snap.price : resting.limitPrice;
+      await this.onBuyOverrideFill(
+        state,
+        resting,
+        delta,
+        fillPrice,
+        resting.tokenId ?? snap.assetId,
+        resting.conditionId ?? snap.market,
+      );
+      return;
+    }
+
+    const status = snap.status.toLowerCase();
+    if (status === "live" || status === "delayed") return;
+
+    this.overrideRestingBuy = null;
+    this.notify();
+  }
+
+  private async manageBuyOverride(state: LiveWindowState, nowMs?: number): Promise<void> {
+    if (this.orderInFlight) return;
+
+    if (!this.isBuyOverrideConfigActive()) {
+      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("override inactive");
+      return;
+    }
+
+    if (this.isOverrideHoldActive(state)) return;
+
+    if (
+      this.positions.up ||
+      this.positions.down ||
+      this.isBuyBlocked(state) ||
+      this.manualBuyPending
+    ) {
+      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("position exists");
+      return;
+    }
+
+    const key = sessionKey(state);
+    const side = this.resolveBuyOverrideSide(state);
+    const limitPrice = centsToPrice(this.config.buyOverridePriceCents);
+    const shares = Math.max(1, Math.floor(this.config.buyOverrideShares));
+    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
+
+    if (this.overrideRestingBuy) {
+      const resting = this.overrideRestingBuy;
+      const stale =
+        !side ||
+        resting.sessionKey !== key ||
+        resting.side !== side ||
+        Math.abs(resting.limitPrice - limitPrice) > 1e-9 ||
+        resting.shares !== shares;
+      if (stale) {
+        await this.cancelOverrideRestingBuy(
+          !side ? "no PTB side" : resting.side !== side ? "PTB side change" : "override params change",
+        );
+      } else {
+        await this.pollOverrideRestingBuy(state);
+        if (this.overrideRestingBuy || this.isOverrideHoldActive(state)) return;
+      }
+    }
+
+    if (this.positions.up || this.positions.down || this.isBuyBlocked(state)) return;
+    if (!side) return;
+    if (this.overrideRestingBuy) return;
+    if (state.windowEnd != null && nowSec >= state.windowEnd - 5) return;
+
+    this.orderInFlight = true;
+    try {
+      const result = await placeLimitGtdBuy(this.userId, {
+        series: state.series,
+        side,
+        size: shares,
+        price: limitPrice,
+        expirationSec: gtdExpirationUnix(state.windowEnd ?? nowSec + 300, nowSec),
+        state,
+      });
+      if (!result.success || !result.orderId) {
+        if (result.error) logService.warn("trading", `Buy override GTD place failed: ${result.error}`);
+        return;
+      }
+
+      if (result.fillShares != null && result.fillPrice != null && result.fillShares > 0) {
+        const resting: OverrideRestingBuy = {
+          orderId: result.orderId,
+          side,
+          sessionKey: key,
+          shares,
+          limitPrice,
+          sizeMatched: 0,
+          tokenId: result.tokenId,
+          conditionId: result.conditionId,
+          slug: result.slug,
+        };
+        await this.onBuyOverrideFill(
+          state,
+          resting,
+          result.fillShares,
+          result.fillPrice,
+          result.tokenId,
+          result.conditionId,
+        );
+        return;
+      }
+
+      this.overrideRestingBuy = {
+        orderId: result.orderId,
+        side,
+        sessionKey: key,
+        shares,
+        limitPrice,
+        sizeMatched: 0,
+        tokenId: result.tokenId,
+        conditionId: result.conditionId,
+        slug: result.slug,
+      };
+      logService.info(
+        "trading",
+        `Buy override resting ${shares} ${side.toUpperCase()} @ ${(limitPrice * 100).toFixed(0)}¢`,
+      );
+      this.notify();
+    } finally {
+      this.orderInFlight = false;
+    }
   }
 
   private async manageRestingGtdBuys(
@@ -1758,6 +2040,10 @@ export class LiveTradingService {
     nowMs?: number,
   ): Promise<void> {
     if (this.orderInFlight) return;
+    if (this.isOverrideHoldActive(state)) {
+      if (this.restingSell) await this.cancelRestingSell("buy override hold");
+      return;
+    }
     const side = this.positions.up ? "up" : this.positions.down ? "down" : null;
     if (!side) {
       if (this.restingSell) await this.cancelRestingSell("no position");
@@ -1778,6 +2064,7 @@ export class LiveTradingService {
     nowMs?: number,
   ): Promise<void> {
     if (!this.isLiveArmed()) return;
+    if (this.isOverrideHoldActive(state)) return;
     const pos = this.positions[side];
     if (!pos || pos.shares <= 0) return;
 
@@ -1955,7 +2242,9 @@ export class LiveTradingService {
     source: "manual" | "auto",
     existingCardId?: string,
     buyPhaseIdx?: number,
+    opts?: { holdToSettlement?: boolean },
   ): Promise<void> {
+    const holdToSettlement = Boolean(opts?.holdToSettlement);
     const nowSec = Math.floor(Date.now() / 1000);
     const cost = usdcAmount ?? fillShares * fillPrice;
     const buyFees = await estimateLiveTakerFee(this.userId, tokenId, fillShares, fillPrice);
@@ -2079,9 +2368,18 @@ export class LiveTradingService {
     const pos = this.positions[side];
     if (pos) {
       this.autoEngine.adoptExternalBuy(state, side, pos.shares, pos.avgPrice, phaseIdx, nowSec);
-      this.autoEngine.setExternalBuyPaused(false);
-      if (source === "auto" && this.isLiveArmed() && setup) {
-        await this.ensureRestingGtdSell(state, setup, side);
+      if (holdToSettlement) {
+        this.autoEngine.suppressBuysForWindow();
+        this.autoEngine.suppressSellsForWindow();
+      } else {
+        this.autoEngine.setExternalBuyPaused(false);
+        // Phase/manual fill won the window — cancel any competing override rest.
+        if (this.overrideRestingBuy) {
+          await this.cancelOverrideRestingBuy("phase/manual fill first");
+        }
+        if (source === "auto" && this.isLiveArmed() && setup && !this.isOverrideHoldActive(state)) {
+          await this.ensureRestingGtdSell(state, setup, side);
+        }
       }
     }
 
@@ -2126,6 +2424,7 @@ export class LiveTradingService {
       this.manualBuyPending = true;
       this.autoEngine.setExternalBuyPaused(true);
       await this.cancelRestingBuy("manual buy override");
+      await this.cancelOverrideRestingBuy("manual buy override");
     } else {
       await this.cancelRestingSell("manual sell override");
     }

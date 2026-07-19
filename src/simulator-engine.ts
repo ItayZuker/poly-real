@@ -163,6 +163,7 @@ export class SimulatorEngine {
   private abortedBuyPhases = new Set<number>();
   private completedPhaseAbortCancellations = new Set<number>();
   private externalBuyPaused = false;
+  private sellsSuppressed = false;
   private trackedPhaseIdx = -1;
   private phaseCrossingBaseline = 0;
   private lastPtbCrossings = 0;
@@ -220,6 +221,12 @@ export class SimulatorEngine {
     this.buyWatch = null;
     this.pendingBuy = null;
     this.restingGtd = null;
+  }
+
+  /** Hold an adopted position to settlement — no demo/live sell markers this window. */
+  suppressSellsForWindow(): void {
+    this.sellsSuppressed = true;
+    this.sellWatch = null;
   }
 
   /** Adopt a real manual fill so configured phase sell logic can manage it. */
@@ -327,6 +334,7 @@ export class SimulatorEngine {
     this.abortedBuyPhases.clear();
     this.completedPhaseAbortCancellations.clear();
     this.externalBuyPaused = false;
+    this.sellsSuppressed = false;
     this.trackedPhaseIdx = -1;
     this.phaseCrossingBaseline = 0;
     this.lastPtbCrossings = 0;
@@ -1045,7 +1053,7 @@ export class SimulatorEngine {
     if (!this.position && !this.pendingBuy && !this.restingGtd) {
       this.tryStartBuyWatch(phase, quote, nowSec, state, setup, simNowMs);
       this.tickBuyWatch(quote, nowSec, state, setup, simNowMs);
-    } else if (this.position) {
+    } else if (this.position && !this.sellsSuppressed) {
       const sellPhase = setup.phases[this.position.phaseIndex];
       if (!this.sellWatch) this.startSellWatch(sellPhase);
       this.tickSellWatch(quote, nowSec, state, setup, simNowMs);
