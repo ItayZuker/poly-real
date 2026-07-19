@@ -559,7 +559,9 @@ async function placeLimitGtdOrder(
 
     if (resp?.success === false || resp?.errorMsg) {
       const err = String(resp?.errorMsg ?? resp?.error ?? "Order rejected");
-      logService.error("trading", `GTD ${leg} ${input.side} failed: ${err}`);
+      if (!/expiration/i.test(err)) {
+        logService.error("trading", `GTD ${leg} ${input.side} failed: ${err}`);
+      }
       return { success: false, error: err };
     }
 
@@ -589,7 +591,9 @@ async function placeLimitGtdOrder(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logService.error("trading", `GTD ${leg} ${input.side} error: ${message}`);
+    if (!/expiration/i.test(message)) {
+      logService.error("trading", `GTD ${leg} ${input.side} error: ${message}`);
+    }
     return { success: false, error: message };
   }
 }

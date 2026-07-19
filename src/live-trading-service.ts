@@ -523,6 +523,8 @@ export class LiveTradingService {
   private gtdBuyRepressUntilMs = 0;
   /** Resting GTD maker sell for the open auto/manual-managed position. */
   private restingSell: RestingSellOrder | null = null;
+  /** After a rejected GTD sell (e.g. expiration), skip further sell places this window. */
+  private gtdSellBlockedWindowKey: string | null = null;
   /** Highest-priority resting buy override (competes with phase buys). */
   private overrideRestingBuy: OverrideRestingBuy | null = null;
   /** Window key where override fill owns the position (hold to settlement, no sell). */
@@ -1296,6 +1298,7 @@ export class LiveTradingService {
     this.overrideRestingBuy = null;
     this.overrideHoldWindowKey = null;
     this.gtdBuyRepressUntilMs = 0;
+    this.gtdSellBlockedWindowKey = null;
     if (isTradingExecutor()) {
       if (prevResting?.orderId) void cancelOpenOrder(this.userId, prevResting.orderId);
       if (prevRestingSell?.orderId) void cancelOpenOrder(this.userId, prevRestingSell.orderId);
@@ -1917,7 +1920,7 @@ export class LiveTradingService {
     if ((nowMs ?? Date.now()) < this.gtdBuyRepressUntilMs) return;
     // Avoid end-of-window spam: Polymarket rejects GTD expirations that are not
     // sufficiently in the future relative to the live market clock.
-    if (state.windowEnd != null && nowSec >= state.windowEnd - 5) return;
+    if (state.windowEnd != null && nowSec >= state.windowEnd - 90) return;
 
     let chosenSide: "up" | "down" | null = null;
     for (const side of SIDES_ORDER) {
@@ -1946,7 +1949,13 @@ export class LiveTradingService {
       });
       if (!result.success || !result.orderId) {
         this.autoEngine.setExternalBuyPaused(false);
-        if (result.error) logService.warn("trading", `GTD place failed: ${result.error}`);
+        const err = result.error ?? "";
+        if (/expiration/i.test(err)) {
+          this.gtdBuyRepressUntilMs = windowEnd * 1000;
+          logService.warn("trading", `GTD buy skipped for rest of window (${err})`);
+        } else if (err) {
+          logService.warn("trading", `GTD place failed: ${err}`);
+        }
         return;
       }
 
@@ -2101,6 +2110,7 @@ export class LiveTradingService {
     const limitPrice = Math.min(0.99, Math.max(0.01, pos.avgPrice + centsToPrice(phase.sellProfitCents)));
     const shares = Math.max(1, Math.floor(pos.shares));
     const key = sessionKey(state);
+    if (this.gtdSellBlockedWindowKey === key) return;
 
     if (
       this.restingSell &&
@@ -2118,6 +2128,10 @@ export class LiveTradingService {
 
     const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const windowEnd = state.windowEnd ?? nowSec + 300;
+    // GTD needs a future expiration (~now+180 floor). Near window close, hold instead
+    // of spamming rejected place attempts every tick.
+    if (nowSec >= windowEnd - 90) return;
+
     const wasInFlight = this.orderInFlight;
     this.orderInFlight = true;
     try {
@@ -2130,7 +2144,16 @@ export class LiveTradingService {
         state,
       });
       if (!result.success || !result.orderId) {
-        if (result.error) logService.warn("trading", `GTD sell place failed: ${result.error}`);
+        const err = result.error ?? "";
+        if (/expiration/i.test(err)) {
+          this.gtdSellBlockedWindowKey = key;
+          logService.warn(
+            "trading",
+            `GTD sell skipped for rest of window (${err})`,
+          );
+        } else if (err) {
+          logService.warn("trading", `GTD sell place failed: ${err}`);
+        }
         return;
       }
 
