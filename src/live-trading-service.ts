@@ -527,6 +527,8 @@ export class LiveTradingService {
   private gtdSellBlockedWindowKey: string | null = null;
   /** Highest-priority resting buy override (competes with phase buys). */
   private overrideRestingBuy: OverrideRestingBuy | null = null;
+  /** After a rejected buy-override GTD (e.g. expiration), skip further places this window. */
+  private overrideGtdBlockedWindowKey: string | null = null;
   /** Window key where override fill owns the position (hold to settlement, no sell). */
   private overrideHoldWindowKey: string | null = null;
   /** Serialize CLOB + Chainlink tick handlers for this user. */
@@ -1297,6 +1299,7 @@ export class LiveTradingService {
     this.restingSell = null;
     this.overrideRestingBuy = null;
     this.overrideHoldWindowKey = null;
+    this.overrideGtdBlockedWindowKey = null;
     this.gtdBuyRepressUntilMs = 0;
     this.gtdSellBlockedWindowKey = null;
     if (isTradingExecutor()) {
@@ -1795,7 +1798,10 @@ export class LiveTradingService {
     if (this.positions.up || this.positions.down || this.isBuyBlocked(state)) return;
     if (!side) return;
     if (this.overrideRestingBuy) return;
-    if (state.windowEnd != null && nowSec >= state.windowEnd - 5) return;
+    if (this.overrideGtdBlockedWindowKey === key) return;
+    const windowEnd = state.windowEnd ?? nowSec + 300;
+    // Same as phase GTD: near window close Polymarket rejects expiration — don't spam.
+    if (nowSec >= windowEnd - 90) return;
 
     this.orderInFlight = true;
     try {
@@ -1804,11 +1810,17 @@ export class LiveTradingService {
         side,
         size: shares,
         price: limitPrice,
-        expirationSec: gtdExpirationUnix(state.windowEnd ?? nowSec + 300, nowSec),
+        expirationSec: gtdExpirationUnix(windowEnd, nowSec),
         state,
       });
       if (!result.success || !result.orderId) {
-        if (result.error) logService.warn("trading", `Buy override GTD place failed: ${result.error}`);
+        const err = result.error ?? "";
+        if (/expiration/i.test(err)) {
+          this.overrideGtdBlockedWindowKey = key;
+          logService.warn("trading", `Buy override GTD skipped for rest of window (${err})`);
+        } else if (err) {
+          logService.warn("trading", `Buy override GTD place failed: ${err}`);
+        }
         return;
       }
 
