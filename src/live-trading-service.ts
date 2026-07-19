@@ -1325,6 +1325,12 @@ export class LiveTradingService {
     this.quoteLocks[key] = price;
   }
 
+  /** Clear a quote latch (e.g. resting sell cancelled without a fill). */
+  private unlockQuote(side: "up" | "down", leg: "buy" | "sell"): void {
+    const key = leg === "buy" ? (`${side}Buy` as const) : (`${side}Sell` as const);
+    this.quoteLocks[key] = null;
+  }
+
   private addMarker(
     state: LiveWindowState,
     marker: Omit<SimMarker, "windowKey">,
@@ -1618,6 +1624,8 @@ export class LiveTradingService {
     const resting = this.restingSell;
     if (!resting) return;
     this.restingSell = null;
+    // Resting sell placement must not look like a fill — clear any stale sell latch.
+    this.unlockQuote(resting.side, "sell");
     logService.info("trading", `Cancel resting GTD sell (${reason})`);
     if (!isTradingExecutor()) return;
     await cancelOpenOrder(this.userId, resting.orderId);
@@ -2132,7 +2140,7 @@ export class LiveTradingService {
         conditionId: result.conditionId ?? pos.conditionId,
         cardId: pos.cardId,
       };
-      this.lockQuote(side, "sell", limitPrice);
+      // Do not latch the sell quote here — only real fills should highlight it.
       this.notify();
     } finally {
       this.orderInFlight = wasInFlight;
