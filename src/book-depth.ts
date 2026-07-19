@@ -178,6 +178,7 @@ export function walkAsksAvailable(
   maxShares: number,
   chargeTakerFee: boolean,
   feeParams: TakerFeeParams = DEFAULT_CRYPTO_TAKER_FEE_PARAMS,
+  maxPrice = Infinity,
 ): WalkFillResult | null {
   if (!maxShares || maxShares <= 0) return null;
   let remaining = maxShares;
@@ -187,6 +188,7 @@ export function walkAsksAvailable(
   for (const level of asks) {
     if (remaining <= 0) break;
     if (level.size <= 0 || !Number.isFinite(level.price)) continue;
+    if (level.price > maxPrice + 1e-9) continue;
     const take = Math.min(remaining, level.size);
     if (take <= 0) continue;
     totalCost += take * level.price;

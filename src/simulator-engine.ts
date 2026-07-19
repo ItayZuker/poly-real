@@ -47,6 +47,7 @@ interface BuyWatch {
   stallCents: number | null;
   stallTicks: number;
   prevAskCents: number | null;
+  lastBookSampleCount: number;
 }
 
 /** Resting GTD limit buy (optimize off) — mirrors live phase-enter limit. */
@@ -69,10 +70,6 @@ interface PendingBuy {
   phaseIdx: number;
   /** Max price for FAK re-check after latency (¢ → used as trigger). */
   triggerCents: number;
-}
-
-interface PendingSell {
-  executeAtMs: number;
 }
 
 interface WindowCloseSnapshot {
@@ -162,9 +159,9 @@ export class SimulatorEngine {
   private restingGtd: RestingGtdBuy | null = null;
   private sellWatch: SellWatch | null = null;
   private pendingBuy: PendingBuy | null = null;
-  private pendingSell: PendingSell | null = null;
   private pendingPhaseAborts = new Map<number, number>();
   private abortedBuyPhases = new Set<number>();
+  private completedPhaseAbortCancellations = new Set<number>();
   private externalBuyPaused = false;
   private trackedPhaseIdx = -1;
   private phaseCrossingBaseline = 0;
@@ -201,6 +198,10 @@ export class SimulatorEngine {
     return this.abortedBuyPhases.has(phaseIdx);
   }
 
+  isPhaseAbortCancellationDue(phaseIdx: number): boolean {
+    return this.completedPhaseAbortCancellations.has(phaseIdx);
+  }
+
   /** Temporarily pause all automatic buys without stopping an existing sell path. */
   setExternalBuyPaused(paused: boolean): void {
     this.externalBuyPaused = paused;
@@ -234,7 +235,6 @@ export class SimulatorEngine {
     this.buyWatch = null;
     this.pendingBuy = null;
     this.restingGtd = null;
-    this.pendingSell = null;
     this.sellWatch = null;
     this.position = {
       side,
@@ -255,7 +255,6 @@ export class SimulatorEngine {
     if (this.position?.side !== side) return;
     this.position = null;
     this.sellWatch = null;
-    this.pendingSell = null;
     this.boughtThisWindow = false;
   }
 
@@ -324,9 +323,9 @@ export class SimulatorEngine {
     this.restingGtd = null;
     this.sellWatch = null;
     this.pendingBuy = null;
-    this.pendingSell = null;
     this.pendingPhaseAborts.clear();
     this.abortedBuyPhases.clear();
+    this.completedPhaseAbortCancellations.clear();
     this.externalBuyPaused = false;
     this.trackedPhaseIdx = -1;
     this.phaseCrossingBaseline = 0;
@@ -487,13 +486,17 @@ export class SimulatorEngine {
     );
   }
 
-  private executePhaseAbort(phaseIdx: number): void {
-    if (this.abortedBuyPhases.has(phaseIdx)) return;
-    this.abortedBuyPhases.add(phaseIdx);
+  private executePhaseAbortCancellation(phaseIdx: number): void {
+    if (this.position?.phaseIndex === phaseIdx) {
+      logService.warn(
+        "sim",
+        `Phase ${phaseIdx + 1} PTB-crossing abort lost race to a buy fill; cancelling remainder`,
+      );
+    }
     if (this.restingGtd?.phaseIdx === phaseIdx) this.cancelRestingGtd("PTB crossing abort");
     if (this.pendingBuy?.phaseIdx === phaseIdx) this.pendingBuy = null;
-    if (this.buyWatch?.phaseIdx === phaseIdx) this.buyWatch = null;
-    logService.info("sim", `Phase ${phaseIdx + 1} buys aborted after PTB crossing threshold`);
+    this.completedPhaseAbortCancellations.add(phaseIdx);
+    logService.info("sim", `Phase ${phaseIdx + 1} PTB-crossing cancellation executed`);
   }
 
   private syncPhaseCrossingAbort(
@@ -521,9 +524,15 @@ export class SimulatorEngine {
       return;
     }
 
+    // Stop new buys and clear an armed watch immediately. Existing GTD/pending
+    // FAK cancellation is delayed below so it can still fill during latency.
+    this.abortedBuyPhases.add(phaseIdx);
+    if (this.buyWatch?.phaseIdx === phaseIdx) this.buyWatch = null;
+    logService.info("sim", `Phase ${phaseIdx + 1} buys aborted after PTB crossing threshold`);
+
     const latency = this.latencyMs(setup);
     if (latency <= 0) {
-      this.executePhaseAbort(phaseIdx);
+      this.executePhaseAbortCancellation(phaseIdx);
       return;
     }
     this.pendingPhaseAborts.set(phaseIdx, simNowMs + latency);
@@ -537,29 +546,8 @@ export class SimulatorEngine {
     for (const [phaseIdx, executeAtMs] of this.pendingPhaseAborts) {
       if (simNowMs < executeAtMs) continue;
       this.pendingPhaseAborts.delete(phaseIdx);
-      this.executePhaseAbort(phaseIdx);
+      this.executePhaseAbortCancellation(phaseIdx);
     }
-  }
-
-  private scheduleSell(
-    quote: DepthQuote,
-    nowSec: number,
-    state: LiveWindowState,
-    setup: SimSetup,
-    simNowMs: number,
-  ): void {
-    const latency = this.latencyMs(setup);
-    if (latency <= 0) {
-      this.executeSell(quote, nowSec, state, setup);
-      return;
-    }
-    if (this.pendingSell) return;
-    this.pendingSell = { executeAtMs: simNowMs + latency };
-    const side = this.position?.side ?? "up";
-    logService.info(
-      "sim",
-      `Sell scheduled: ${side}, latency ${latency} ms (bid ${fmtCents(bestBidForSide(quote, side) ?? 0)})`,
-    );
   }
 
   private processPendingFills(
@@ -581,19 +569,8 @@ export class SimulatorEngine {
           state,
           setup,
           quote,
+          true,
         );
-      }
-    }
-
-    if (this.pendingSell && simNowMs >= this.pendingSell.executeAtMs) {
-      this.pendingSell = null;
-      if (this.position && this.sellWatch) {
-        const bid = bestBidForSide(quote, this.position.side);
-        if (bid != null && Number.isFinite(bid) && bid >= this.sellWatch.target) {
-          this.executeSell(quote, nowSec, state, setup);
-        } else {
-          logService.error("sim", `Sell skipped after latency (bid below target)`);
-        }
       }
     }
   }
@@ -607,12 +584,13 @@ export class SimulatorEngine {
     state: LiveWindowState,
     setup: SimSetup,
     quote: DepthQuote,
+    allowAbortedPending = false,
   ): void {
     if (this.position) return;
 
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
-    if (this.isPhaseBuyAborted(phaseIdx)) return;
+    if (!allowAbortedPending && this.isPhaseBuyAborted(phaseIdx)) return;
     if (!stabilizeAllowsBuyForSide(phase, state, side)) {
       logService.error("sim", `FAK buy skipped after latency (stabilize filter)`);
       return;
@@ -625,13 +603,19 @@ export class SimulatorEngine {
     }
 
     const feeParams = this.feeParams(setup);
-    const fill = walkAsksAvailable(asksForSide(quote, side), maxShares, true, feeParams);
+    const fill = walkAsksAvailable(
+      asksForSide(quote, side),
+      maxShares,
+      true,
+      feeParams,
+      centsToPrice(triggerCents),
+    );
     if (!fill || fill.shares <= 0) {
       logService.error("sim", `FAK buy skipped after latency (no size available)`);
       return;
     }
 
-    this.applyBuyFill(side, fill, nowSec, state, phaseIdx, "taker");
+    this.applyBuyFill(side, fill, nowSec, state, phaseIdx, "taker", triggerCents);
     this.buyWatch = null;
   }
 
@@ -642,6 +626,7 @@ export class SimulatorEngine {
     state: LiveWindowState,
     phaseIdx: number,
     style: "maker" | "taker",
+    triggerCents?: number,
   ): void {
     const shares = fill.shares;
     if (!(shares > 0)) return;
@@ -679,6 +664,8 @@ export class SimulatorEngine {
       y: state.assetPrice ?? null,
       shares,
       price: fill.avgPrice,
+      triggerCents,
+      phaseIndex: phaseIdx,
       cost: fill.cost,
       fees: fill.fees,
       total: fill.cost + fill.fees,
@@ -829,6 +816,7 @@ export class SimulatorEngine {
       this.restingGtd.phaseIdx !== phaseIdx ||
       phase.buyOptimize ||
       !phase.buyEnabled ||
+      !gapAllowsBuy(restingSide, phase, state.assetGap) ||
       !stabilizeAllowsBuyForSide(phase, state, restingSide)
     ) {
       this.cancelRestingGtd(
@@ -838,7 +826,9 @@ export class SimulatorEngine {
             ? "optimize on"
             : !phase.buyEnabled
               ? "buy disabled"
-              : "stabilize filter",
+              : !gapAllowsBuy(restingSide, phase, state.assetGap)
+                ? "gap filter"
+                : "stabilize filter",
       );
     }
   }
@@ -909,6 +899,7 @@ export class SimulatorEngine {
         stallCents: null,
         stallTicks: 0,
         prevAskCents: askCents,
+        lastBookSampleCount: state.bookTickSequence ?? 0,
       };
       logService.info(
         "sim",
@@ -933,13 +924,26 @@ export class SimulatorEngine {
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
     if (w.phaseIdx !== phaseIdx) {
-      this.buyWatch = null;
-      return;
+      if (!phase.buyOptimize || !phase.buyEnabled) {
+        this.buyWatch = null;
+        return;
+      }
+      // An armed FAK watch stays locked to its original side/trigger across
+      // FAK phases, but belongs to the new phase for stabilization and abort.
+      w.phaseIdx = phaseIdx;
     }
     if (this.isPhaseBuyAborted(phaseIdx)) {
       this.buyWatch = null;
       return;
     }
+    if (!phase.buyEnabled) {
+      this.buyWatch = null;
+      return;
+    }
+
+    const bookSampleCount = state.bookTickSequence ?? 0;
+    if (bookSampleCount <= w.lastBookSampleCount) return;
+    w.lastBookSampleCount = bookSampleCount;
 
     if (askCents > w.triggerCents) {
       // Pause until trigger is touched again.
@@ -1006,7 +1010,8 @@ export class SimulatorEngine {
     const bid = bestBidForSide(quote, this.position.side);
     if (bid == null || !Number.isFinite(bid)) return;
     if (bid < this.sellWatch.target) return;
-    this.scheduleSell(quote, nowSec, state, setup, simNowMs);
+    // Maker sell fills have no simulated latency.
+    this.executeSell(quote, nowSec, state, setup);
   }
 
   tick(state: LiveWindowState, setup: SimSetup, nowMs?: number): void {
@@ -1040,7 +1045,7 @@ export class SimulatorEngine {
     if (!this.position && !this.pendingBuy && !this.restingGtd) {
       this.tryStartBuyWatch(phase, quote, nowSec, state, setup, simNowMs);
       this.tickBuyWatch(quote, nowSec, state, setup, simNowMs);
-    } else if (this.position && !this.pendingSell) {
+    } else if (this.position) {
       const sellPhase = setup.phases[this.position.phaseIndex];
       if (!this.sellWatch) this.startSellWatch(sellPhase);
       this.tickSellWatch(quote, nowSec, state, setup, simNowMs);

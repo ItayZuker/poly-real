@@ -251,6 +251,7 @@ export async function simulateRecordedWindow(
   const priceHistory: Array<{ t: number; price: number }> = [];
   const upAskCentsSamples: number[] = [];
   const downAskCentsSamples: number[] = [];
+  let bookTickSequence = 0;
 
   for (const tick of ticks) {
     if (tick.tMs >= windowEnd * 1000) break;
@@ -268,8 +269,10 @@ export async function simulateRecordedWindow(
     const state = replayTickToState(tick, series, windowStart, windowEnd, priceHistory);
     state.upAskCentsSamples = upAskCentsSamples;
     state.downAskCentsSamples = downAskCentsSamples;
+    state.bookTickSequence = bookTickSequence;
     if (tick.source === "clob-book") {
       recordAskSamples(state);
+      bookTickSequence = state.bookTickSequence ?? bookTickSequence;
     }
     engine.tick(state, setup, tick.tMs);
   }
@@ -279,6 +282,7 @@ export async function simulateRecordedWindow(
   const endState = replayTickToState(lastInWindow, series, windowStart, windowEnd, priceHistory);
   endState.upAskCentsSamples = upAskCentsSamples;
   endState.downAskCentsSamples = downAskCentsSamples;
+  endState.bookTickSequence = bookTickSequence;
   if (lastInWindow.source === "clob-book") {
     recordAskSamples(endState);
   }

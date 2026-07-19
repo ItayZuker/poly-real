@@ -14,6 +14,7 @@ import {
 import { takeLevels } from "./book-depth.js";
 import { pickDisplayPrice } from "./quote-price.js";
 import { recordAskSamples } from "./phase-config.js";
+import { getPtbSide, type PtbSide } from "./window-dynamics.js";
 import { simulatorService } from "./simulator-service.js";
 import { liveTradingRegistry } from "./live-trading-service.js";
 import { resolveTakerFeeParams } from "./taker-fee.js";
@@ -39,6 +40,7 @@ export class DisplayService {
   private prefetchedYesTokenId: string | null = null;
   private prefetchedNoTokenId: string | null = null;
   private nextWindowPrefetchInFlight = false;
+  private lastPtbSide: PtbSide | null = null;
 
   private emptyState(series: string): LiveWindowState {
     const now = Math.floor(Date.now() / 1000);
@@ -47,6 +49,8 @@ export class DisplayService {
       windowStart: now,
       windowEnd: now + 300,
       priceHistory: [],
+      ptbCrossings: 0,
+      bookTickSequence: 0,
       upAskCentsSamples: [],
       downAskCentsSamples: [],
     };
@@ -172,6 +176,13 @@ export class DisplayService {
     this.state.assetPrice = live.value;
     if (this.state.prevCloseAsset != null) {
       this.state.assetGap = live.value - this.state.prevCloseAsset;
+      const ptbSide = getPtbSide(live.value, this.state.prevCloseAsset);
+      if (ptbSide != null) {
+        if (this.lastPtbSide != null && this.lastPtbSide !== ptbSide) {
+          this.state.ptbCrossings = (this.state.ptbCrossings ?? 0) + 1;
+        }
+        this.lastPtbSide = ptbSide;
+      }
     }
     const tickMs = live.timestampMs;
     this.state.lastTickMs = tickMs;
@@ -234,6 +245,9 @@ export class DisplayService {
 
       if (this.state.windowStart !== pair.windowStart) {
         this.state.priceHistory = [];
+        this.state.ptbCrossings = 0;
+        this.state.bookTickSequence = 0;
+        this.lastPtbSide = null;
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
         this.prefetchedNextWindowStart = null;

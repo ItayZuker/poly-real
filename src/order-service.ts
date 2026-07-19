@@ -19,6 +19,8 @@ export interface PlaceOrderInput {
   sizeUnit?: OrderSizeUnit;
   /** Immediate market style; default FOK. */
   orderType?: MarketOrderType;
+  /** Maximum execution price for a FAK buy (0–1). */
+  maxPrice?: number;
   state?: LiveWindowState;
 }
 
@@ -266,8 +268,19 @@ export async function placeMarketOrder(
     const info = await getMarketInfo(publicClient, tokenID);
     const tickSize = (info.tickSize ?? "0.01") as TickSize;
     const negRisk = info.negRisk ?? false;
+    const isCappedFakBuy =
+      input.leg === "buy" &&
+      input.orderType === "FAK" &&
+      input.maxPrice != null &&
+      Number.isFinite(input.maxPrice) &&
+      input.maxPrice > 0 &&
+      input.maxPrice < 1;
 
-    const refPrice = quotePrice(input.state, input.side, input.leg) ?? info.bestAsk ?? info.bestBid;
+    const currentQuote = quotePrice(input.state, input.side, input.leg) ?? info.bestAsk ?? info.bestBid;
+    if (isCappedFakBuy && (currentQuote == null || currentQuote > input.maxPrice! + 1e-9)) {
+      return { success: false, error: "Ask is above FAK trigger" };
+    }
+    const refPrice = isCappedFakBuy ? input.maxPrice! : currentQuote;
     if (refPrice == null || !Number.isFinite(refPrice) || refPrice <= 0) {
       return { success: false, error: "No quote available" };
     }
@@ -280,11 +293,14 @@ export async function placeMarketOrder(
         : Math.max(1, Math.floor(size));
 
     const requestedShares =
-      input.leg === "buy"
-        ? estimatedSharesFromBuy(size, refPrice, amount)
-        : amount;
+      isCappedFakBuy
+        ? size
+        : input.leg === "buy"
+          ? estimatedSharesFromBuy(size, refPrice, amount)
+          : amount;
+    const submittedBuyNotional = isCappedFakBuy ? size * refPrice : amount;
 
-    if (input.leg === "buy") {
+    if (input.leg === "buy" && !isCappedFakBuy) {
       const requestedUsdc = sizeUnit === "usdc" ? size : size * refPrice;
       if (amount > requestedUsdc + 1e-9) {
         logService.info(
@@ -295,16 +311,26 @@ export async function placeMarketOrder(
       }
     }
 
-    const resp = (await client.createAndPostMarketOrder(
-      {
-        tokenID,
-        amount,
-        side: clobSide,
-        orderType: clobOrderType,
-      },
-      { tickSize, negRisk },
-      clobOrderType,
-    )) as Record<string, unknown> | null;
+    const resp = (isCappedFakBuy
+      ? await client.createOrder(
+          {
+            tokenID,
+            price: input.maxPrice!,
+            size,
+            side: Side.BUY,
+          },
+          { tickSize, negRisk },
+        ).then((order) => client.postOrder(order, OrderType.FAK))
+      : await client.createAndPostMarketOrder(
+          {
+            tokenID,
+            amount,
+            side: clobSide,
+            orderType: clobOrderType,
+          },
+          { tickSize, negRisk },
+          clobOrderType,
+        )) as Record<string, unknown> | null;
 
     if (resp?.success === false || resp?.errorMsg) {
       const err = String(resp?.errorMsg ?? resp?.error ?? "Order rejected");
@@ -316,7 +342,7 @@ export async function placeMarketOrder(
           input.leg,
           refPrice,
           requestedShares,
-          input.leg === "buy" ? amount : undefined,
+          input.leg === "buy" ? submittedBuyNotional : undefined,
         );
         if (verified.outcome === "filled" && verified.fill) {
           logService.success(
@@ -359,7 +385,7 @@ export async function placeMarketOrder(
           input.leg,
           refPrice,
           requestedShares,
-          input.leg === "buy" ? amount : undefined,
+          input.leg === "buy" ? submittedBuyNotional : undefined,
         );
         if (beforeCancel.outcome === "filled" && beforeCancel.fill) {
           logService.success(
@@ -387,7 +413,7 @@ export async function placeMarketOrder(
           input.leg,
           refPrice,
           requestedShares,
-          input.leg === "buy" ? amount : undefined,
+          input.leg === "buy" ? submittedBuyNotional : undefined,
         );
         if (afterCancel.outcome === "filled" && afterCancel.fill) {
           logService.success(
@@ -430,7 +456,7 @@ export async function placeMarketOrder(
       input.leg,
       refPrice,
       requestedShares,
-      input.leg === "buy" ? amount : undefined,
+      input.leg === "buy" ? submittedBuyNotional : undefined,
     );
 
     // FAK may return success with zero fill if nothing available.
@@ -444,7 +470,11 @@ export async function placeMarketOrder(
     logService.success(
       "trading",
       `${input.leg.toUpperCase()} ${input.side.toUpperCase()} (${clobOrderType}): ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢` +
-        (input.leg === "buy" ? ` (~$${amount.toFixed(2)} ${sizeUnit === "shares" ? "for " + size + " sh target" : "USDC"})` : ""),
+        (input.leg === "buy"
+          ? isCappedFakBuy
+            ? ` (limit ${(refPrice * 100).toFixed(0)}¢)`
+            : ` (~$${amount.toFixed(2)} ${sizeUnit === "shares" ? "for " + size + " sh target" : "USDC"})`
+          : ""),
     );
 
     return {
@@ -471,6 +501,21 @@ export async function placeLimitGtdBuy(
   userId: string,
   input: PlaceLimitOrderInput,
 ): Promise<PlaceOrderResult> {
+  return placeLimitGtdOrder(userId, { ...input, leg: "buy" });
+}
+
+/** Place a resting GTD limit sell (shares @ price) that expires at expirationSec. */
+export async function placeLimitGtdSell(
+  userId: string,
+  input: PlaceLimitOrderInput,
+): Promise<PlaceOrderResult> {
+  return placeLimitGtdOrder(userId, { ...input, leg: "sell" });
+}
+
+async function placeLimitGtdOrder(
+  userId: string,
+  input: PlaceLimitOrderInput & { leg: TradeLeg },
+): Promise<PlaceOrderResult> {
   if (!isTradingConfigured(userId)) {
     return { success: false, error: "Trading account not configured" };
   }
@@ -483,6 +528,7 @@ export async function placeLimitGtdBuy(
   const size = Math.max(1, Math.floor(Number(input.size)));
   const price = Number(input.price);
   const expiration = Math.floor(Number(input.expirationSec));
+  const leg = input.leg;
   if (!Number.isFinite(price) || price <= 0 || price >= 1) {
     return { success: false, error: "Invalid limit price" };
   }
@@ -497,13 +543,14 @@ export async function placeLimitGtdBuy(
     const info = await getMarketInfo(publicClient, tokenID);
     const tickSize = (info.tickSize ?? "0.01") as TickSize;
     const negRisk = info.negRisk ?? false;
+    const clobSide = leg === "buy" ? Side.BUY : Side.SELL;
 
     const resp = (await client.createAndPostOrder(
       {
         tokenID,
         price,
         size,
-        side: Side.BUY,
+        side: clobSide,
         expiration,
       },
       { tickSize, negRisk },
@@ -512,20 +559,20 @@ export async function placeLimitGtdBuy(
 
     if (resp?.success === false || resp?.errorMsg) {
       const err = String(resp?.errorMsg ?? resp?.error ?? "Order rejected");
-      logService.error("trading", `GTD buy ${input.side} failed: ${err}`);
+      logService.error("trading", `GTD ${leg} ${input.side} failed: ${err}`);
       return { success: false, error: err };
     }
 
     const orderId = String(resp?.orderID ?? resp?.orderId ?? "");
     const status = resp?.status != null ? String(resp.status) : "";
-    const fill = parseFillFromResponse(resp, "buy", price, size, size * price);
+    const fill = parseFillFromResponse(resp, leg, price, size, size * price);
     const immediateFill = fill.fillShares > 0 && (status === "matched" || Boolean(resp?.takingAmount));
 
     logService.success(
       "trading",
       immediateFill
-        ? `GTD BUY ${input.side.toUpperCase()} filled: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢`
-        : `GTD BUY ${input.side.toUpperCase()} resting: ${size} sh @ ${(price * 100).toFixed(0)}¢ (exp ${expiration})`,
+        ? `GTD ${leg.toUpperCase()} ${input.side.toUpperCase()} filled: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢`
+        : `GTD ${leg.toUpperCase()} ${input.side.toUpperCase()} resting: ${size} sh @ ${(price * 100).toFixed(0)}¢ (exp ${expiration})`,
     );
 
     return {
@@ -542,7 +589,7 @@ export async function placeLimitGtdBuy(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logService.error("trading", `GTD buy ${input.side} error: ${message}`);
+    logService.error("trading", `GTD ${leg} ${input.side} error: ${message}`);
     return { success: false, error: message };
   }
 }

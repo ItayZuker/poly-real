@@ -207,9 +207,11 @@ export interface LiveWindowState {
   upAskCentsSamples?: number[];
   /** Rolling DOWN token best-ask samples in ¢ (CLOB book ticks). */
   downAskCentsSamples?: number[];
+  /** Monotonic sequence incremented once per CLOB book update. */
+  bookTickSequence?: number;
 }
 
-export type GapVsPtb = "with" | "opposite";
+export type GapVsPtb = "none" | "with" | "opposite";
 
 /** Optimize off → GTD resting limit; optimize on → immediate FAK. */
 export type BuyOrderType = "GTD" | "FAK";
@@ -313,6 +315,10 @@ export interface SimMarker {
   y: number | null;
   shares: number;
   price: number;
+  /** FAK buy execution cap inherited from the armed watch. */
+  triggerCents?: number;
+  /** Phase index at buy fill (sell profit source). */
+  phaseIndex?: number;
   cost?: number;
   fees?: number;
   proceeds?: number;

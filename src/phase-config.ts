@@ -13,7 +13,7 @@ export function defaultPhaseConfig(): SimPhaseConfig {
     buyOrderType: "GTD",
     minGap: 0,
     maxGap: 0,
-    gapVsPtb: "opposite",
+    gapVsPtb: "with",
     buyStabilizeTicks: 1,
     buyStabilizeRange: 0,
     buyAbortOnCrossing: 0,
@@ -21,8 +21,8 @@ export function defaultPhaseConfig(): SimPhaseConfig {
   };
 }
 
-function asGapVsPtb(value: unknown, fallback: GapVsPtb = "opposite"): GapVsPtb {
-  return value === "with" || value === "opposite" ? value : fallback;
+function asGapVsPtb(value: unknown, fallback: GapVsPtb = "none"): GapVsPtb {
+  return value === "with" || value === "opposite" || value === "none" ? value : fallback;
 }
 
 function asMoneyGap(value: unknown): number {
@@ -62,6 +62,10 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
   }
 
   const buyStabilizeTicks = asStabilizeTicks(raw.buyStabilizeTicks ?? base.buyStabilizeTicks);
+  const gapVsPtb = asGapVsPtb(
+    raw.gapVsPtb,
+    buyOptimize ? "none" : "with",
+  );
   return {
     buyEnabled: Boolean(raw.buyEnabled ?? base.buyEnabled),
     buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
@@ -70,7 +74,7 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     buyOrderType: resolveBuyOrderType(buyOptimize),
     minGap: asMoneyGap(raw.minGap),
     maxGap: asMoneyGap(raw.maxGap),
-    gapVsPtb: asGapVsPtb(raw.gapVsPtb, base.gapVsPtb),
+    gapVsPtb: !buyOptimize && gapVsPtb === "none" ? "with" : gapVsPtb,
     buyStabilizeTicks,
     buyStabilizeRange: asStabilizeRange(buyStabilizeTicks, raw.buyStabilizeRange),
     buyAbortOnCrossing: Math.max(
@@ -99,31 +103,33 @@ export function normalizeTradingPhaseSetup(setup: TradingPhaseSetup): TradingPha
 }
 
 /**
- * Gap bounds always use |asset−PTB|. Direction applies only to GTD;
- * optimize/FAK deliberately ignores it.
+ * Gap bounds always use |asset−PTB|. With/opposite independently constrain
+ * direction in both GTD and FAK; only FAK "none" ignores direction.
  */
 export function gapAllowsBuy(
   side: "up" | "down",
   phase: SimPhaseConfig,
   assetGap: number | null | undefined,
 ): boolean {
+  const hasMagnitude = phase.minGap > 0 || phase.maxGap > 0;
   if (assetGap == null || !Number.isFinite(assetGap)) {
-    return phase.buyOptimize && phase.minGap <= 0 && phase.maxGap <= 0;
+    return phase.buyOptimize && phase.gapVsPtb === "none" && !hasMagnitude;
   }
 
   const abs = Math.abs(assetGap);
   if (phase.minGap > 0 && abs + 1e-9 < phase.minGap) return false;
   if (phase.maxGap > 0 && abs - 1e-9 > phase.maxGap) return false;
-  if (phase.buyOptimize) return true;
+  if (phase.gapVsPtb === "none") return phase.buyOptimize;
 
   const wantAbovePtb =
     side === "up" ? phase.gapVsPtb === "with" : phase.gapVsPtb === "opposite";
-  if (wantAbovePtb) return assetGap > 0;
-  return assetGap < 0;
+  if (wantAbovePtb) return assetGap >= 0;
+  return assetGap <= 0;
 }
 
 /** Append best-ask ¢ samples from the current book snapshot (one sample per side per book tick). */
 export function recordAskSamples(state: LiveWindowState): void {
+  state.bookTickSequence = Math.max(0, Math.floor(state.bookTickSequence ?? 0)) + 1;
   if (state.yesAsk != null && Number.isFinite(state.yesAsk)) {
     if (!state.upAskCentsSamples) state.upAskCentsSamples = [];
     state.upAskCentsSamples.push(Math.round(state.yesAsk * 100));
