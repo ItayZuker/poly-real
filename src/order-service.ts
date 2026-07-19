@@ -47,6 +47,11 @@ export interface PlaceOrderResult {
   /** Resting / live order (GTD) that did not fill immediately. */
   resting?: boolean;
   status?: string;
+  /**
+   * True when we cannot prove the order is unfilled (timeout, missing id, unclear status).
+   * Callers must not submit another buy until they reconcile on-chain state.
+   */
+  ambiguous?: boolean;
 }
 
 export interface OpenOrderSnapshot {
@@ -80,6 +85,73 @@ function num(value: unknown): number | undefined {
 
 function toClobMarketType(orderType: MarketOrderType | undefined): typeof OrderType.FOK | typeof OrderType.FAK {
   return orderType === "FAK" ? OrderType.FAK : OrderType.FOK;
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fillFromOpenOrder(
+  snap: OpenOrderSnapshot,
+  leg: TradeLeg,
+  refPrice: number,
+  requestedShares: number,
+  usdcAmount: number | undefined,
+): { fillPrice: number; fillShares: number; usdcAmount?: number } | null {
+  const status = snap.status.toLowerCase();
+  const matched = snap.sizeMatched;
+  if (!(matched > 0 || status === "matched")) return null;
+  const fillShares = matched > 0 ? matched : requestedShares;
+  if (!(fillShares > 0)) return null;
+  const fillPrice = snap.price > 0 ? snap.price : refPrice;
+  return {
+    fillPrice,
+    fillShares,
+    usdcAmount:
+      leg === "buy" ? (usdcAmount ?? fillShares * fillPrice) : fillShares * fillPrice,
+  };
+}
+
+/** Poll CLOB order state after a post when the immediate response is unclear. */
+async function resolveOrderFillAfterPost(
+  userId: string,
+  orderId: string,
+  leg: TradeLeg,
+  refPrice: number,
+  requestedShares: number,
+  usdcAmount: number | undefined,
+): Promise<{
+  outcome: "filled" | "unfilled" | "ambiguous";
+  fill?: { fillPrice: number; fillShares: number; usdcAmount?: number };
+  status?: string;
+}> {
+  let lastStatus = "";
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const snap = await fetchOpenOrder(userId, orderId);
+    if (!snap) {
+      await waitMs(250);
+      continue;
+    }
+    lastStatus = snap.status;
+    const fill = fillFromOpenOrder(snap, leg, refPrice, requestedShares, usdcAmount);
+    if (fill) return { outcome: "filled", fill, status: snap.status };
+
+    const status = snap.status.toLowerCase();
+    if (status === "live" || status === "delayed") {
+      await waitMs(250);
+      continue;
+    }
+    if (
+      status === "cancelled" ||
+      status === "canceled" ||
+      status === "unmatched" ||
+      status === "expired"
+    ) {
+      return { outcome: "unfilled", status: snap.status };
+    }
+    break;
+  }
+  return { outcome: "ambiguous", status: lastStatus || undefined };
 }
 
 /** Best-effort parse of fill size/price from CLOB market-order response. */
@@ -223,10 +295,35 @@ export async function placeMarketOrder(
       const err = String(resp?.errorMsg ?? resp?.error ?? "Order rejected");
       const rejectedOrderId = String(resp?.orderID ?? resp?.orderId ?? "");
       if (rejectedOrderId) {
+        const verified = await resolveOrderFillAfterPost(
+          userId,
+          rejectedOrderId,
+          input.leg,
+          refPrice,
+          requestedShares,
+          input.leg === "buy" ? amount : undefined,
+        );
+        if (verified.outcome === "filled" && verified.fill) {
+          logService.success(
+            "trading",
+            `${input.leg.toUpperCase()} ${input.side.toUpperCase()} recovered fill after reject payload: ${verified.fill.fillShares} sh`,
+          );
+          return {
+            success: true,
+            orderId: rejectedOrderId,
+            fillPrice: verified.fill.fillPrice,
+            fillShares: verified.fill.fillShares,
+            usdcAmount: verified.fill.usdcAmount,
+            tokenId: tokenID,
+            conditionId: pair.conditionId,
+            slug: pair.slug,
+            status: verified.status,
+          };
+        }
         await cancelOpenOrder(userId, rejectedOrderId);
       }
       logService.error("trading", `${input.leg} ${input.side} failed: ${err}`);
-      return { success: false, error: err };
+      return { success: false, orderId: rejectedOrderId || undefined, error: err, ambiguous: false };
     }
 
     const orderId = String(resp?.orderID ?? resp?.orderId ?? "");
@@ -241,11 +338,76 @@ export async function placeMarketOrder(
 
     if (!hasConfirmedFill) {
       if (orderId) {
+        const beforeCancel = await resolveOrderFillAfterPost(
+          userId,
+          orderId,
+          input.leg,
+          refPrice,
+          requestedShares,
+          input.leg === "buy" ? amount : undefined,
+        );
+        if (beforeCancel.outcome === "filled" && beforeCancel.fill) {
+          logService.success(
+            "trading",
+            `${input.leg.toUpperCase()} ${input.side.toUpperCase()} (${clobOrderType}) verified via getOrder: ${beforeCancel.fill.fillShares} sh`,
+          );
+          return {
+            success: true,
+            orderId,
+            fillPrice: beforeCancel.fill.fillPrice,
+            fillShares: beforeCancel.fill.fillShares,
+            usdcAmount: beforeCancel.fill.usdcAmount,
+            tokenId: tokenID,
+            conditionId: pair.conditionId,
+            slug: pair.slug,
+            status: beforeCancel.status,
+          };
+        }
+
         await cancelOpenOrder(userId, orderId);
+
+        const afterCancel = await resolveOrderFillAfterPost(
+          userId,
+          orderId,
+          input.leg,
+          refPrice,
+          requestedShares,
+          input.leg === "buy" ? amount : undefined,
+        );
+        if (afterCancel.outcome === "filled" && afterCancel.fill) {
+          logService.success(
+            "trading",
+            `${input.leg.toUpperCase()} ${input.side.toUpperCase()} (${clobOrderType}) filled before cancel landed: ${afterCancel.fill.fillShares} sh`,
+          );
+          return {
+            success: true,
+            orderId,
+            fillPrice: afterCancel.fill.fillPrice,
+            fillShares: afterCancel.fill.fillShares,
+            usdcAmount: afterCancel.fill.usdcAmount,
+            tokenId: tokenID,
+            conditionId: pair.conditionId,
+            slug: pair.slug,
+            status: afterCancel.status,
+          };
+        }
+
+        const clearlyUnfilled =
+          afterCancel.outcome === "unfilled" || beforeCancel.outcome === "unfilled";
+        const err = `${clobOrderType} order not settled`;
+        logService.warn("trading", `${input.leg} ${input.side}: ${err}`);
+        return {
+          success: false,
+          orderId,
+          status: afterCancel.status ?? beforeCancel.status ?? status,
+          error: err,
+          ambiguous: !clearlyUnfilled,
+        };
       }
+
       const err = `${clobOrderType} order not settled`;
       logService.warn("trading", `${input.leg} ${input.side}: ${err}`);
-      return { success: false, orderId, status, error: err };
+      return { success: false, status, error: err, ambiguous: true };
     }
 
     const fill = parseFillFromResponse(
@@ -258,9 +420,10 @@ export async function placeMarketOrder(
 
     // FAK may return success with zero fill if nothing available.
     if (!(fill.fillShares > 0)) {
+      if (orderId) await cancelOpenOrder(userId, orderId);
       const err = `${clobOrderType} order not filled`;
       logService.warn("trading", `${input.leg} ${input.side}: ${err}`);
-      return { success: false, error: err };
+      return { success: false, orderId: orderId || undefined, error: err, ambiguous: false };
     }
 
     logService.success(
@@ -283,7 +446,8 @@ export async function placeMarketOrder(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logService.error("trading", `${input.leg} ${input.side} error: ${message}`);
-    return { success: false, error: message };
+    // Network/timeout after a possible post — do not allow blind re-buys.
+    return { success: false, error: message, ambiguous: true };
   }
 }
 

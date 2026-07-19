@@ -14,6 +14,7 @@ import {
   placeMarketOrder,
   type MarketOrderType,
 } from "./order-service.js";
+import { fetchCurrentUpDownMarket } from "./market-pair.js";
 import { getTradingClient, initTradingClient, refreshCollateralBalance } from "./trading-client.js";
 import { SimulatorEngine } from "./simulator-engine.js";
 import { simulatorService, phaseSetupToSimSetup } from "./simulator-service.js";
@@ -455,10 +456,15 @@ export class LiveTradingService {
   private sessionKey: string | null = null;
   private mirroredMarkerCount = 0;
   private orderInFlight = false;
-  /** True across the complete manual BUY retry sequence. */
+  /** True across the complete manual BUY attempt. */
   private manualBuyPending = false;
   /** Successful manual BUY suppresses all phase buys until this window rolls. */
   private manualBuyOverrideWindowKey: string | null = null;
+  /**
+   * Ambiguous / unverified buy response — block further buys for this window
+   * until we adopt an on-chain position or the window rolls.
+   */
+  private buyBlockedWindowKey: string | null = null;
   /** Resting GTD limit buy for the active non-optimize phase. */
   private restingBuy: RestingBuyOrder | null = null;
   private scheduleContext: ActiveScheduleContext | null = null;
@@ -1205,6 +1211,7 @@ export class LiveTradingService {
     this.mirroredMarkerCount = 0;
     this.manualBuyPending = false;
     this.manualBuyOverrideWindowKey = null;
+    this.buyBlockedWindowKey = null;
     this.sessionKey = sessionKey(state);
     if (prevKey) {
       void this.settleOpenCardsForWindow(prevKey).then((hadHits) => {
@@ -1239,6 +1246,77 @@ export class LiveTradingService {
 
   private findCard(id: string): TradingPositionCard | undefined {
     return this.positionCards.find((card) => card.id === id);
+  }
+
+  private isBuyBlocked(state: LiveWindowState): boolean {
+    const key = sessionKey(state);
+    if (this.positions.up || this.positions.down) return true;
+    if (this.manualBuyPending) return true;
+    if (this.manualBuyOverrideWindowKey === key) return true;
+    if (this.buyBlockedWindowKey === key) return true;
+    return false;
+  }
+
+  private blockFurtherBuys(state: LiveWindowState, reason: string): void {
+    this.buyBlockedWindowKey = sessionKey(state);
+    this.autoEngine.suppressBuysForWindow();
+    logService.warn("trading", `Further buys blocked for window (${reason})`);
+  }
+
+  /**
+   * If Polymarket already holds UP/DOWN shares for this market, adopt them locally
+   * and suppress more buys. Prevents duplicate FOK/FAK submissions after a fill
+   * that the app failed to record.
+   */
+  private async adoptOnChainPositionIfAny(state: LiveWindowState): Promise<boolean> {
+    if (this.positions.up || this.positions.down) return true;
+    if (!isTradingExecutor()) return false;
+    try {
+      const pair = await fetchCurrentUpDownMarket(state.series);
+      const rows = await fetchUserPositions(this.userId, {
+        conditionId: pair.conditionId,
+        sizeThreshold: 0,
+      });
+      for (const side of SIDES_ORDER) {
+        const tokenId = side === "up" ? pair.yesTokenId : pair.noTokenId;
+        const match = findPosition(rows, {
+          asset: tokenId,
+          conditionId: pair.conditionId,
+        });
+        if (!match) continue;
+        const shares = Number(match.size);
+        const price = Number(match.avgPrice);
+        if (!isValidShareSize(shares) || !isValidSharePrice(price)) continue;
+        const cost = Number(match.initialValue ?? shares * price);
+        logService.warn(
+          "trading",
+          `Adopting on-chain ${side.toUpperCase()} position: ${shares} sh @ ${(price * 100).toFixed(1)}¢ — blocking duplicate buys`,
+        );
+        await this.recordBuyFill(
+          state,
+          side,
+          shares,
+          price,
+          cost,
+          tokenId,
+          pair.conditionId,
+          match.slug ?? pair.slug,
+          "auto",
+        );
+        const nowSec = Math.floor(Date.now() / 1000);
+        const setup = this.resolveAutoSimSetup(state);
+        const phaseIdx = setup
+          ? phaseIndexForState(state, setup.phaseSplit, nowSec)
+          : 0;
+        this.autoEngine.adoptExternalBuy(state, side, shares, price, phaseIdx, nowSec);
+        this.autoEngine.suppressBuysForWindow();
+        this.blockFurtherBuys(state, "on-chain position detected");
+        return true;
+      }
+    } catch (err) {
+      logService.warn("trading", `On-chain position check failed: ${String(err)}`);
+    }
+    return false;
   }
 
   async refreshScheduleContext(force = false): Promise<void> {
@@ -1345,6 +1423,15 @@ export class LiveTradingService {
     const simMarkers = this.autoEngine.getMarkers().filter((m) => m.windowKey === key);
     if (simMarkers.length <= prevCount) return;
 
+    if (await this.adoptOnChainPositionIfAny(state)) {
+      this.mirroredMarkerCount = simMarkers.length;
+      return;
+    }
+    if (this.isBuyBlocked(state)) {
+      this.mirroredMarkerCount = simMarkers.length;
+      return;
+    }
+
     const newMarkers = simMarkers.slice(prevCount);
     for (const marker of newMarkers) {
       if (marker.type === "buy") {
@@ -1355,8 +1442,10 @@ export class LiveTradingService {
           logService.info("trading", `FAK buy skipped (stabilize filter)`);
           continue;
         }
-        if (this.positions[marker.side]) continue;
+        if (this.positions.up || this.positions.down) continue;
+        if (this.isBuyBlocked(state)) continue;
         await this.executeOrder(state, marker.side, "buy", marker.shares, "auto", "shares", "FAK");
+        if (this.positions.up || this.positions.down || this.isBuyBlocked(state)) break;
       } else if (marker.type === "sell") {
         if (!this.positions[marker.side]) continue;
         await this.executeOrder(state, marker.side, "sell", this.positions[marker.side]!.shares, "auto");
@@ -1381,6 +1470,10 @@ export class LiveTradingService {
   ): Promise<void> {
     if (this.orderInFlight) return;
     if (this.manualBuyPending || this.manualBuyOverrideWindowKey === sessionKey(state)) return;
+    if (this.buyBlockedWindowKey === sessionKey(state)) {
+      if (this.restingBuy) await this.cancelRestingBuy("buy blocked");
+      return;
+    }
 
     const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
@@ -1422,9 +1515,12 @@ export class LiveTradingService {
       if (this.restingBuy) return; // still open — don't place another
     }
 
+    if (await this.adoptOnChainPositionIfAny(state)) return;
+
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;
     if (this.positions.up || this.positions.down) return;
+    if (this.isBuyBlocked(state)) return;
     if (this.restingBuy) return;
 
     let chosenSide: "up" | "down" | null = null;
@@ -1682,6 +1778,14 @@ export class LiveTradingService {
     this.ensureWindow(state);
     if (!this.canExecuteOrders()) {
       return { ok: false, error: "Allow trade to place orders" };
+    }
+    if (leg === "buy") {
+      if (await this.adoptOnChainPositionIfAny(state)) {
+        return { ok: false, error: "Already holding position" };
+      }
+      if (this.isBuyBlocked(state)) {
+        return { ok: false, error: "Buy blocked until window rolls (prior order unresolved)" };
+      }
     }
     if (!this.canManualTrade(side, leg)) {
       return { ok: false, error: leg === "buy" ? "Already holding position" : "No position to sell" };
@@ -2135,6 +2239,18 @@ export class LiveTradingService {
       return { ok: false, error: "Trading executor not enabled in this process" };
     }
     if (this.orderInFlight) return { ok: false, error: "Order already in progress" };
+    if (leg === "buy") {
+      if (this.isBuyBlocked(state) && source === "auto") {
+        return { ok: false, error: "Buy blocked for this window" };
+      }
+      if (await this.adoptOnChainPositionIfAny(state)) {
+        const pos = this.positions.up ?? this.positions.down;
+        if (pos) {
+          return { ok: true, fillShares: pos.shares, fillPrice: pos.avgPrice };
+        }
+        return { ok: false, error: "Already holding on-chain position" };
+      }
+    }
     this.orderInFlight = true;
     try {
       const result = await placeMarketOrder(this.userId, {
@@ -2147,6 +2263,18 @@ export class LiveTradingService {
         state,
       });
       if (!result.success || result.fillPrice == null || result.fillShares == null) {
+        if (leg === "buy") {
+          const adopted = await this.adoptOnChainPositionIfAny(state);
+          if (adopted) {
+            const pos = this.positions[side] ?? this.positions.up ?? this.positions.down;
+            if (pos) {
+              return { ok: true, fillShares: pos.shares, fillPrice: pos.avgPrice };
+            }
+          }
+          if (result.ambiguous) {
+            this.blockFurtherBuys(state, result.error ?? "ambiguous buy response");
+          }
+        }
         return { ok: false, error: result.error ?? "Order failed" };
       }
 
