@@ -100,6 +100,13 @@ function sessionKeyFor(state: LiveWindowState): string {
   return `${state.series || ""}:${state.windowStart || ""}`;
 }
 
+/** Quiet period after gap/stabilize cancel before placing another resting GTD. */
+const GTD_FILTER_REPRESS_MS = 2500;
+
+function isRoutineGtdCancelReason(reason: string): boolean {
+  return reason === "gap filter" || reason === "stabilize filter";
+}
+
 function depthFromState(state: LiveWindowState): DepthQuote {
   const upAsks = takeLevels(state.yesAsks);
   const upBids = takeLevels(state.yesBids);
@@ -178,6 +185,8 @@ export class SimulatorEngine {
     downBuy: null,
     downSell: null,
   };
+  /** After gap/stabilize cancels, wait before re-placing to avoid tick thrash. */
+  private gtdRepressUntilMs = 0;
 
   getMarkers(): SimMarker[] {
     return [...this.markers];
@@ -343,6 +352,7 @@ export class SimulatorEngine {
     this.windowTrade = null;
     this.windowEndSnapshot = null;
     this.resetQuoteLocks();
+    this.gtdRepressUntilMs = 0;
     logService.info("sim", `New window ${state.windowStart}`);
   }
 
@@ -777,10 +787,12 @@ export class SimulatorEngine {
     phase: SimSetup["phases"][number],
     phaseIdx: number,
     state: LiveWindowState,
+    simNowMs: number,
   ): void {
     if (this.externalBuyPaused || phase.buyOptimize || !phase.buyEnabled) return;
     if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (this.position || this.restingGtd || this.pendingBuy) return;
+    if (simNowMs < this.gtdRepressUntilMs) return;
 
     let chosenSide: Side | null = null;
     for (const side of SIDES_ORDER) {
@@ -806,9 +818,14 @@ export class SimulatorEngine {
     );
   }
 
-  private cancelRestingGtd(reason: string): void {
+  private cancelRestingGtd(reason: string, nowMs?: number): void {
     if (!this.restingGtd) return;
-    logService.info("sim", `GTD resting cancelled (${reason})`);
+    if (isRoutineGtdCancelReason(reason)) {
+      // Price flickering around PTB / stabilize — don't log every tick cancel.
+      this.gtdRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
+    } else {
+      logService.info("sim", `GTD resting cancelled (${reason})`);
+    }
     this.restingGtd = null;
   }
 
@@ -816,6 +833,7 @@ export class SimulatorEngine {
     phase: SimSetup["phases"][number],
     phaseIdx: number,
     state: LiveWindowState,
+    simNowMs: number,
   ): void {
     if (!phase.buyOptimize) this.buyWatch = null;
     if (!this.restingGtd) return;
@@ -837,6 +855,7 @@ export class SimulatorEngine {
               : !gapAllowsBuy(restingSide, phase, state.assetGap)
                 ? "gap filter"
                 : "stabilize filter",
+        simNowMs,
       );
     }
   }
@@ -846,12 +865,13 @@ export class SimulatorEngine {
     nowSec: number,
     state: LiveWindowState,
     phase: SimSetup["phases"][number],
+    simNowMs: number,
   ): void {
     const resting = this.restingGtd;
     if (!resting) return;
 
     if (!stabilizeAllowsBuyForSide(phase, state, resting.side)) {
-      this.cancelRestingGtd("stabilize filter");
+      this.cancelRestingGtd("stabilize filter", simNowMs);
       return;
     }
 
@@ -1043,11 +1063,11 @@ export class SimulatorEngine {
     this.processPendingPhaseAbort(simNowMs);
 
     // GTD resting: cancel on phase/optimize change, fill from book, place when active.
-    this.syncRestingGtdForPhase(phase, phaseIdx, state);
-    this.tickRestingGtd(quote, nowSec, state, phase);
+    this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs);
+    this.tickRestingGtd(quote, nowSec, state, phase, simNowMs);
     if (!this.position || this.restingGtd) {
-      this.tryPlaceRestingGtd(phase, phaseIdx, state);
-      this.tickRestingGtd(quote, nowSec, state, phase);
+      this.tryPlaceRestingGtd(phase, phaseIdx, state, simNowMs);
+      this.tickRestingGtd(quote, nowSec, state, phase, simNowMs);
     }
 
     if (!this.position && !this.pendingBuy && !this.restingGtd) {

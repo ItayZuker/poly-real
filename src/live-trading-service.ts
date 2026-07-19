@@ -418,6 +418,13 @@ function emptyQuoteLocks(): SimQuoteLocks {
   return { upBuy: null, upSell: null, downBuy: null, downSell: null };
 }
 
+/** Quiet period after gap/stabilize cancel before placing another resting GTD buy. */
+const GTD_FILTER_REPRESS_MS = 2500;
+
+function isRoutineGtdCancelReason(reason: string): boolean {
+  return reason === "gap filter" || reason === "stabilize filter";
+}
+
 function newCardId(): string {
   return `pos-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -512,6 +519,8 @@ export class LiveTradingService {
   private buyBlockedWindowKey: string | null = null;
   /** Resting GTD limit buy for the active non-optimize phase. */
   private restingBuy: RestingBuyOrder | null = null;
+  /** After gap/stabilize cancel, delay before placing another resting GTD buy. */
+  private gtdBuyRepressUntilMs = 0;
   /** Resting GTD maker sell for the open auto/manual-managed position. */
   private restingSell: RestingSellOrder | null = null;
   /** Highest-priority resting buy override (competes with phase buys). */
@@ -1286,6 +1295,7 @@ export class LiveTradingService {
     this.restingSell = null;
     this.overrideRestingBuy = null;
     this.overrideHoldWindowKey = null;
+    this.gtdBuyRepressUntilMs = 0;
     if (isTradingExecutor()) {
       if (prevResting?.orderId) void cancelOpenOrder(this.userId, prevResting.orderId);
       if (prevRestingSell?.orderId) void cancelOpenOrder(this.userId, prevRestingSell.orderId);
@@ -1608,11 +1618,15 @@ export class LiveTradingService {
     this.mirroredMarkerCount = simMarkers.length;
   }
 
-  private async cancelRestingBuy(reason: string): Promise<void> {
+  private async cancelRestingBuy(reason: string, nowMs?: number): Promise<void> {
     const resting = this.restingBuy;
     if (!resting) return;
     this.restingBuy = null;
-    logService.info("trading", `Cancel resting GTD (${reason})`);
+    if (isRoutineGtdCancelReason(reason)) {
+      this.gtdBuyRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
+    } else {
+      logService.info("trading", `Cancel resting GTD (${reason})`);
+    }
     if (!this.positions.up && !this.positions.down) {
       this.autoEngine.setExternalBuyPaused(false);
     }
@@ -1880,13 +1894,14 @@ export class LiveTradingService {
                 : !restingGapOk
                   ? "gap filter"
                   : "stabilize filter",
+          nowMs ?? nowSec * 1000,
         );
       }
     }
 
     // Poll open resting order for fills.
     if (this.restingBuy) {
-      await this.pollRestingBuy(state, setup);
+      await this.pollRestingBuy(state, setup, nowMs);
       if (this.restingBuy) return; // still open — don't place another
     }
 
@@ -1899,6 +1914,7 @@ export class LiveTradingService {
     if (this.positions.up || this.positions.down) return;
     if (this.isBuyBlocked(state)) return;
     if (this.restingBuy) return;
+    if ((nowMs ?? Date.now()) < this.gtdBuyRepressUntilMs) return;
     // Avoid end-of-window spam: Polymarket rejects GTD expirations that are not
     // sufficiently in the future relative to the live market clock.
     if (state.windowEnd != null && nowSec >= state.windowEnd - 5) return;
@@ -1969,20 +1985,24 @@ export class LiveTradingService {
     }
   }
 
-  private async pollRestingBuy(state: LiveWindowState, setup: SimSetup): Promise<void> {
+  private async pollRestingBuy(
+    state: LiveWindowState,
+    setup: SimSetup,
+    nowMs?: number,
+  ): Promise<void> {
     const resting = this.restingBuy;
     if (!resting) return;
 
-    const nowSec = Math.floor((state.lastTickMs ?? Date.now()) / 1000);
+    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const crossingCancellationDue = this.autoEngine.isPhaseAbortCancellationDue(phaseIdx);
     if (!crossingCancellationDue && !gapAllowsBuy(resting.side, phase, state.assetGap)) {
-      await this.cancelRestingBuy("gap filter");
+      await this.cancelRestingBuy("gap filter", nowMs ?? nowSec * 1000);
       return;
     }
     if (!crossingCancellationDue && !stabilizeAllowsBuyForSide(phase, state, resting.side)) {
-      await this.cancelRestingBuy("stabilize filter");
+      await this.cancelRestingBuy("stabilize filter", nowMs ?? nowSec * 1000);
       return;
     }
 
@@ -3006,7 +3026,8 @@ class LiveTradingRegistry {
 
   async ensureLoaded(userId: string): Promise<LiveTradingService> {
     const engine = this.get(userId);
-    await engine.loadPersistedConfig();
+    // Hydrate stats once; later ensureLoaded calls only refresh config.
+    await engine.loadPersistedConfig({ hydrateStats: false });
     if (isTradingExecutor()) {
       try {
         await initTradingClient(userId);
