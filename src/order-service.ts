@@ -202,18 +202,22 @@ function parseFillFromResponse(
   };
 }
 
+const MIN_MARKET_BUY_USDC = 1;
+
 function resolveBuyUsdcAmount(size: number, sizeUnit: OrderSizeUnit, refPrice: number): number {
   if (sizeUnit === "usdc") {
-    return Math.max(0.01, Math.round(size * 100) / 100);
+    return Math.max(MIN_MARKET_BUY_USDC, Math.ceil(size * 100) / 100);
   }
-  // Shares mode: spend just enough USDC to target ~size shares at the reference ask.
+  // Shares mode: spend enough USDC for the requested shares, while satisfying
+  // Polymarket's $1 minimum for marketable BUY orders.
   const notional = size * refPrice;
-  return Math.max(0.01, Math.round(notional * 100) / 100);
+  return Math.max(MIN_MARKET_BUY_USDC, Math.ceil(notional * 100) / 100);
 }
 
-function estimatedSharesFromBuy(size: number, sizeUnit: OrderSizeUnit, refPrice: number, usdcAmount: number): number {
-  if (sizeUnit === "shares") return size;
+function estimatedSharesFromBuy(size: number, refPrice: number, usdcAmount: number): number {
   if (refPrice <= 0) return size;
+  // The submitted BUY amount is USDC. If it was raised to the $1 minimum,
+  // reflect the corresponding larger share estimate in fallback fill parsing.
   return Math.max(1, Math.round((usdcAmount / refPrice) * 1000) / 1000);
 }
 
@@ -277,8 +281,19 @@ export async function placeMarketOrder(
 
     const requestedShares =
       input.leg === "buy"
-        ? estimatedSharesFromBuy(size, sizeUnit, refPrice, amount)
+        ? estimatedSharesFromBuy(size, refPrice, amount)
         : amount;
+
+    if (input.leg === "buy") {
+      const requestedUsdc = sizeUnit === "usdc" ? size : size * refPrice;
+      if (amount > requestedUsdc + 1e-9) {
+        logService.info(
+          "trading",
+          `Raised BUY to Polymarket $${MIN_MARKET_BUY_USDC.toFixed(2)} minimum: ` +
+            `${requestedShares} sh estimated @ ${(refPrice * 100).toFixed(1)}¢`,
+        );
+      }
+    }
 
     const resp = (await client.createAndPostMarketOrder(
       {
