@@ -2665,7 +2665,7 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  --trade-content-height: 200px;
+  --trade-content-height: 252px;
   --prev-content-height: 0px;
   --log-content-height: 0px;
   --log-margin-top: 0px;
@@ -3126,7 +3126,7 @@ body.is-row-resizing .panel-header-drag-handle {
 .wallet-control-field--buy-override {
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
+  gap: 0;
 }
 
 .buy-override-toggle {
@@ -3140,17 +3140,28 @@ body.is-row-resizing .panel-header-drag-handle {
 
 .buy-override-params {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
+  flex-direction: column;
+  gap: 6px;
   font-size: 11px;
   color: var(--muted);
+  margin-top: 8px;
+  max-height: 96px;
+  opacity: 1;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.25s ease, margin-top 0.25s ease;
 }
 
 .buy-override-param {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 8px;
+  width: 50%;
+}
+
+.buy-override-param-label {
+  color: var(--muted);
+  flex-shrink: 0;
 }
 
 .buy-override-price-input,
@@ -3181,7 +3192,9 @@ body.is-row-resizing .panel-header-drag-handle {
 }
 
 .wallet-control-field--buy-override:has(#buy-override-enabled:not(:checked)) .buy-override-params {
-  opacity: 0.55;
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
 }
 
 .buy-override-price-input:disabled,

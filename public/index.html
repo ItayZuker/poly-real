@@ -300,8 +300,8 @@
                     </span>
                   </label>
                   <div class="buy-override-params">
-                    <span class="buy-override-param">
-                      At
+                    <label class="buy-override-param" for="buy-override-price">
+                      <span class="buy-override-param-label">Trigger</span>
                       <input
                         type="number"
                         id="buy-override-price"
@@ -313,9 +313,9 @@
                         disabled
                         aria-label="Buy override price in cents"
                       />
-                      ¢
-                    </span>
-                    <span class="buy-override-param">
+                    </label>
+                    <label class="buy-override-param" for="buy-override-shares">
+                      <span class="buy-override-param-label">Shares</span>
                       <input
                         type="number"
                         id="buy-override-shares"
@@ -327,9 +327,9 @@
                         disabled
                         aria-label="Buy override shares"
                       />
-                      shares
-                    </span>
-                    <span class="buy-override-param">
+                    </label>
+                    <label class="buy-override-param" for="buy-override-direction">
+                      <span class="buy-override-param-label">Price vs PTB</span>
                       <select
                         id="buy-override-direction"
                         class="buy-override-direction"
@@ -339,8 +339,7 @@
                         <option value="with">With</option>
                         <option value="opposite">Opposite</option>
                       </select>
-                      PTB
-                    </span>
+                    </label>
                   </div>
                 </div>
               </div>
