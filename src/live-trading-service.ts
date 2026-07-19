@@ -521,6 +521,8 @@ export class LiveTradingService {
   private restingBuy: RestingBuyOrder | null = null;
   /** After gap/stabilize cancel, delay before placing another resting GTD buy. */
   private gtdBuyRepressUntilMs = 0;
+  /** Last phase index for clearing buy repress across phase boundaries. */
+  private lastGtdBuyPhaseIdx = -1;
   /** Resting GTD maker sell for the open auto/manual-managed position. */
   private restingSell: RestingSellOrder | null = null;
   /** After a rejected GTD sell (e.g. expiration), skip further sell places this window. */
@@ -1301,6 +1303,7 @@ export class LiveTradingService {
     this.overrideHoldWindowKey = null;
     this.overrideGtdBlockedWindowKey = null;
     this.gtdBuyRepressUntilMs = 0;
+    this.lastGtdBuyPhaseIdx = -1;
     this.gtdSellBlockedWindowKey = null;
     if (isTradingExecutor()) {
       if (prevResting?.orderId) void cancelOpenOrder(this.userId, prevResting.orderId);
@@ -1873,7 +1876,6 @@ export class LiveTradingService {
     setup: SimSetup,
     nowMs?: number,
   ): Promise<void> {
-    if (this.orderInFlight) return;
     if (this.manualBuyPending || this.manualBuyOverrideWindowKey === sessionKey(state)) return;
     if (this.buyBlockedWindowKey === sessionKey(state)) {
       if (this.restingBuy) await this.cancelRestingBuy("buy blocked");
@@ -1886,7 +1888,14 @@ export class LiveTradingService {
     const key = sessionKey(state);
     const crossingAborted = this.autoEngine.isPhaseBuyAborted(phaseIdx);
 
-    // Phase changed or optimize/disabled/stabilize/crossing abort — cancel prior resting buy.
+    // Phase boundary must not inherit gap/stabilize repress from the prior phase.
+    if (this.lastGtdBuyPhaseIdx !== phaseIdx) {
+      this.lastGtdBuyPhaseIdx = phaseIdx;
+      this.gtdBuyRepressUntilMs = 0;
+    }
+
+    // Always cancel stale resting buys even while another order is in flight —
+    // skipping this left phase-1 limits live into phase 2/3.
     if (this.restingBuy) {
       const r = this.restingBuy;
       const restingStabilizeOk = stabilizeAllowsBuyForSide(phase, state, r.side);
@@ -1920,6 +1929,7 @@ export class LiveTradingService {
       if (this.restingBuy) return; // still open — don't place another
     }
 
+    if (this.orderInFlight) return;
     if (crossingAborted) return;
 
     if (await this.adoptOnChainPositionIfAny(state)) return;

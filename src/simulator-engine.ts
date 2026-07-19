@@ -187,6 +187,8 @@ export class SimulatorEngine {
   };
   /** After gap/stabilize cancels, wait before re-placing to avoid tick thrash. */
   private gtdRepressUntilMs = 0;
+  /** Last phase index seen this window — used to clear repress on phase change. */
+  private lastGtdPhaseIdx = -1;
 
   getMarkers(): SimMarker[] {
     return [...this.markers];
@@ -353,6 +355,7 @@ export class SimulatorEngine {
     this.windowEndSnapshot = null;
     this.resetQuoteLocks();
     this.gtdRepressUntilMs = 0;
+    this.lastGtdPhaseIdx = -1;
     logService.info("sim", `New window ${state.windowStart}`);
   }
 
@@ -836,6 +839,11 @@ export class SimulatorEngine {
     simNowMs: number,
   ): void {
     if (!phase.buyOptimize) this.buyWatch = null;
+    // Phase boundary must not inherit gap/stabilize repress from the prior phase.
+    if (this.lastGtdPhaseIdx !== phaseIdx) {
+      this.lastGtdPhaseIdx = phaseIdx;
+      this.gtdRepressUntilMs = 0;
+    }
     if (!this.restingGtd) return;
     const restingSide = this.restingGtd.side;
     if (
@@ -865,10 +873,16 @@ export class SimulatorEngine {
     nowSec: number,
     state: LiveWindowState,
     phase: SimSetup["phases"][number],
+    phaseIdx: number,
     simNowMs: number,
   ): void {
     const resting = this.restingGtd;
     if (!resting) return;
+    // Safety: never fill a resting order that belongs to a previous phase.
+    if (resting.phaseIdx !== phaseIdx) {
+      this.cancelRestingGtd("phase change", simNowMs);
+      return;
+    }
 
     if (!stabilizeAllowsBuyForSide(phase, state, resting.side)) {
       this.cancelRestingGtd("stabilize filter", simNowMs);
@@ -1064,10 +1078,10 @@ export class SimulatorEngine {
 
     // GTD resting: cancel on phase/optimize change, fill from book, place when active.
     this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs);
-    this.tickRestingGtd(quote, nowSec, state, phase, simNowMs);
+    this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     if (!this.position || this.restingGtd) {
       this.tryPlaceRestingGtd(phase, phaseIdx, state, simNowMs);
-      this.tickRestingGtd(quote, nowSec, state, phase, simNowMs);
+      this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     }
 
     if (!this.position && !this.pendingBuy && !this.restingGtd) {
