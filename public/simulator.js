@@ -1,6 +1,6 @@
 /** Simulator UI — phase overlay, markers, tooltips (logic runs on server). */
 (function () {
-  const UP_COLOR = "#3fb950";
+  const UP_COLOR = "#2ea043";
   const DOWN_COLOR = "#f85149";
   const LINE_COLOR = "#6e7681";
   const LINE_COLOR_HOVER = "#58a6ff";

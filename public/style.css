@@ -11,7 +11,7 @@
   --text: #e6edf3;
   --muted: #8b949e;
   --accent: #58a6ff;
-  --up: #3fb950;
+  --up: #2ea043;
   --down: #f85149;
   --box-gap: 6px;
   --row-height: 40px;
@@ -2221,7 +2221,7 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
 
 .settings-inline-status--ok,
 #settings-wallet-status.settings-conn--ok {
-  color: var(--up, #3fb950);
+  color: var(--up, #2ea043);
   font-weight: 600;
 }
 
@@ -2849,7 +2849,7 @@ body.is-row-resizing .panel-header-drag-handle {
 }
 
 .wallet-header-status--ok {
-  color: var(--up, #3fb950);
+  color: var(--up, #2ea043);
 }
 
 .wallet-header-status--error {

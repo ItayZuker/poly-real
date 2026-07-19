@@ -1636,7 +1636,7 @@ function drawPriceChart(state, options = {}) {
 
   const last = points[points.length - 1];
   const lineColor =
-    ptb != null && last.price >= ptb ? "#3fb950" : "#f85149";
+    ptb != null && last.price >= ptb ? "#2ea043" : "#f85149";
 
   ctx.strokeStyle = lineColor;
   ctx.lineWidth = 2;
