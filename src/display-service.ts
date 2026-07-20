@@ -109,7 +109,7 @@ export class DisplayService {
       this.prefetchedYesTokenId,
       this.prefetchedNoTokenId,
     ].filter((id): id is string => Boolean(id));
-    clobMarketFeed.setDesiredSubscriptions(ids);
+    clobMarketFeed.setOwnerSubscriptions("display", ids);
   }
 
   getState(): LiveWindowState {
@@ -250,6 +250,7 @@ export class DisplayService {
         this.lastPtbSide = null;
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
+        this.state.priceToBeatSource = undefined;
         this.prefetchedNextWindowStart = null;
         this.prefetchedYesTokenId = null;
         this.prefetchedNoTokenId = null;
@@ -278,12 +279,16 @@ export class DisplayService {
         this.state.prevCloseAsset = live.prevCloseAsset;
         this.state.assetPrice = live.assetPrice;
         this.state.assetGap = live.assetGap;
+        this.state.priceToBeatSource = live.priceToBeatSource;
       } catch {
         const live = chainlinkPriceFeed.getLivePrice(asset);
         if (live) {
           this.state.assetPrice = live.value;
           if (this.state.prevCloseAsset != null) {
             this.state.assetGap = live.value - this.state.prevCloseAsset;
+          }
+          if (!this.state.priceToBeatSource && this.state.prevCloseAsset != null) {
+            this.state.priceToBeatSource = "chainlink-boundary";
           }
         }
       }

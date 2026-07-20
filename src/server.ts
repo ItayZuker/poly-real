@@ -18,6 +18,7 @@ import {
   deleteSchedulePlacement,
   deletePlacementsByDay,
   deletePlacementsBySetupId,
+  deleteAllSchedulePlacementsForUser,
   ensureSchedulePlacementsUserId,
   getSchedulePlacementById,
   insertSchedulePlacement,
@@ -34,6 +35,7 @@ import {
   getTradingSetupById,
   updateTradingSetup,
   deleteTradingSetup,
+  deleteAllTradingSetupsForUser,
   reorderTradingSetups,
   normalizePhaseSetup,
   ensureTradingSetupsUserId,
@@ -43,6 +45,7 @@ import {
   syncLiveScheduleInUseForSetup,
 } from "./db/live-schedule-setup-usage.js";
 import {
+  deleteAllTradingSessionDataForUser,
   ensureTradingSessionMemoryUserId,
   sumTradingSessionMemory,
   sumTradingStatEventsForSeries,
@@ -74,6 +77,7 @@ import {
   getBootstrapUserId,
   getUserPublicById,
   maybeBootstrapDefaultPassword,
+  registerUser,
   updateUserProfile,
   updateUserWallet,
   type UserPublic,
@@ -125,6 +129,7 @@ async function loadAuthUser(req: express.Request): Promise<UserPublic | null> {
 
 function isPublicAuthPath(req: express.Request): boolean {
   if (req.method === "POST" && req.path === "/api/auth/login") return true;
+  if (req.method === "POST" && req.path === "/api/auth/register") return true;
   if (req.method === "GET" && req.path === "/api/auth/me") return true;
   return false;
 }
@@ -173,6 +178,26 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as {
+      email?: string;
+      password?: string;
+      name?: string;
+    };
+    const user = await registerUser({
+      email: body.email ?? "",
+      password: body.password ?? "",
+      name: body.name,
+    });
+    const { token, expiresAt } = await createSession(new ObjectId(user.id));
+    res.setHeader("Set-Cookie", buildSessionCookie(token, expiresAt, isSecureRequest(req)));
+    res.status(201).json({ user });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.get("/api/auth/me", async (req, res) => {
   try {
     const user = await loadAuthUser(req);
@@ -200,6 +225,14 @@ app.delete("/api/auth/account", async (req, res) => {
     const oid = new ObjectId(userId);
 
     await destroySessionsForUser(oid);
+
+    // Cascade user-owned trading data before dropping the user doc.
+    await Promise.all([
+      deleteAllTradingSetupsForUser(userId),
+      deleteAllSchedulePlacementsForUser(userId),
+      deleteAllTradingSessionDataForUser(userId),
+    ]);
+
     const deleted = await deleteUserById(oid);
     if (!deleted) {
       res.status(404).json({ error: "User not found" });
@@ -207,6 +240,7 @@ app.delete("/api/auth/account", async (req, res) => {
     }
 
     dropTradingClient(userId);
+    liveTradingRegistry.drop(userId);
 
     // Keep a bootstrap default user if the DB is empty after delete.
     try {
@@ -267,6 +301,7 @@ function quotesPayloadFromState(state: ReturnType<typeof displayService.getState
     assetPrice: state.assetPrice,
     assetGap: state.assetGap,
     prevCloseAsset: state.prevCloseAsset,
+    priceToBeatSource: state.priceToBeatSource,
     yesBid: state.yesBid,
     yesAsk: state.yesAsk,
     noBid: state.noBid,

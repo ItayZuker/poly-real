@@ -371,6 +371,17 @@ export async function deleteTradingSetup(userId: string, id: string): Promise<bo
   return result.deletedCount === 1;
 }
 
+/** Delete every trading setup owned by this user (account teardown). */
+export async function deleteAllTradingSetupsForUser(userId: string): Promise<number> {
+  await ensureReady();
+  const mongo = await getMongoClient();
+  const result = await mongo
+    .db(getMongoDbName())
+    .collection(COLLECTION)
+    .deleteMany({ userId: String(userId) });
+  return result.deletedCount ?? 0;
+}
+
 /** Persist list order; `orderedIds` must list every setup for the user exactly once. */
 export async function reorderTradingSetups(
   userId: string,

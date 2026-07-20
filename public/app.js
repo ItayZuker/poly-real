@@ -76,12 +76,38 @@ function setAuthError(message) {
   el.textContent = message;
 }
 
+function setSignupError(message) {
+  const el = $("auth-signup-error");
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+}
+
+function showAuthView(view) {
+  const home = $("auth-home");
+  const login = $("auth-login-panel");
+  const signup = $("auth-signup-panel");
+  if (home) home.hidden = view !== "home";
+  if (login) login.hidden = view !== "login";
+  if (signup) signup.hidden = view !== "signup";
+  setAuthError("");
+  setSignupError("");
+  if (view === "login") $("auth-email")?.focus();
+  else if (view === "signup") $("auth-signup-email")?.focus();
+}
+
 function showAuthScreen() {
   const auth = $("auth-screen");
   const app = $("app-shell");
   if (auth) auth.hidden = false;
   if (app) app.hidden = true;
   document.body.style.overflow = "hidden";
+  showAuthView("home");
 }
 
 function showAppShell() {
@@ -111,6 +137,18 @@ async function loginWithCredentials(email, password) {
   return payload.user;
 }
 
+async function registerWithCredentials({ email, password, name }) {
+  const res = await fetch("/api/auth/register", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, name }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
+  return payload.user;
+}
+
 async function logoutSession() {
   const res = await fetch("/api/auth/logout", {
     method: "POST",
@@ -129,27 +167,76 @@ async function deleteAccount() {
   if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
 }
 
+let currentUserId = null;
+
+function setCurrentUser(user) {
+  currentUserId = user?.id ? String(user.id) : null;
+}
+
+function userScopedStorageKey(base) {
+  return currentUserId ? `${base}:u:${currentUserId}` : base;
+}
+
+window.userScopedStorageKey = userScopedStorageKey;
+
 function bindAuthForm(onLoggedIn) {
   const form = $("auth-login-form");
-  if (!form || form.dataset.bound === "1") return;
-  form.dataset.bound = "1";
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    setAuthError("");
-    const email = $("auth-email")?.value?.trim() ?? "";
-    const password = $("auth-password")?.value ?? "";
-    const btn = $("auth-login-btn");
-    if (btn) btn.disabled = true;
-    try {
-      const user = await loginWithCredentials(email, password);
-      if ($("auth-password")) $("auth-password").value = "";
-      await onLoggedIn(user);
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  });
+  if (form && form.dataset.bound !== "1") {
+    form.dataset.bound = "1";
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setAuthError("");
+      const email = $("auth-email")?.value?.trim() ?? "";
+      const password = $("auth-password")?.value ?? "";
+      const btn = $("auth-login-btn");
+      if (btn) btn.disabled = true;
+      try {
+        const user = await loginWithCredentials(email, password);
+        if ($("auth-password")) $("auth-password").value = "";
+        await onLoggedIn(user);
+      } catch (err) {
+        setAuthError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+  }
+
+  const signupForm = $("auth-signup-form");
+  if (signupForm && signupForm.dataset.bound !== "1") {
+    signupForm.dataset.bound = "1";
+    signupForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setSignupError("");
+      const email = $("auth-signup-email")?.value?.trim() ?? "";
+      const password = $("auth-signup-password")?.value ?? "";
+      const name = $("auth-signup-name")?.value?.trim() ?? "";
+      const btn = $("auth-signup-btn");
+      if (btn) btn.disabled = true;
+      try {
+        const user = await registerWithCredentials({ email, password, name });
+        if ($("auth-signup-password")) $("auth-signup-password").value = "";
+        await onLoggedIn(user);
+      } catch (err) {
+        setSignupError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+  }
+
+  const bindNav = (id, view) => {
+    const el = $(id);
+    if (!el || el.dataset.bound === "1") return;
+    el.dataset.bound = "1";
+    el.addEventListener("click", () => showAuthView(view));
+  };
+  bindNav("auth-goto-login", "login");
+  bindNav("auth-goto-signup", "signup");
+  bindNav("auth-login-to-signup", "signup");
+  bindNav("auth-login-to-home", "home");
+  bindNav("auth-signup-to-login", "login");
+  bindNav("auth-signup-to-home", "home");
 }
 
 function renderWalletAccount(data) {
@@ -1782,7 +1869,15 @@ function drawPriceChart(state, options = {}) {
     ctx.fillStyle = "#d29922";
     ctx.textAlign = "left";
     ctx.textBaseline = "bottom";
-    ctx.fillText("PTB", padding.left + 4, ptbY - 2);
+    const ptbLabel =
+      state.priceToBeatSource === "chainlink-boundary"
+        ? "PTB (Chainlink)"
+        : state.priceToBeatSource === "polymarket-priorClose"
+          ? "PTB (prior)"
+          : state.priceToBeatSource === "polymarket-openPrice"
+            ? "PTB (Polymarket)"
+            : "PTB";
+    ctx.fillText(ptbLabel, padding.left + 4, ptbY - 2);
   }
 
   const last = points[points.length - 1];
@@ -1819,6 +1914,33 @@ function drawPriceChart(state, options = {}) {
 function updateGraphPanel(state) {
   $("graph-ptb").textContent = fmtPrice(state.prevCloseAsset);
   $("graph-current").textContent = fmtPrice(state.assetPrice);
+
+  const ptbSourceEl = $("graph-ptb-source");
+  if (ptbSourceEl) {
+    const src = state.priceToBeatSource;
+    if (src === "polymarket-openPrice") {
+      ptbSourceEl.textContent = "Polymarket";
+      ptbSourceEl.title = "Official Polymarket window open — same reference used for settlement";
+      ptbSourceEl.hidden = false;
+      ptbSourceEl.classList.toggle("is-provisional", false);
+    } else if (src === "polymarket-priorClose") {
+      ptbSourceEl.textContent = "prior close";
+      ptbSourceEl.title = "Previous window Polymarket close (open not ready yet)";
+      ptbSourceEl.hidden = false;
+      ptbSourceEl.classList.toggle("is-provisional", true);
+    } else if (src === "chainlink-boundary") {
+      ptbSourceEl.textContent = "Chainlink";
+      ptbSourceEl.title =
+        "Provisional Chainlink open — may differ from Polymarket settlement until open is available";
+      ptbSourceEl.hidden = false;
+      ptbSourceEl.classList.toggle("is-provisional", true);
+    } else {
+      ptbSourceEl.textContent = "";
+      ptbSourceEl.title = "";
+      ptbSourceEl.hidden = true;
+      ptbSourceEl.classList.toggle("is-provisional", false);
+    }
+  }
 
   const gapEl = $("graph-gap");
   if (state.assetGap != null && Number.isFinite(state.assetGap)) {
@@ -1910,7 +2032,9 @@ function renderPositionCard(card) {
   if (status === "sold") {
     detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.sellPrice)}`}</strong></div>`;
   } else {
-    detailHtml += `<div class="position-card-row"><span>Settlement</span><strong>${isLoading ? "" : (card.outcome || "—").toUpperCase()}</strong></div>`;
+    const outcome = card.outcome === "up" || card.outcome === "down" ? card.outcome : "";
+    const outcomeClass = outcome === "up" ? "is-up" : outcome === "down" ? "is-down" : "";
+    detailHtml += `<div class="position-card-row"><span>Market</span><strong class="position-card-outcome ${outcomeClass}">${isLoading ? "" : (outcome || "—").toUpperCase()}</strong></div>`;
   }
 
   if (isLoading) {
@@ -1928,7 +2052,7 @@ function renderPositionCard(card) {
   const sourceNote = isDemo ? "Demo" : isLoading ? "Pending…" : "Confirmed";
   return `<article class="position-card is-${status}${isDemo ? " is-demo" : ""}${isLoading ? " is-loading" : ""}" data-position-id="${card.id}">
     <div class="position-card-top">
-      <span class="position-card-side ${sideClass}">${(card.side || "").toUpperCase()}</span>
+      <span class="position-card-side ${sideClass}">Bet ${(card.side || "").toUpperCase()}</span>
       <span class="position-card-status">${statusLabel}</span>
     </div>
     ${detailHtml}
@@ -2005,7 +2129,9 @@ function saveScheduleViewPref(view) {
 
 function loadDemoPositionCards() {
   try {
-    const raw = localStorage.getItem(DEMO_POSITION_CARDS_KEY);
+    const raw =
+      localStorage.getItem(userScopedStorageKey(DEMO_POSITION_CARDS_KEY)) ||
+      localStorage.getItem(DEMO_POSITION_CARDS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -2016,7 +2142,10 @@ function loadDemoPositionCards() {
 
 function persistDemoPositionCards() {
   try {
-    localStorage.setItem(DEMO_POSITION_CARDS_KEY, JSON.stringify(demoPositionCards.slice(0, 100)));
+    localStorage.setItem(
+      userScopedStorageKey(DEMO_POSITION_CARDS_KEY),
+      JSON.stringify(demoPositionCards.slice(0, 100)),
+    );
   } catch {
     // ignore
   }
@@ -2026,6 +2155,7 @@ function clearDemoPositionCards() {
   demoPositionCards = [];
   lastDemoLastWindowKey = null;
   try {
+    localStorage.removeItem(userScopedStorageKey(DEMO_POSITION_CARDS_KEY));
     localStorage.removeItem(DEMO_POSITION_CARDS_KEY);
   } catch {
     // ignore
@@ -3382,14 +3512,16 @@ function normalizeManualAmount(value, unit) {
 const TRADING_CONFIG_STORAGE_KEY = "poly-trading-config";
 
 function tradingConfigStorageKey(series = selectedSeries) {
-  return `${TRADING_CONFIG_STORAGE_KEY}:${series || "btc-5m"}`;
+  const base = `${TRADING_CONFIG_STORAGE_KEY}:${series || "btc-5m"}`;
+  return userScopedStorageKey(base);
 }
 
 function readLocalTradingConfig() {
   try {
+    const legacySeries = `${TRADING_CONFIG_STORAGE_KEY}:${selectedSeries || "btc-5m"}`;
     const raw =
       localStorage.getItem(tradingConfigStorageKey()) ||
-      // Legacy unscoped key — only for default market.
+      localStorage.getItem(legacySeries) ||
       (selectedSeries === "btc-5m" ? localStorage.getItem(TRADING_CONFIG_STORAGE_KEY) : null);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
@@ -3847,12 +3979,14 @@ async function init() {
 let appInitialized = false;
 
 async function enterApp(user) {
+  setCurrentUser(user);
   showAppShell();
   if (user) {
     renderSettingsUser(user);
     applyWalletGate(isWalletReadyFromUser(user));
   }
   if (appInitialized) {
+    demoPositionCards = loadDemoPositionCards();
     void loadWalletAccount();
     void loadSettingsUser();
     return;
@@ -3873,10 +4007,9 @@ async function boot() {
       return;
     }
   } catch {
-    // fall through to auth screen
+    // fall through to home
   }
   showAuthScreen();
-  $("auth-email")?.focus();
 }
 
 boot();

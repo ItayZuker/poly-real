@@ -38,40 +38,99 @@
 </head>
 <body>
   <div id="auth-screen" class="auth-screen" hidden>
-    <div class="auth-panel">
-      <h1 class="auth-brand">Poly Real</h1>
-      <p class="auth-sub">Sign in to continue</p>
-      <form id="auth-login-form" class="auth-form" autocomplete="on">
-        <label class="auth-field">
-          <span class="auth-field-label">Email</span>
-          <input
-            type="email"
-            id="auth-email"
-            class="auth-field-input"
-            name="email"
-            autocomplete="username"
-            required
-            maxlength="254"
-          />
-        </label>
-        <label class="auth-field">
-          <span class="auth-field-label">Password</span>
-          <input
-            type="password"
-            id="auth-password"
-            class="auth-field-input"
-            name="password"
-            autocomplete="current-password"
-            required
-            maxlength="200"
-          />
-        </label>
-        <p id="auth-error" class="auth-error" hidden></p>
-        <button type="submit" id="auth-login-btn" class="auth-primary-btn">Log in</button>
-      </form>
-      <button type="button" id="auth-signup-btn" class="auth-secondary-btn" disabled title="Signup coming soon">
-        Sign up (coming soon)
-      </button>
+    <div class="auth-shell">
+      <div id="auth-home" class="auth-home">
+        <h1 class="auth-brand">Poly Real</h1>
+        <p class="auth-tagline">Schedule-driven Polymarket trading — preview, then go live.</p>
+        <p class="auth-sub">Sign in to open your markets, schedule, and wallet.</p>
+        <div class="auth-cta-row">
+          <button type="button" id="auth-goto-login" class="auth-primary-btn">Log in</button>
+          <button type="button" id="auth-goto-signup" class="auth-secondary-btn">Sign up</button>
+        </div>
+      </div>
+
+      <div id="auth-login-panel" class="auth-panel" hidden>
+        <h1 class="auth-brand">Poly Real</h1>
+        <p class="auth-sub">Sign in to continue</p>
+        <form id="auth-login-form" class="auth-form" autocomplete="on">
+          <label class="auth-field">
+            <span class="auth-field-label">Email</span>
+            <input
+              type="email"
+              id="auth-email"
+              class="auth-field-input"
+              name="email"
+              autocomplete="username"
+              required
+              maxlength="254"
+            />
+          </label>
+          <label class="auth-field">
+            <span class="auth-field-label">Password</span>
+            <input
+              type="password"
+              id="auth-password"
+              class="auth-field-input"
+              name="password"
+              autocomplete="current-password"
+              required
+              maxlength="200"
+            />
+          </label>
+          <p id="auth-error" class="auth-error" hidden></p>
+          <button type="submit" id="auth-login-btn" class="auth-primary-btn">Log in</button>
+        </form>
+        <button type="button" id="auth-login-to-signup" class="auth-text-btn">Need an account? Sign up</button>
+        <button type="button" id="auth-login-to-home" class="auth-text-btn">← Back</button>
+      </div>
+
+      <div id="auth-signup-panel" class="auth-panel" hidden>
+        <h1 class="auth-brand">Create account</h1>
+        <p class="auth-sub">Email and password — add a wallet later in Settings.</p>
+        <form id="auth-signup-form" class="auth-form" autocomplete="on">
+          <label class="auth-field">
+            <span class="auth-field-label">Display name</span>
+            <input
+              type="text"
+              id="auth-signup-name"
+              class="auth-field-input"
+              name="name"
+              autocomplete="nickname"
+              maxlength="80"
+              placeholder="Optional"
+            />
+          </label>
+          <label class="auth-field">
+            <span class="auth-field-label">Email</span>
+            <input
+              type="email"
+              id="auth-signup-email"
+              class="auth-field-input"
+              name="email"
+              autocomplete="email"
+              required
+              maxlength="254"
+            />
+          </label>
+          <label class="auth-field">
+            <span class="auth-field-label">Password</span>
+            <input
+              type="password"
+              id="auth-signup-password"
+              class="auth-field-input"
+              name="password"
+              autocomplete="new-password"
+              required
+              minlength="6"
+              maxlength="200"
+            />
+          </label>
+          <p id="auth-signup-error" class="auth-error" hidden></p>
+          <button type="submit" id="auth-signup-btn" class="auth-primary-btn">Create account</button>
+        </form>
+        <button type="button" id="auth-signup-to-login" class="auth-text-btn">Already have an account? Log in</button>
+        <button type="button" id="auth-signup-to-home" class="auth-text-btn">← Back</button>
+      </div>
     </div>
   </div>
 
@@ -423,7 +482,10 @@
         <div class="sim-row">
           <div class="sim-box">
             <div class="sim-cell">
-              <div class="sim-label">Price to Beat</div>
+              <div class="sim-label">
+                Price to Beat
+                <span id="graph-ptb-source" class="sim-label-hint" hidden></span>
+              </div>
               <div id="graph-ptb" class="sim-value">—</div>
             </div>
           </div>
@@ -435,7 +497,10 @@
           </div>
           <div class="sim-box">
             <div class="sim-cell">
-              <div class="sim-label">Gap</div>
+              <div class="sim-label">
+                Gap
+                <span id="graph-gap-hint" class="sim-label-hint" title="Live Chainlink vs PTB. Final payout uses Polymarket close.">live</span>
+              </div>
               <div id="graph-gap" class="sim-value">—</div>
             </div>
           </div>

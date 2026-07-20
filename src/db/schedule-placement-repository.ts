@@ -356,6 +356,16 @@ export async function deleteSchedulePlacement(userId: string, id: string): Promi
   return result.deletedCount === 1;
 }
 
+/** Delete every schedule placement owned by this user (account teardown). */
+export async function deleteAllSchedulePlacementsForUser(userId: string): Promise<number> {
+  const mongo = await getMongoClient();
+  const result = await mongo
+    .db(getMongoDbName())
+    .collection(COLLECTION)
+    .deleteMany({ userId: String(userId) });
+  return result.deletedCount ?? 0;
+}
+
 export async function deletePlacementsBySetupId(userId: string, setupId: string): Promise<number> {
   const mongo = await getMongoClient();
   const result = await mongo

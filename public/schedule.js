@@ -1029,9 +1029,17 @@
     return { hasData: hasAny, green, red, blue, pnl };
   }
 
+  function demoHitsStorageKey() {
+    return typeof window.userScopedStorageKey === "function"
+      ? window.userScopedStorageKey(DEMO_HITS_STORAGE_KEY)
+      : DEMO_HITS_STORAGE_KEY;
+  }
+
   function loadDemoHitsStore() {
     try {
-      const raw = localStorage.getItem(DEMO_HITS_STORAGE_KEY);
+      const raw =
+        localStorage.getItem(demoHitsStorageKey()) ||
+        localStorage.getItem(DEMO_HITS_STORAGE_KEY);
       if (!raw) return { byWindow: {}, totals: emptyTotals() };
       const parsed = JSON.parse(raw);
       const byWindow =
@@ -1045,7 +1053,7 @@
   function persistDemoHitsStore() {
     try {
       localStorage.setItem(
-        DEMO_HITS_STORAGE_KEY,
+        demoHitsStorageKey(),
         JSON.stringify({ byWindow: demoHitsStore.byWindow }),
       );
     } catch {
@@ -1095,6 +1103,7 @@
   function clearDemoHitsStore() {
     demoHitsStore = { byWindow: {}, totals: emptyTotals() };
     try {
+      localStorage.removeItem(demoHitsStorageKey());
       localStorage.removeItem(DEMO_HITS_STORAGE_KEY);
     } catch {
       // ignore

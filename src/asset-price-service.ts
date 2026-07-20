@@ -127,15 +127,15 @@ function getChainlinkPriceToBeat(
   return chainlinkPriceFeed.getPriceToBeat(asset, window.windowStart, prevWindowStart);
 }
 
+/**
+ * Prefer Polymarket's official open as PTB so the live graph gap matches
+ * settlement. Chainlink boundary is only a fallback before open is known.
+ */
 function resolvePriceToBeat(
   chainlinkPtb: number | undefined,
   rest: WindowRestCache | undefined,
   priorClose: number | undefined,
 ): { priceToBeat?: number; priceToBeatSource: PriceToBeatSource } {
-  if (chainlinkPtb != null) {
-    return { priceToBeat: chainlinkPtb, priceToBeatSource: "chainlink-boundary" };
-  }
-
   const apiOpen = rest?.openPrice;
   if (apiOpen != null) {
     const openLooksStale =
@@ -144,14 +144,20 @@ function resolvePriceToBeat(
       !pricesMatch(apiOpen, priorClose);
 
     if (openLooksStale) {
-      return { priceToBeat: priorClose, priceToBeatSource: "polymarket-priorClose" };
+      if (priorClose != null) {
+        return { priceToBeat: priorClose, priceToBeatSource: "polymarket-priorClose" };
+      }
+    } else {
+      return { priceToBeat: apiOpen, priceToBeatSource: "polymarket-openPrice" };
     }
-
-    return { priceToBeat: apiOpen, priceToBeatSource: "polymarket-openPrice" };
   }
 
   if (priorClose != null) {
     return { priceToBeat: priorClose, priceToBeatSource: "polymarket-priorClose" };
+  }
+
+  if (chainlinkPtb != null) {
+    return { priceToBeat: chainlinkPtb, priceToBeatSource: "chainlink-boundary" };
   }
 
   return { priceToBeat: undefined, priceToBeatSource: "polymarket-openPrice" };

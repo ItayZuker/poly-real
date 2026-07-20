@@ -59,6 +59,7 @@ import {
 } from "./db/user-repository.js";
 import { DEFAULT_MARKET_SERIES } from "./collections.js";
 import { isTradingExecutor } from "./trading-executor.js";
+import { seriesMarketHub } from "./series-market-hub.js";
 import {
   centsToPrice,
   gapAllowsBuy,
@@ -611,6 +612,8 @@ export class LiveTradingService {
   private gtdBuyRepressUntilMs = 0;
   /** Last phase index for clearing buy repress across phase boundaries. */
   private lastGtdBuyPhaseIdx = -1;
+  /** After a rejected phase GTD buy (e.g. expiration), skip further places this window. */
+  private gtdBuyBlockedWindowKey: string | null = null;
   /** Live FAK optimize watch (only while live-armed; sim is not ticked). */
   private liveFakWatch: LiveFakBuyWatch | null = null;
   /** Resting phase GTD buys awaiting confirmed CLOB cancel (and possible race fill). */
@@ -1109,9 +1112,15 @@ export class LiveTradingService {
     const isLive =
       this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
     if (isLive && (!wasLive || patch.startTrading === true || patch.useSchedule === true)) {
+      // Arm collection + current live slot only. Do NOT run full
+      // syncActivatedSchedulePlacements here — that retroactively zeros every
+      // elapsed card and looks like an Allow-trade "reset".
       void this.ensureCollectionStarted()
-        .then(() => this.syncActivatedSchedulePlacements())
-        .then(() => this.refreshScheduleContext(true));
+        .then(() => this.refreshScheduleContext(true))
+        .then(() => {
+          const liveId = this.scheduleContext?.placementId;
+          if (liveId) this.rememberActivatedPlacement(liveId);
+        });
     }
     if (wasOverrideActive && !this.isBuyOverrideConfigActive() && this.overrideRestingBuy) {
       void this.cancelOverrideRestingBuy("override disabled");
@@ -1678,6 +1687,7 @@ export class LiveTradingService {
     this.overrideGtdBlockedWindowKey = null;
     this.gtdBuyRepressUntilMs = 0;
     this.lastGtdBuyPhaseIdx = -1;
+    this.gtdBuyBlockedWindowKey = null;
     this.liveFakWatch = null;
     this.pendingBuyCancels = [];
     this.liveAbortedBuyPhases.clear();
@@ -1930,7 +1940,12 @@ export class LiveTradingService {
   }
 
   private async tickUnlocked(state: LiveWindowState, nowMs?: number): Promise<void> {
-    await this.ensureBoundToSeries(state.series || this.boundSeries);
+    // Never rebind from a shared display/feed series — each engine stays on its
+    // own boundSeries (set via ensureBoundToSeries from that user's API).
+    const feedSeries =
+      String(state.series || "").trim() || this.boundSeries || DEFAULT_MARKET_SERIES;
+    if (feedSeries !== this.boundSeries) return;
+
     const prevSessionKey = this.sessionKey;
     this.ensureWindow(state);
     const windowRolled = prevSessionKey != null && prevSessionKey !== this.sessionKey;
@@ -2551,8 +2566,6 @@ export class LiveTradingService {
     if (this.overrideRestingBuy) return;
     if (this.overrideGtdBlockedWindowKey === key) return;
     const windowEnd = state.windowEnd ?? nowSec + 300;
-    // Same as phase GTD: near window close Polymarket rejects expiration — don't spam.
-    if (nowSec >= windowEnd - 90) return;
 
     this.orderInFlight = true;
     try {
@@ -2688,10 +2701,8 @@ export class LiveTradingService {
     if (this.positions.up || this.positions.down) return;
     if (this.isBuyBlocked(state)) return;
     if (this.restingBuy) return;
+    if (this.gtdBuyBlockedWindowKey === key) return;
     if ((nowMs ?? Date.now()) < this.gtdBuyRepressUntilMs) return;
-    // Avoid end-of-window spam: Polymarket rejects GTD expirations that are not
-    // sufficiently in the future relative to the live market clock.
-    if (state.windowEnd != null && nowSec >= state.windowEnd - 90) return;
 
     let chosenSide: "up" | "down" | null = null;
     for (const side of SIDES_ORDER) {
@@ -2722,7 +2733,7 @@ export class LiveTradingService {
         this.autoEngine.setExternalBuyPaused(false);
         const err = result.error ?? "";
         if (/expiration/i.test(err)) {
-          this.gtdBuyRepressUntilMs = windowEnd * 1000;
+          this.gtdBuyBlockedWindowKey = key;
           logService.warn("trading", `GTD buy skipped for rest of window (${err})`);
         } else if (err) {
           logService.warn("trading", `GTD place failed: ${err}`);
@@ -2925,9 +2936,6 @@ export class LiveTradingService {
     }
 
     const windowEnd = state.windowEnd ?? nowSec + 300;
-    // GTD needs a future expiration (~now+180 floor). Near window close, hold instead
-    // of spamming rejected place attempts every tick.
-    if (nowSec >= windowEnd - 90) return;
 
     const wasInFlight = this.orderInFlight;
     this.orderInFlight = true;
@@ -3829,7 +3837,39 @@ class LiveTradingRegistry {
 
   async tickAll(state: LiveWindowState, nowMs?: number): Promise<void> {
     const engines = [...this.engines.values()];
-    await Promise.all(engines.map((e) => e.tick(state, nowMs).catch(() => {})));
+    const displaySeries =
+      String(state.series || "").trim() || DEFAULT_MARKET_SERIES;
+    const matching = engines.filter((e) => e.getBoundSeries() === displaySeries);
+    const otherSeries = [
+      ...new Set(
+        engines
+          .map((e) => e.getBoundSeries())
+          .filter((s) => s && s !== displaySeries),
+      ),
+    ];
+
+    await Promise.all(matching.map((e) => e.tick(state, nowMs).catch(() => {})));
+
+    if (otherSeries.length === 0) {
+      seriesMarketHub.setActiveSeries([]);
+      return;
+    }
+    await seriesMarketHub.ensureSeries(otherSeries);
+    await Promise.all(
+      otherSeries.map(async (series) => {
+        const feed = seriesMarketHub.getState(series);
+        if (!feed) return;
+        await Promise.all(
+          engines
+            .filter((e) => e.getBoundSeries() === series)
+            .map((e) => e.tick(feed, nowMs).catch(() => {})),
+        );
+      }),
+    );
+  }
+
+  drop(userId: string): void {
+    this.engines.delete(userId);
   }
 
   async syncFromMongo(): Promise<void> {

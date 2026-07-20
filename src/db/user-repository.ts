@@ -413,6 +413,76 @@ export async function authenticateUser(
   return toPublic(user);
 }
 
+function normalizeDisplayName(raw: unknown, fallback: string): string {
+  const text = String(raw ?? "").trim();
+  const name = (text || fallback).slice(0, 80);
+  if (!name) throw new Error("Name is required");
+  return name;
+}
+
+function uniqueSlug(): string {
+  return `u-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Self-serve signup. Creates a user with email + password (no wallet yet).
+ */
+export async function registerUser(input: {
+  email: string;
+  password: string;
+  name?: string;
+}): Promise<UserPublic> {
+  const email = normalizeLoginEmail(input.email);
+  const emailKey = normalizeEmailKey(email);
+  const passwordHash = await hashPassword(normalizePassword(input.password));
+  const name = normalizeDisplayName(input.name, email.split("@")[0] || "trader");
+  const nameKey = normalizeNameKey(name);
+  const col = await collection();
+
+  const existingEmail = await col.findOne({ emailKey });
+  if (existingEmail) {
+    throw new Error("An account with this email already exists");
+  }
+  const existingName = await col.findOne({ nameKey });
+  if (existingName) {
+    throw new Error("That display name is already taken");
+  }
+
+  const now = new Date();
+  let slug = uniqueSlug();
+  for (let i = 0; i < 5; i++) {
+    const clash = await col.findOne({ slug });
+    if (!clash) break;
+    slug = uniqueSlug();
+  }
+
+  const doc: Omit<UserDocument, "_id"> = {
+    slug,
+    email,
+    emailKey,
+    name,
+    nameKey,
+    passwordHash,
+    wallet: { signatureType: 1 },
+    trading: defaultTrading(),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  try {
+    const result = await col.insertOne(doc as UserDocument);
+    const inserted = await col.findOne({ _id: result.insertedId });
+    if (!inserted) throw new Error("Failed to create account");
+    return toPublic(inserted);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/duplicate key|E11000/i.test(msg)) {
+      throw new Error("An account with this email or name already exists");
+    }
+    throw err;
+  }
+}
+
 /**
  * Set password for a user found by email. If no user has that email, assign
  * email + password to the default slug user (bootstrap path).

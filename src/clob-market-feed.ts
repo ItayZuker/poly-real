@@ -202,9 +202,38 @@ export class ClobMarketFeed {
   /**
    * Keep only these token subscriptions (current window + optional prefetch).
    * Unsubscribes and drops book state for everything else.
+   * Prefer setOwnerSubscriptions when multiple feeds share the socket.
    */
   setDesiredSubscriptions(tokenIds: string[]): void {
+    this.setOwnerSubscriptions("default", tokenIds);
+  }
+
+  private readonly ownerSubscriptions = new Map<string, string[]>();
+
+  /**
+   * Merge token subscriptions across named owners (display UI + background
+   * trading feeds). Reconciles the socket to the union of all owners.
+   */
+  setOwnerSubscriptions(owner: string, tokenIds: string[]): void {
+    const key = String(owner || "default").trim() || "default";
     const desired = [...new Set(tokenIds.filter(Boolean))];
+    if (desired.length === 0) {
+      this.ownerSubscriptions.delete(key);
+    } else {
+      this.ownerSubscriptions.set(key, desired);
+    }
+    this.reconcileOwnerSubscriptions();
+  }
+
+  clearOwnerSubscriptions(owner: string): void {
+    const key = String(owner || "default").trim() || "default";
+    if (!this.ownerSubscriptions.has(key)) return;
+    this.ownerSubscriptions.delete(key);
+    this.reconcileOwnerSubscriptions();
+  }
+
+  private reconcileOwnerSubscriptions(): void {
+    const desired = [...new Set([...this.ownerSubscriptions.values()].flat())];
     const desiredSet = new Set(desired);
 
     const toRemove = [...this.subscribedIds].filter((id) => !desiredSet.has(id));

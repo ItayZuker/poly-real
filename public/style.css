@@ -43,11 +43,21 @@ body {
   display: none;
 }
 
+.auth-shell {
+  width: min(420px, 100%);
+}
+
+.auth-home,
 .auth-panel {
-  width: min(380px, 100%);
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.auth-home[hidden],
+.auth-panel[hidden] {
+  display: none;
 }
 
 .auth-brand {
@@ -58,10 +68,29 @@ body {
   color: var(--text);
 }
 
+.auth-tagline {
+  margin: -4px 0 0;
+  color: var(--text);
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
 .auth-sub {
   margin: -6px 0 4px;
   color: var(--muted);
   font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.auth-cta-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.auth-cta-row .auth-primary-btn,
+.auth-cta-row .auth-secondary-btn {
+  flex: 1;
 }
 
 .auth-form {
@@ -134,9 +163,35 @@ body {
 .auth-secondary-btn {
   border: 1px solid var(--border);
   background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  opacity: 1;
+}
+
+.auth-secondary-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.auth-secondary-btn:disabled {
   color: var(--muted);
   cursor: not-allowed;
   opacity: 0.7;
+}
+
+.auth-text-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 4px 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.auth-text-btn:hover {
+  color: var(--accent);
 }
 
 .app {
@@ -3591,6 +3646,18 @@ body.is-row-resizing .panel-header-drag-handle {
   color: var(--down);
 }
 
+.position-card-outcome {
+  letter-spacing: 0.02em;
+}
+
+.position-card-outcome.is-up {
+  color: var(--up);
+}
+
+.position-card-outcome.is-down {
+  color: var(--down);
+}
+
 /* Keep the P/L row height stable while its value is empty during loading. */
 .position-card.is-loading .position-card-row strong {
   min-height: 1em;
@@ -4090,6 +4157,24 @@ body.is-column-resizing * {
   white-space: nowrap;
   flex-shrink: 0;
   line-height: 1;
+}
+
+.sim-label-hint {
+  margin-left: 4px;
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--accent);
+  vertical-align: baseline;
+}
+
+.sim-label-hint.is-provisional {
+  color: #d29922;
+}
+
+.sim-label-hint[hidden] {
+  display: none;
 }
 
 .sim-value,

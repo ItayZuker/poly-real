@@ -491,3 +491,14 @@ export async function sumTradingStatEventsForSeries(
   });
   return sumEvents(filtered);
 }
+
+/** Wipe trading session memory + stat events for account teardown. */
+export async function deleteAllTradingSessionDataForUser(userId: string): Promise<void> {
+  const uid = String(userId);
+  const meta = await metaCollection();
+  const events = await eventsCollection();
+  await Promise.all([
+    meta.deleteOne({ _id: uid }),
+    events.deleteMany({ userId: uid }),
+  ]);
+}
