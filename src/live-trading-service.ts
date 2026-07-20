@@ -3903,7 +3903,7 @@ class LiveTradingRegistry {
       await engine.loadPersistedConfig({ hydrateStats: false });
       if (isTradingExecutor() && user.wallet?.privateKeyEnc && user.wallet?.funderAddress) {
         try {
-          await initTradingClient(id);
+          await initTradingClient(id, { reason: "poll" });
         } catch {
           /* logged in client */
         }

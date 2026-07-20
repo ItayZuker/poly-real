@@ -81,7 +81,13 @@ export function isTradingConfigured(userId: string): boolean {
   return Boolean(slot.status.hasPrivateKey && slot.status.funderAddress);
 }
 
-export async function initTradingClient(userId: string): Promise<TradingAccountStatus> {
+export type TradingClientInitReason = "connect" | "poll" | "reconnect";
+
+export async function initTradingClient(
+  userId: string,
+  opts?: { reason?: TradingClientInitReason },
+): Promise<TradingAccountStatus> {
+  const reason = opts?.reason ?? "connect";
   const slot = getSlot(userId);
   const creds = await getWalletCredentials(userId);
   slot.credentials = creds;
@@ -151,11 +157,18 @@ export async function initTradingClient(userId: string): Promise<TradingAccountS
 
     void cacheSignerAddress(userId, account.address).catch(() => {});
 
-    logService.success(
-      "trading",
-      `Account connected (user ${userId.slice(0, 8)}…) — signer …${addressHint(account.address)}, funder …${addressHint(funderAddress)}, ` +
-        `balance $${formatUsdcBalance(balance.balance)} USDC`,
-    );
+    const balanceText = `balance $${formatUsdcBalance(balance.balance)} USDC`;
+    if (reason === "poll") {
+      logService.info(
+        "trading",
+        `Account poll refresh (user ${userId.slice(0, 8)}…) — ${balanceText}`,
+      );
+    } else {
+      logService.success(
+        "trading",
+        `Account ${reason === "reconnect" ? "reconnected" : "connected"} (user ${userId.slice(0, 8)}…) — signer …${addressHint(account.address)}, funder …${addressHint(funderAddress)}, ${balanceText}`,
+      );
+    }
 
     emitBalanceRefresh(userId, getTradingAccountStatus(userId));
     return slot.status;
@@ -168,7 +181,10 @@ export async function initTradingClient(userId: string): Promise<TradingAccountS
       hasPrivateKey: true,
       error: message,
     };
-    logService.error("trading", `Account connection failed (user ${userId.slice(0, 8)}…): ${message}`);
+    logService.error(
+      "trading",
+      `Account ${reason === "poll" ? "poll refresh" : "connection"} failed (user ${userId.slice(0, 8)}…): ${message}`,
+    );
     emitBalanceRefresh(userId, getTradingAccountStatus(userId));
     throw err;
   }
@@ -179,7 +195,7 @@ export async function reconnectTradingClient(userId: string): Promise<TradingAcc
   const slot = getSlot(userId);
   slot.client = null;
   slot.credentials = null;
-  return initTradingClient(userId);
+  return initTradingClient(userId, { reason: "reconnect" });
 }
 
 export function getTradingClient(userId: string): ClobClient | null {
