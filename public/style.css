@@ -4616,6 +4616,11 @@ body.is-column-resizing * {
   pointer-events: none;
 }
 
+.setup-edit-color-edit-icon path {
+  fill: currentColor;
+  stroke: none;
+}
+
 .setup-edit-color-swatch.is-light-setup .setup-edit-color-edit-icon {
   color: #0d1117;
 }
