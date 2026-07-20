@@ -1911,9 +1911,8 @@ function updateGraphPanel(state) {
   const ptbSourceEl = $("graph-ptb-source");
   if (ptbSourceEl) {
     if (state.prevCloseAsset != null) {
-      ptbSourceEl.textContent = "Polymarket";
-      ptbSourceEl.title =
-        "Polymarket window open — held until the next open update arrives";
+      ptbSourceEl.textContent = "Polymarket open";
+      ptbSourceEl.title = "Polymarket crypto-price openPrice for this window";
       ptbSourceEl.hidden = false;
       ptbSourceEl.classList.toggle("is-provisional", false);
     } else {

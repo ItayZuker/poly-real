@@ -180,8 +180,8 @@ export interface LiveWindowState {
   prevCloseAsset?: number;
   assetPrice?: number;
   assetGap?: number;
-  /** Where prevCloseAsset (PTB) came from — Chainlink window open, or REST fallback. */
-  priceToBeatSource?: "chainlink-boundary" | "polymarket-openPrice";
+  /** Where prevCloseAsset (PTB) came from — Polymarket published window open. */
+  priceToBeatSource?: "polymarket-openPrice";
   yesBid?: number;
   yesAsk?: number;
   noBid?: number;

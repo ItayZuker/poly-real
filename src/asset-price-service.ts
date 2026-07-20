@@ -16,8 +16,8 @@ const SYMBOL_BY_ASSET: Record<string, string> = {
 };
 
 const VARIANT_BY_TIMEFRAME: Record<string, string> = {
-  "5m": "five",
-  "15m": "fifteen",
+  "5m": "fiveminute",
+  "15m": "fifteenminute",
 };
 
 export interface PolymarketCryptoPriceResponse {
@@ -37,8 +37,8 @@ export interface MarketWindowPriceContext {
 }
 
 export type AssetPriceSource = "chainlink-rtds" | "polymarket-rest";
-/** Live PTB prefers Chainlink at window open; REST open is fallback only. */
-export type PriceToBeatSource = "chainlink-boundary" | "polymarket-openPrice";
+/** Live PTB is Polymarket's published window open from crypto-price API. */
+export type PriceToBeatSource = "polymarket-openPrice";
 
 export interface WindowAssetPrices {
   assetPrice?: number;
@@ -98,27 +98,17 @@ function isCryptoPriceComplete(data: PolymarketCryptoPriceResponse): boolean {
 }
 
 /**
- * PTB = Chainlink print at window open (same oracle Polymarket resolves against).
- * Fall back to Polymarket REST openPrice only if the boundary tick is not captured yet.
+ * PTB = Polymarket crypto-price `openPrice` (the published window open on their site).
+ * Live current stays Chainlink RTDS via buildPrices / applyRtdsLivePrice.
  */
 function resolvePriceToBeat(
-  asset: string,
-  windowStartSec: number | undefined,
   rest: WindowRestCache | undefined,
 ): { priceToBeat?: number; priceToBeatSource: PriceToBeatSource } {
-  if (windowStartSec != null && Number.isFinite(windowStartSec)) {
-    chainlinkPriceFeed.tryCaptureEarlyWindowOpen(asset, windowStartSec);
-    const chainlinkPtb = chainlinkPriceFeed.getPriceToBeat(asset, windowStartSec);
-    if (chainlinkPtb != null) {
-      return { priceToBeat: chainlinkPtb, priceToBeatSource: "chainlink-boundary" };
-    }
-  }
-
   const apiOpen = rest?.openPrice;
   if (apiOpen != null) {
     return { priceToBeat: apiOpen, priceToBeatSource: "polymarket-openPrice" };
   }
-  return { priceToBeat: undefined, priceToBeatSource: "chainlink-boundary" };
+  return { priceToBeat: undefined, priceToBeatSource: "polymarket-openPrice" };
 }
 
 function getRtdsLiveAssetPrice(asset: string): number | undefined {
@@ -126,13 +116,13 @@ function getRtdsLiveAssetPrice(asset: string): number | undefined {
 }
 
 /**
- * Live current = Chainlink RTDS. PTB = Chainlink window-open (REST open fallback).
- * Gap = live − PTB.
+ * Live current = Chainlink RTDS. PTB = Polymarket published open.
+ * Gap = Chainlink live − Polymarket open.
  */
 function buildPrices(
   asset: string,
   priceToBeat?: number,
-  priceToBeatSource: PriceToBeatSource = "chainlink-boundary",
+  priceToBeatSource: PriceToBeatSource = "polymarket-openPrice",
   restClosePrice?: number,
 ): WindowAssetPrices {
   const rtdsPrice = getRtdsLiveAssetPrice(asset);
@@ -277,11 +267,7 @@ async function loadWindowAssetPrices(
   window: MarketWindowPriceContext,
 ): Promise<WindowAssetPrices> {
   const rest = await fetchWindowRestPrices(asset, timeframe, window);
-  const { priceToBeat, priceToBeatSource } = resolvePriceToBeat(
-    asset,
-    window.windowStart,
-    rest,
-  );
+  const { priceToBeat, priceToBeatSource } = resolvePriceToBeat(rest);
   return buildPrices(asset, priceToBeat, priceToBeatSource, rest?.closePrice);
 }
 

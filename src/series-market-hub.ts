@@ -155,19 +155,12 @@ class SeriesFeed {
         .catch(() => {});
 
       const { asset, timeframe } = parseMarketSeries(this.series);
-      chainlinkPriceFeed.tryCaptureEarlyWindowOpen(asset, pair.windowStart);
       try {
         const prices = await getPolymarketWindowAssetPricesForPair(asset, timeframe, pair);
         const live = applyRtdsLivePrice(asset, prices);
         if (live.prevCloseAsset != null) {
           this.state.prevCloseAsset = live.prevCloseAsset;
           this.state.priceToBeatSource = live.priceToBeatSource;
-        } else {
-          const chainlinkPtb = chainlinkPriceFeed.getPriceToBeat(asset, pair.windowStart);
-          if (chainlinkPtb != null) {
-            this.state.prevCloseAsset = chainlinkPtb;
-            this.state.priceToBeatSource = "chainlink-boundary";
-          }
         }
         if (live.assetPrice != null) {
           this.state.assetPrice = live.assetPrice;

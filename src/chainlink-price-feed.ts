@@ -134,7 +134,9 @@ export class ChainlinkPriceFeed {
 
   getPriceAtWindowStart(asset: string, windowStartSec: number): number | undefined {
     const stored = this.getWindowOpen(asset, windowStartSec);
-    if (stored != null) {
+    const storedDelta = this.boundaryCaptureDeltaMs.get(this.windowKey(asset, windowStartSec));
+    // Reject opens that were not captured near the boundary (e.g. old live fallback).
+    if (stored != null && (storedDelta == null || storedDelta <= BOUNDARY_CAPTURE_MS)) {
       return stored;
     }
 
@@ -261,9 +263,10 @@ export class ChainlinkPriceFeed {
     windowStartSec: number,
     durationSec: number,
   ): void {
+    // Only accept a tick near the boundary. Never fall back to "live now" — if the
+    // timer fires late that would lock a far-off price as PTB for the whole window.
     const tick = this.findClosestTick(asset, windowStartSec * 1000);
-    const price = tick?.value ?? this.getLivePrice(asset)?.value;
-    if (price == null) {
+    if (!tick) {
       return;
     }
 
@@ -271,8 +274,8 @@ export class ChainlinkPriceFeed {
       asset,
       windowStartSec - durationSec,
       windowStartSec,
-      price,
-      tick?.timestampMs,
+      tick.value,
+      tick.timestampMs,
     );
   }
 
