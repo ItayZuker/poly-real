@@ -1761,31 +1761,6 @@ function formatPositionBuyTime(buyAt) {
   return date.toLocaleTimeString("en-GB", { hour12: false });
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function resolvePositionSetupMeta(card) {
-  const placementId = card?.placementId;
-  const placement =
-    placementId && typeof window.SchedulePlacements?.getPlacementById === "function"
-      ? window.SchedulePlacements.getPlacementById(placementId)
-      : null;
-  const setupId = placement?.setupId;
-  const setup = setupId ? window.getScheduleSetupById?.(setupId) : null;
-  const title = placement?.title || setup?.title || "";
-  const color =
-    (setupId && window.getSetupColorById?.(setupId)) ||
-    setup?.color ||
-    null;
-  return { placementId, setupId, title, color };
-}
-
 function renderPositionCard(card) {
   const sideClass = card.side === "up" ? "is-up" : "is-down";
   const status = card.status || "open";
@@ -1795,11 +1770,6 @@ function renderPositionCard(card) {
   // Open and waiting-for-settlement cards render the same skeleton:
   // all labels present, all values empty, so the card height never changes.
   const isLoading = !isDemo && (status === "open" || plPending);
-  const setupMeta = resolvePositionSetupMeta(card);
-  const hasSetup = Boolean(setupMeta.color && setupMeta.title);
-  const setupColorStyle = setupMeta.color
-    ? ` style="--setup-color: ${escapeHtml(setupMeta.color)}"`
-    : "";
 
   const buyTime = formatPositionBuyTime(card.buyAt);
   const buyLabel = buyTime
@@ -1826,30 +1796,13 @@ function renderPositionCard(card) {
     ? "Waiting"
     : positionStatusLabel(status);
   const sourceNote = isDemo ? "Demo" : isLoading ? "Pending…" : "Confirmed";
-  const infoHandle = hasSetup
-    ? `<div class="position-card-info-handle" title="${escapeHtml(setupMeta.title)}" aria-label="Setup: ${escapeHtml(setupMeta.title)}">
-        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <circle class="position-card-info-fill" cx="8" cy="8" r="7"/>
-          <circle class="position-card-info-cut" cx="8" cy="4.75" r="1.1"/>
-          <path class="position-card-info-cut-stroke" d="M8 7.1v4.4" fill="none" stroke-width="1.7" stroke-linecap="round"/>
-        </svg>
-      </div>`
-    : `<div class="position-card-info-handle is-empty" aria-hidden="true"></div>`;
-  const setupOverlay = hasSetup
-    ? `<div class="position-card-setup-overlay" aria-hidden="true"><span>${escapeHtml(setupMeta.title)}</span></div>`
-    : "";
-
-  return `<article class="position-card is-${status}${isDemo ? " is-demo" : ""}${isLoading ? " is-loading" : ""}${hasSetup ? " has-setup" : ""}" data-position-id="${escapeHtml(card.id)}"${setupColorStyle}>
-    ${infoHandle}
-    <div class="position-card-main">
-      <div class="position-card-top">
-        <span class="position-card-side ${sideClass}">${(card.side || "").toUpperCase()}</span>
-        <span class="position-card-status">${statusLabel}</span>
-      </div>
-      ${detailHtml}
-      <div class="position-card-row"><span>Source</span><strong>${sourceNote}</strong></div>
-      ${setupOverlay}
+  return `<article class="position-card is-${status}${isDemo ? " is-demo" : ""}${isLoading ? " is-loading" : ""}" data-position-id="${card.id}">
+    <div class="position-card-top">
+      <span class="position-card-side ${sideClass}">${(card.side || "").toUpperCase()}</span>
+      <span class="position-card-status">${statusLabel}</span>
     </div>
+    ${detailHtml}
+    <div class="position-card-row"><span>Source</span><strong>${sourceNote}</strong></div>
   </article>`;
 }
 
@@ -2076,10 +2029,10 @@ function positionsFingerprint(cards) {
   return (
     `${positionsView}:` +
     cards
-      .map((c) => {
-        const meta = resolvePositionSetupMeta(c);
-        return `${c.id}:${c.status}:${c.shares}:${c.buyPrice}:${c.buyCost}:${c.sellPrice ?? ""}:${c.pl ?? ""}:${c.confirmed ? 1 : 0}:${c.placementId ?? ""}:${meta.color ?? ""}:${meta.title ?? ""}`;
-      })
+      .map(
+        (c) =>
+          `${c.id}:${c.status}:${c.shares}:${c.buyPrice}:${c.buyCost}:${c.sellPrice ?? ""}:${c.pl ?? ""}:${c.confirmed ? 1 : 0}`,
+      )
       .join("|")
   );
 }
@@ -2504,7 +2457,6 @@ function applySetupColorUpdate(setupId, color) {
   document.querySelectorAll(`.schedule-placement-card[data-setup-id="${setupId}"]`).forEach((card) => {
     applySetupColorStyle(card, color);
   });
-  refreshPositionsSetupStyles();
 }
 
 window.applySetupColorUpdate = applySetupColorUpdate;
@@ -2567,14 +2519,7 @@ window.refreshScheduleSetupsList = () => loadScheduleSetups();
 window.applyScheduleSetupsOrder = (setups) => {
   if (!Array.isArray(setups)) return;
   scheduleSetupsCache = setups;
-  refreshPositionsSetupStyles();
 };
-
-function refreshPositionsSetupStyles() {
-  lastPositionsFingerprint = "";
-  if (window.windowState) updatePositionsPanel(window.windowState);
-}
-window.refreshPositionsSetupStyles = refreshPositionsSetupStyles;
 
 async function deleteTradingSetup(setup) {
   closeSetupMenus();
@@ -2881,7 +2826,6 @@ async function loadScheduleSetups() {
     const setups = await res.json();
     scheduleSetupsCache = setups;
     renderScheduleSetupsList(setups);
-    refreshPositionsSetupStyles();
   } catch (err) {
     renderScheduleSetupsList([], err.message || "Failed to load setups");
   }

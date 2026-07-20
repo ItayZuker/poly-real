@@ -1857,11 +1857,6 @@
     return counts;
   }
 
-  function getPlacementById(placementId) {
-    if (!placementId) return null;
-    return placements.find((p) => p._id === placementId) ?? null;
-  }
-
   function formatScheduleTime(hours) {
     const totalMinutes = Math.round(hours * 60);
     const h = Math.floor(totalMinutes / 60) % 24;
@@ -2801,9 +2796,6 @@
     if (placementsSignature(placements) === placementsSignature(next)) return;
     placements = next;
     renderPlacements({ reloadStats: false });
-    if (typeof window.refreshPositionsSetupStyles === "function") {
-      window.refreshPositionsSetupStyles();
-    }
   }
 
   function onViewChange() {
@@ -2847,7 +2839,6 @@
     setHeaderSummaryRange,
     onSelectedSeriesChanged,
     getPlacementCountsBySetup,
-    getPlacementById,
     refreshPlacementStats: scheduleStatsRefresh,
     refreshAllPlacementStats: (options = {}) =>
       scheduleStatsRefresh({ all: true, force: options.force === true }),
