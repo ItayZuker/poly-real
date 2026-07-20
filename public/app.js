@@ -10,7 +10,8 @@ let chartWindowStart = null;
 let chainlinkChartFrame = null;
 let pendingChainlinkTicks = [];
 
-const MAX_LOG_LINES = 500;
+const MAX_LOG_LINES = 50;
+const LOG_CLEARED_SESSION_KEY = "poly-real:log-cleared";
 
 function shortAddress(addr) {
   if (!addr || addr.length < 10) return addr || "—";
@@ -582,9 +583,26 @@ function appendLog(message) {
   appendLogEntry({ message, level: "info" });
 }
 
-function clearLog() {
+function clearLogDom() {
   const output = $("log-output");
   if (output) output.replaceChildren();
+}
+
+function clearLog() {
+  try {
+    sessionStorage.setItem(LOG_CLEARED_SESSION_KEY, "1");
+  } catch {
+    // ignore
+  }
+  clearLogDom();
+}
+
+function isLogClearedThisSession() {
+  try {
+    return sessionStorage.getItem(LOG_CLEARED_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 function scrollLogToBottom() {
@@ -1267,7 +1285,10 @@ function initLeftRowSplitter() {
 
   const initDefaultHeights = () => {
     const { maxContent } = getMetrics();
-    applyHeights(maxContent, 0, 0);
+    const defaultLog = Math.min(220, Math.max(120, Math.round(maxContent * 0.32)));
+    const trade = Math.max(80, maxContent - defaultLog);
+    applyHeights(trade, 0, defaultLog);
+    scrollLogToBottom();
   };
 
   const clampPrevDrag = (clientY) => {
@@ -1731,6 +1752,15 @@ function positionStatusLabel(status) {
   return status || "—";
 }
 
+function formatPositionBuyTime(buyAt) {
+  if (buyAt == null || !Number.isFinite(Number(buyAt))) return "";
+  const sec = Number(buyAt);
+  // Markers sometimes store ms; live cards use unix seconds.
+  const date = new Date(sec > 1e12 ? sec : sec * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("en-GB", { hour12: false });
+}
+
 function renderPositionCard(card) {
   const sideClass = card.side === "up" ? "is-up" : "is-down";
   const status = card.status || "open";
@@ -1741,7 +1771,11 @@ function renderPositionCard(card) {
   // all labels present, all values empty, so the card height never changes.
   const isLoading = !isDemo && (status === "open" || plPending);
 
-  let detailHtml = `<div class="position-card-row"><span>Buy</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`}</strong></div>`;
+  const buyTime = formatPositionBuyTime(card.buyAt);
+  const buyLabel = buyTime
+    ? `Buy <span class="position-card-buy-time">${buyTime}</span>`
+    : "Buy";
+  let detailHtml = `<div class="position-card-row"><span>${buyLabel}</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`}</strong></div>`;
 
   if (status === "sold") {
     detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.sellPrice)}`}</strong></div>`;
@@ -2236,10 +2270,12 @@ function connectSSE() {
   });
 
   es.addEventListener("log-history", (e) => {
-    clearLog();
+    clearLogDom();
+    if (isLogClearedThisSession()) return;
     const entries = JSON.parse(e.data);
     if (Array.isArray(entries)) {
       for (const entry of entries) appendLogEntry(entry);
+      scrollLogToBottom();
     }
   });
 
@@ -2281,6 +2317,7 @@ async function onMarketSeriesChanged(nextSeries) {
   } else if (window.SchedulePlacements?.refreshAllPlacementStats) {
     void window.SchedulePlacements.refreshAllPlacementStats({ force: true });
   }
+  window.SchedulePlacements?.onSelectedSeriesChanged?.();
   updatePositionsPanel(windowState);
 }
 
@@ -3044,9 +3081,7 @@ function syncWalletControls(config) {
     sharesInput.value = String(config.manualShares);
   }
   syncBuyOverrideControls(config);
-  window.SchedulePlacements?.syncHeaderSummaryControls?.({
-    allowTrade: Boolean(config?.startTrading),
-  });
+  window.SchedulePlacements?.syncHeaderSummaryControls?.();
   syncMarketRailLivePulse();
 }
 
@@ -3431,8 +3466,7 @@ function bindPageToggle() {
     if (window.SchedulePlacements) {
       window.SchedulePlacements.onViewChange();
       if (isSimulator) {
-        const allowTrade = Boolean($("start-trading")?.checked);
-        window.SchedulePlacements.setHeaderSummaryRange?.(allowTrade ? "live" : "demo");
+        window.SchedulePlacements.setHeaderSummaryRange?.("live");
       } else if (isSchedule) {
         window.SchedulePlacements.setHeaderSummaryRange?.("schedule");
       }

@@ -2715,7 +2715,7 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
   overflow: hidden;
   --trade-content-height: 252px;
   --prev-content-height: 0px;
-  --log-content-height: 0px;
+  --log-content-height: 160px;
   --log-margin-top: 0px;
 }
 
@@ -3189,54 +3189,57 @@ body.is-row-resizing .panel-header-drag-handle {
 .buy-override-params {
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 6px;
   font-size: 11px;
   color: var(--muted);
   margin-top: 8px;
-  max-height: 96px;
+  max-height: 120px;
   opacity: 1;
   overflow: hidden;
   transition: max-height 0.25s ease, opacity 0.25s ease, margin-top 0.25s ease;
 }
 
 .buy-override-param {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 200px) var(--buy-override-value-width, 88px);
+  column-gap: 8px;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  width: 50%;
+  width: max-content;
+  max-width: 100%;
 }
 
 .buy-override-param-label {
   color: var(--muted);
-  flex-shrink: 0;
+  text-align: right;
+  justify-self: end;
+  min-width: 0;
+}
+
+.buy-override-price-input,
+.buy-override-shares-input,
+.buy-override-direction {
+  box-sizing: border-box;
+  width: var(--buy-override-value-width, 88px);
+  height: var(--buy-override-value-height, 26px);
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  justify-self: end;
 }
 
 .buy-override-price-input,
 .buy-override-shares-input {
-  width: 52px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  border-radius: 4px;
-  padding: 2px 4px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
-.buy-override-shares-input {
-  width: 64px;
-}
-
 .buy-override-direction {
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  border-radius: 4px;
-  font-size: 11px;
-  padding: 2px 4px;
-  min-width: 84px;
+  padding-right: 4px;
 }
 
 .wallet-control-field--buy-override:has(#buy-override-enabled:not(:checked)) .buy-override-params {
@@ -3398,6 +3401,13 @@ body.is-row-resizing .panel-header-drag-handle {
   justify-content: space-between;
   gap: 12px;
   color: var(--muted);
+}
+
+.position-card-buy-time {
+  margin-left: 6px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 .position-card-row strong {

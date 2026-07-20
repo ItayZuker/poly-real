@@ -7,7 +7,7 @@ export interface LogEntry {
   message: string;
 }
 
-const MAX_BUFFER = 500;
+const MAX_BUFFER = 50;
 
 type LogListener = (entry: LogEntry) => void;
 

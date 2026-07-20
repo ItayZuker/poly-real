@@ -464,3 +464,16 @@ export async function sumLiveTradingStatEvents(userId: string): Promise<SessionM
   const events = await listTradingStatEvents(userId, { afterLiveReset: true });
   return sumEvents(events);
 }
+
+/** All-time confirmed real-trade stats for one market series (no live-reset filter). */
+export async function sumTradingStatEventsForSeries(
+  userId: string,
+  series: string,
+): Promise<SessionMemoryTotals> {
+  const events = await listTradingStatEvents(userId, {});
+  const filtered = events.filter((event) => {
+    const s = event.card?.series;
+    return !s || s === series;
+  });
+  return sumEvents(filtered);
+}

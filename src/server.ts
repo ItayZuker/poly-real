@@ -45,6 +45,7 @@ import {
 import {
   ensureTradingSessionMemoryUserId,
   sumTradingSessionMemory,
+  sumTradingStatEventsForSeries,
 } from "./db/trading-session-memory-repository.js";
 import { closeMongoClient } from "./db/mongo-client.js";
 import {
@@ -559,7 +560,7 @@ app.post("/api/trading/order", async (req, res) => {
 
 app.post("/api/trading/positions/clear", async (req, res) => {
   try {
-    // Reset Live header counters only — history stays in Mongo for Week / All time.
+    // Reset Live header counters only — Market / Week keep full history in Mongo.
     // Schedule placement card stats keep collecting until cards are removed.
     tradingFor(req).clearPositionCards();
     pushWindowStateImmediate();
@@ -607,6 +608,25 @@ app.get("/api/trading/session-memory", async (req, res) => {
       return;
     }
 
+    if (mode === "market") {
+      const { DEFAULT_MARKET_SERIES } = await import("./collections.js");
+      const series = String(req.query.series ?? DEFAULT_MARKET_SERIES).trim() || DEFAULT_MARKET_SERIES;
+      const archived = await sumTradingStatEventsForSeries(userId, series);
+      res.json({
+        mode: "market",
+        series,
+        green: archived.green,
+        red: archived.red,
+        blue: archived.blue,
+        pnl: archived.pnl,
+        sessionCount: archived.sessionCount,
+        hasData: archived.hasData,
+        archived,
+        live: liveTotals,
+      });
+      return;
+    }
+
     let fromMs: number | undefined;
     let toMs: number | undefined;
     const now = Date.now();
@@ -618,7 +638,7 @@ app.get("/api/trading/session-memory", async (req, res) => {
       fromMs = undefined;
       toMs = undefined;
     } else {
-      res.status(400).json({ error: "mode must be live, week, or all" });
+      res.status(400).json({ error: "mode must be live, market, week, or all" });
       return;
     }
 
