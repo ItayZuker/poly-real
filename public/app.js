@@ -2387,50 +2387,10 @@ function selectedAsset() {
 }
 
 function appendChainlinkTick(tick, redraw = true) {
-  if (!tick || tick.asset !== selectedAsset()) return;
-
-  const price = Number(tick.price);
-  const timestampMs = Number(tick.timestampMs);
-  if (!Number.isFinite(price) || !Number.isFinite(timestampMs)) return;
-
-  if (!windowState?.windowStart || !windowState?.windowEnd) {
-    pendingChainlinkTicks.push(tick);
-    pendingChainlinkTicks = pendingChainlinkTicks.slice(-100);
-    return;
-  }
-
-  const t = timestampMs / 1000;
-  if (t < windowState.windowStart || t >= windowState.windowEnd) {
-    // Keep boundary ticks briefly until the next full snapshot switches the UI
-    // to the new market window.
-    if (t >= windowState.windowEnd) {
-      pendingChainlinkTicks.push(tick);
-      pendingChainlinkTicks = pendingChainlinkTicks.slice(-100);
-    }
-    return;
-  }
-
-  const history = Array.isArray(windowState.priceHistory)
-    ? windowState.priceHistory
-    : (windowState.priceHistory = []);
-  const last = history[history.length - 1];
-  if (!last || last.t !== t || last.price !== price) {
-    history.push({ t, price });
-    if (history.length > 2000) history.splice(0, history.length - 2000);
-  }
-
-  windowState.assetPrice = price;
-  windowState.lastTickMs = timestampMs;
-  if (Number.isFinite(windowState.prevCloseAsset)) {
-    windowState.assetGap = price - windowState.prevCloseAsset;
-  }
-  window.windowState = windowState;
-
-  if (!redraw || chainlinkChartFrame != null) return;
-  chainlinkChartFrame = requestAnimationFrame(() => {
-    chainlinkChartFrame = null;
-    if (windowState) updateGraphPanel(windowState);
-  });
+  // Live graph / gap / trading use Polymarket open+close only. Ignore Chainlink
+  // SSE overlays so the UI stays an exact Polymarket mirror.
+  void tick;
+  void redraw;
 }
 
 /** Tick-live quote fields for clickable up/down buttons — merge without redrawing the full chart. */

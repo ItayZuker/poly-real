@@ -1,11 +1,10 @@
 import { type MarketPairInfo } from "./market-pair.js";
-import { chainlinkPriceFeed } from "./chainlink-price-feed.js";
 import { fetchWithTimeout } from "./fetch-timeout.js";
 import { outcomeFromOpenClose } from "./window-outcome.js";
 import type { WindowOutcome } from "./types.js";
 
 const CRYPTO_PRICE_API = "https://polymarket.com/api/crypto/crypto-price";
-const REST_POLL_CACHE_MS = 1_200;
+const REST_POLL_CACHE_MS = 500;
 const SETTLEMENT_MAX_WAIT_MS = 20_000;
 const SETTLEMENT_RETRY_MS = 500;
 
@@ -97,10 +96,6 @@ function isCryptoPriceComplete(data: PolymarketCryptoPriceResponse): boolean {
   return false;
 }
 
-function getRtdsLiveAssetPrice(asset: string): number | undefined {
-  return chainlinkPriceFeed.getLivePrice(asset.toLowerCase())?.value;
-}
-
 /**
  * PTB is Polymarket's official window open only.
  * If open is not available yet, return undefined — callers keep the last known PTB.
@@ -115,14 +110,20 @@ function resolvePriceToBeat(
   return { priceToBeat: undefined, priceToBeatSource: "polymarket-openPrice" };
 }
 
+/**
+ * Live window prices: both current and PTB come from Polymarket crypto-price
+ * (open / close). Do not overlay Chainlink RTDS — that mixes sources and
+ * makes gap disagree with Polymarket's chart.
+ */
 function buildPrices(
-  asset: string,
+  _asset: string,
   priceToBeat?: number,
   priceToBeatSource: PriceToBeatSource = "polymarket-openPrice",
   restClosePrice?: number,
 ): WindowAssetPrices {
-  const rtdsPrice = getRtdsLiveAssetPrice(asset);
-  const assetPrice = rtdsPrice ?? restClosePrice;
+  // During an open window Polymarket's closePrice is the live print; if missing,
+  // fall back to open so gap starts at 0 instead of mixing in Chainlink.
+  const assetPrice = restClosePrice ?? priceToBeat;
   return {
     assetPrice,
     prevCloseAsset: priceToBeat,
@@ -130,24 +131,20 @@ function buildPrices(
       assetPrice != null && priceToBeat != null
         ? assetPrice - priceToBeat
         : undefined,
-    assetPriceSource: rtdsPrice != null ? "chainlink-rtds" : "polymarket-rest",
+    assetPriceSource: "polymarket-rest",
     priceToBeatSource,
   };
 }
 
+/**
+ * @deprecated Live trading/display use Polymarket open/close only.
+ * Kept as a no-op so older call sites do not reintroduce Chainlink overlays.
+ */
 export function applyRtdsLivePrice(
-  asset: string,
+  _asset: string,
   prices: WindowAssetPrices,
 ): WindowAssetPrices {
-  const live = getRtdsLiveAssetPrice(asset);
-  if (live == null) return prices;
-  return {
-    ...prices,
-    assetPrice: live,
-    assetGap:
-      prices.prevCloseAsset != null ? live - prices.prevCloseAsset : undefined,
-    assetPriceSource: "chainlink-rtds",
-  };
+  return prices;
 }
 
 export function getPolymarketSymbol(asset: string): string {

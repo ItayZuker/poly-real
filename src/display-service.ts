@@ -1,10 +1,6 @@
 import { createPublicClient, getClobHost, getChainId } from "./clob-service.js";
 import { clobMarketFeed } from "./clob-market-feed.js";
-import { chainlinkPriceFeed } from "./chainlink-price-feed.js";
-import {
-  getPolymarketWindowAssetPricesForPair,
-  applyRtdsLivePrice,
-} from "./asset-price-service.js";
+import { getPolymarketWindowAssetPricesForPair } from "./asset-price-service.js";
 import {
   fetchCurrentUpDownMarket,
   fetchCurrentUpDownMarketWithRetry,
@@ -30,7 +26,6 @@ export class DisplayService {
   private series = "btc-5m";
   private interval: ReturnType<typeof setInterval> | null = null;
   private clobUnsub: (() => void) | null = null;
-  private chainlinkUnsub: (() => void) | null = null;
   private listeners = new Set<UpdateListener>();
   private state: LiveWindowState = this.emptyState("btc-5m");
   private yesTokenId: string | null = null;
@@ -67,12 +62,6 @@ export class DisplayService {
       if (!tokenIds.includes(this.yesTokenId) && !tokenIds.includes(this.noTokenId)) return;
       this.updateQuotesFromCache();
     });
-
-    this.chainlinkUnsub = chainlinkPriceFeed.onUpdate((asset) => {
-      const { asset: seriesAsset } = parseMarketSeries(this.series);
-      if (asset !== seriesAsset) return;
-      this.updateAssetFromChainlink();
-    });
   }
 
   stop(): void {
@@ -83,10 +72,6 @@ export class DisplayService {
     if (this.clobUnsub) {
       this.clobUnsub();
       this.clobUnsub = null;
-    }
-    if (this.chainlinkUnsub) {
-      this.chainlinkUnsub();
-      this.chainlinkUnsub = null;
     }
   }
 
@@ -168,40 +153,45 @@ export class DisplayService {
     })();
   }
 
-  private updateAssetFromChainlink(): void {
-    const { asset } = parseMarketSeries(this.series);
-    const live = chainlinkPriceFeed.getLivePrice(asset);
-    if (!live) return;
-
-    this.state.assetPrice = live.value;
-    if (this.state.prevCloseAsset != null) {
-      this.state.assetGap = live.value - this.state.prevCloseAsset;
-      const ptbSide = getPtbSide(live.value, this.state.prevCloseAsset);
+  /** Append Polymarket live print to the graph and count PTB side flips. */
+  private applyPolymarketAssetPrices(prices: {
+    assetPrice?: number;
+    prevCloseAsset?: number;
+    assetGap?: number;
+    priceToBeatSource?: LiveWindowState["priceToBeatSource"];
+  }): void {
+    if (prices.prevCloseAsset != null) {
+      this.state.prevCloseAsset = prices.prevCloseAsset;
+      this.state.priceToBeatSource = prices.priceToBeatSource ?? "polymarket-openPrice";
+    }
+    if (prices.assetPrice != null) {
+      this.state.assetPrice = prices.assetPrice;
+      const tickMs = Date.now();
+      this.state.lastTickMs = tickMs;
+      const tickSec = tickMs / 1000;
+      if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
+        const history = this.state.priceHistory;
+        const last = history[history.length - 1];
+        if (!last || last.price !== prices.assetPrice || tickSec - last.t >= 0.4) {
+          history.push({ t: tickSec, price: prices.assetPrice });
+          if (history.length > 2000) {
+            history.splice(0, history.length - 2000);
+          }
+        }
+      }
+    }
+    if (this.state.assetPrice != null && this.state.prevCloseAsset != null) {
+      this.state.assetGap = this.state.assetPrice - this.state.prevCloseAsset;
+      const ptbSide = getPtbSide(this.state.assetPrice, this.state.prevCloseAsset);
       if (ptbSide != null) {
         if (this.lastPtbSide != null && this.lastPtbSide !== ptbSide) {
           this.state.ptbCrossings = (this.state.ptbCrossings ?? 0) + 1;
         }
         this.lastPtbSide = ptbSide;
       }
+    } else if (prices.assetGap != null) {
+      this.state.assetGap = prices.assetGap;
     }
-    const tickMs = live.timestampMs;
-    this.state.lastTickMs = tickMs;
-
-    // Preserve Chainlink's source timestamp (including milliseconds). Using the
-    // server's whole-second clock made fast ticks overlap and could place a
-    // boundary tick on the wrong side of a window.
-    const tickSec = live.timestampMs / 1000;
-    if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
-      this.state.priceHistory.push({ t: tickSec, price: live.value });
-      if (this.state.priceHistory.length > 2000) {
-        this.state.priceHistory.splice(0, this.state.priceHistory.length - 2000);
-      }
-    }
-
-    void (async () => {
-      await liveTradingRegistry.tickAll(this.state, tickMs);
-      this.notify();
-    })();
   }
 
   private async prefetchNextWindowTokens(): Promise<void> {
@@ -275,28 +265,9 @@ export class DisplayService {
       const { asset, timeframe } = parseMarketSeries(this.series);
       try {
         const prices = await getPolymarketWindowAssetPricesForPair(asset, timeframe, pair);
-        const live = applyRtdsLivePrice(asset, prices);
-        // Only overwrite PTB when Polymarket returned an open; otherwise hold last value.
-        if (live.prevCloseAsset != null) {
-          this.state.prevCloseAsset = live.prevCloseAsset;
-          this.state.priceToBeatSource = live.priceToBeatSource;
-        }
-        if (live.assetPrice != null) {
-          this.state.assetPrice = live.assetPrice;
-        }
-        if (this.state.assetPrice != null && this.state.prevCloseAsset != null) {
-          this.state.assetGap = this.state.assetPrice - this.state.prevCloseAsset;
-        } else {
-          this.state.assetGap = live.assetGap;
-        }
+        this.applyPolymarketAssetPrices(prices);
       } catch {
-        const live = chainlinkPriceFeed.getLivePrice(asset);
-        if (live) {
-          this.state.assetPrice = live.value;
-          if (this.state.prevCloseAsset != null) {
-            this.state.assetGap = live.value - this.state.prevCloseAsset;
-          }
-        }
+        // Keep last Polymarket print; do not fall back to Chainlink (mixed gap).
       }
 
       this.updateQuotesFromCache();
