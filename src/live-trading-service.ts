@@ -64,6 +64,7 @@ import {
   gapAllowsBuy,
   gtdExpirationUnix,
   phaseIndexForState,
+  priceToCents,
   sellEnabledForPhase,
   SIDES_ORDER,
   stabilizeAllowsBuyForSide,
@@ -71,7 +72,6 @@ import {
 import type {
   LiveWindowState,
   SimMarker,
-  SimPhaseConfig,
   SimQuoteLocks,
   SimSetup,
   TradingConfig,
@@ -93,6 +93,19 @@ interface RestingBuyOrder {
   conditionId?: string;
   slug?: string;
   cardId?: string;
+}
+
+/** Live optimize (FAK) arm/hunt state — independent of SimulatorEngine. */
+interface LiveFakBuyWatch {
+  side: "up" | "down";
+  phaseIdx: number;
+  shares: number;
+  triggerCents: number;
+  armed: boolean;
+  stallCents: number | null;
+  stallTicks: number;
+  prevAskCents: number | null;
+  lastBookSampleCount: number;
 }
 
 interface RestingSellOrder {
@@ -560,6 +573,15 @@ export class LiveTradingService {
   private gtdBuyRepressUntilMs = 0;
   /** Last phase index for clearing buy repress across phase boundaries. */
   private lastGtdBuyPhaseIdx = -1;
+  /** Live FAK optimize watch (only while live-armed; sim is not ticked). */
+  private liveFakWatch: LiveFakBuyWatch | null = null;
+  /** PTB-crossing abort state for live (replaces sim abort while armed). */
+  private liveAbortedBuyPhases = new Set<number>();
+  private livePendingPhaseAborts = new Map<number, number>();
+  private liveCompletedPhaseAbortCancellations = new Set<number>();
+  private liveTrackedPhaseIdx = -1;
+  private livePhaseCrossingBaseline = 0;
+  private liveLastPtbCrossings = 0;
   /** Resting GTD maker sell for the open auto/manual-managed position. */
   private restingSell: RestingSellOrder | null = null;
   /** After a rejected GTD sell (e.g. expiration), skip further sell places this window. */
@@ -1012,7 +1034,10 @@ export class LiveTradingService {
         pnl: live.pnl,
         hasData: live.hasBalance,
       },
-      demoLastWindow: this.config.autoTrade ? this.autoEngine.getLastWindow() : null,
+      demoLastWindow:
+        this.config.autoTrade && !this.isLiveArmed()
+          ? this.autoEngine.getLastWindow()
+          : null,
       quoteLocks: previewMode ? this.autoEngine.getQuoteLocks() : { ...this.quoteLocks },
       markers: this.getDisplayMarkers(),
       phaseSetup: phasesVisible ? this.getDisplayPhaseSetup() : null,
@@ -1522,6 +1547,13 @@ export class LiveTradingService {
     this.overrideGtdBlockedWindowKey = null;
     this.gtdBuyRepressUntilMs = 0;
     this.lastGtdBuyPhaseIdx = -1;
+    this.liveFakWatch = null;
+    this.liveAbortedBuyPhases.clear();
+    this.livePendingPhaseAborts.clear();
+    this.liveCompletedPhaseAbortCancellations.clear();
+    this.liveTrackedPhaseIdx = -1;
+    this.livePhaseCrossingBaseline = 0;
+    this.liveLastPtbCrossings = 0;
     this.gtdSellBlockedWindowKey = null;
     this.gtdSellRepressUntilMs = 0;
     if (isTradingExecutor()) {
@@ -1591,7 +1623,8 @@ export class LiveTradingService {
 
   private blockFurtherBuys(state: LiveWindowState, reason: string): void {
     this.buyBlockedWindowKey = sessionKey(state);
-    this.autoEngine.suppressBuysForWindow();
+    this.liveFakWatch = null;
+    if (!this.isLiveArmed()) this.autoEngine.suppressBuysForWindow();
     logService.warn("trading", `Further buys blocked for window (${reason})`);
   }
 
@@ -1645,9 +1678,12 @@ export class LiveTradingService {
         const phaseIdx = setup
           ? phaseIndexForState(state, setup.phaseSplit, nowSec)
           : 0;
-        this.autoEngine.adoptExternalBuy(state, side, shares, price, phaseIdx, nowSec);
-        this.autoEngine.suppressBuysForWindow();
         this.blockFurtherBuys(state, "on-chain position detected");
+        if (!this.isLiveArmed()) {
+          this.autoEngine.adoptExternalBuy(state, side, shares, price, phaseIdx, nowSec);
+          this.autoEngine.suppressBuysForWindow();
+        }
+        this.liveFakWatch = null;
         return true;
       }
     } catch (err) {
@@ -1772,100 +1808,254 @@ export class LiveTradingService {
     const autoSetup = this.resolveAutoSimSetup(state);
     if (!autoSetup) {
       // Still commit the prior window's demo result when leaving a schedule slot.
-      this.autoEngine.rollWindowIfNeeded(state);
+      if (!this.isLiveArmed()) this.autoEngine.rollWindowIfNeeded(state);
       if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("no active setup");
       return;
     }
 
-    const key = sessionKey(state);
-    const prevMarkerCount = this.autoEngine.getMarkers().filter((m) => m.windowKey === key).length;
-
-    this.autoEngine.tick(state, autoSetup, nowMs);
-
-    const currentCount = this.autoEngine.getMarkers().filter((m) => m.windowKey === key).length;
-
+    // Live-armed: do not tick or log via SimulatorEngine — live owns FAK/GTD/abort.
     if (this.isLiveArmed()) {
       await this.manageBuyOverride(state, nowMs);
       if (this.isOverrideHoldActive(state)) {
+        this.liveFakWatch = null;
         if (this.restingBuy) await this.cancelRestingBuy("buy override hold");
         if (this.restingSell) await this.cancelRestingSell("buy override hold");
-        this.mirroredMarkerCount = currentCount;
         return;
       }
-      await this.mirrorNewSimMarkers(state, autoSetup, prevMarkerCount);
+      await this.syncLivePhaseCrossingAbort(state, autoSetup, nowMs);
+      await this.manageLiveOptimizeBuys(state, autoSetup, nowMs);
       await this.manageRestingGtdBuys(state, autoSetup, nowMs);
       if (!this.isOverrideHoldActive(state)) {
         await this.manageRestingGtdSells(state, autoSetup, nowMs);
       }
-    } else {
-      this.mirroredMarkerCount = currentCount;
-      if (this.restingBuy && !this.config.startTrading) {
-        await this.cancelRestingBuy("startTrading off");
-      }
-      if (this.restingSell && !this.config.startTrading) {
-        await this.cancelRestingSell("startTrading off");
-      }
-      if (this.overrideRestingBuy) {
-        await this.cancelOverrideRestingBuy("startTrading off");
-      }
+      return;
+    }
+
+    // Preview / demo: simulator drives markers and logs.
+    this.autoEngine.tick(state, autoSetup, nowMs);
+    this.mirroredMarkerCount = this.autoEngine
+      .getMarkers()
+      .filter((m) => m.windowKey === sessionKey(state)).length;
+    if (this.restingBuy && !this.config.startTrading) {
+      await this.cancelRestingBuy("startTrading off");
+    }
+    if (this.restingSell && !this.config.startTrading) {
+      await this.cancelRestingSell("startTrading off");
+    }
+    if (this.overrideRestingBuy) {
+      await this.cancelOverrideRestingBuy("startTrading off");
     }
   }
 
-  private phaseAtTime(setup: SimSetup, state: LiveWindowState, tSec: number): SimPhaseConfig {
-    const idx = phaseIndexForState(state, setup.phaseSplit, tSec);
-    return setup.phases[idx] ?? setup.phases[0];
+  private liveAskCents(state: LiveWindowState, side: "up" | "down"): number | null {
+    const ask = side === "up" ? state.yesAsk : state.noAsk;
+    if (ask == null || !Number.isFinite(ask)) return null;
+    return priceToCents(ask);
   }
 
-  private async mirrorNewSimMarkers(
+  private isLivePhaseBuyAborted(phaseIdx: number): boolean {
+    return this.liveAbortedBuyPhases.has(phaseIdx);
+  }
+
+  private isLivePhaseAbortCancellationDue(phaseIdx: number): boolean {
+    return this.liveCompletedPhaseAbortCancellations.has(phaseIdx);
+  }
+
+  private async syncLivePhaseCrossingAbort(
     state: LiveWindowState,
     setup: SimSetup,
-    prevCount: number,
+    nowMs?: number,
   ): Promise<void> {
-    if (this.orderInFlight) return;
-    const key = sessionKey(state);
-    const simMarkers = this.autoEngine.getMarkers().filter((m) => m.windowKey === key);
-    if (simMarkers.length <= prevCount) return;
+    const now = nowMs ?? state.lastTickMs ?? Date.now();
+    const nowSec = Math.floor(now / 1000);
+    const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
+    const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+    const crossings = Math.max(0, Math.floor(state.ptbCrossings ?? 0));
 
-    if (await this.adoptOnChainPositionIfAny(state)) {
-      this.mirroredMarkerCount = simMarkers.length;
+    if (this.liveTrackedPhaseIdx !== phaseIdx) {
+      const firstObservedPhase = this.liveTrackedPhaseIdx < 0;
+      this.liveTrackedPhaseIdx = phaseIdx;
+      this.livePhaseCrossingBaseline = firstObservedPhase
+        ? crossings
+        : this.liveLastPtbCrossings;
+      this.liveFakWatch = null;
+    }
+    this.liveLastPtbCrossings = crossings;
+
+    for (const [idx, executeAtMs] of this.livePendingPhaseAborts) {
+      if (now < executeAtMs) continue;
+      this.livePendingPhaseAborts.delete(idx);
+      this.liveCompletedPhaseAbortCancellations.add(idx);
+      if (this.liveFakWatch?.phaseIdx === idx) this.liveFakWatch = null;
+      if (this.restingBuy?.phaseIdx === idx) {
+        await this.cancelRestingBuy("PTB crossing abort");
+      }
+      logService.info("trading", `Phase ${idx + 1} PTB-crossing cancellation executed`);
+    }
+
+    const threshold = Math.max(0, Math.min(1000, Math.floor(phase.buyAbortOnCrossing || 0)));
+    if (
+      threshold <= 0 ||
+      this.liveAbortedBuyPhases.has(phaseIdx) ||
+      this.livePendingPhaseAborts.has(phaseIdx) ||
+      crossings - this.livePhaseCrossingBaseline < threshold
+    ) {
       return;
     }
-    if (this.isBuyBlocked(state)) {
-      this.mirroredMarkerCount = simMarkers.length;
+
+    this.liveAbortedBuyPhases.add(phaseIdx);
+    if (this.liveFakWatch?.phaseIdx === phaseIdx) this.liveFakWatch = null;
+    logService.info(
+      "trading",
+      `Phase ${phaseIdx + 1} buys aborted after PTB crossing threshold`,
+    );
+
+    const latency = Math.max(0, setup.latencyMs ?? state.feedLatencyMs ?? 0);
+    if (latency <= 0) {
+      this.liveCompletedPhaseAbortCancellations.add(phaseIdx);
+      if (this.restingBuy?.phaseIdx === phaseIdx) {
+        await this.cancelRestingBuy("PTB crossing abort");
+      }
+      logService.info("trading", `Phase ${phaseIdx + 1} PTB-crossing cancellation executed`);
+      return;
+    }
+    this.livePendingPhaseAborts.set(phaseIdx, now + latency);
+    logService.info(
+      "trading",
+      `Phase ${phaseIdx + 1} buy abort scheduled, latency ${latency} ms`,
+    );
+  }
+
+  /** Live optimize/FAK buys — same arm/hunt rules as sim, without running SimulatorEngine. */
+  private async manageLiveOptimizeBuys(
+    state: LiveWindowState,
+    setup: SimSetup,
+    nowMs?: number,
+  ): Promise<void> {
+    if (this.orderInFlight || this.positions.up || this.positions.down) {
+      this.liveFakWatch = null;
+      return;
+    }
+    if (this.isBuyBlocked(state) || this.manualBuyPending) {
+      this.liveFakWatch = null;
+      return;
+    }
+    if (this.restingBuy) {
+      this.liveFakWatch = null;
       return;
     }
 
-    const newMarkers = simMarkers.slice(prevCount);
-    for (const marker of newMarkers) {
-      if (marker.type === "buy") {
-        // Optimize-off buys are resting GTD limits — do not mirror sim market fires.
-        const phase = this.phaseAtTime(setup, state, marker.t);
-        if (!phase.buyOptimize || !phase.buyEnabled) continue;
-        if (!stabilizeAllowsBuyForSide(phase, state, marker.side)) {
-          logService.info("trading", `FAK buy skipped (stabilize filter)`);
-          continue;
-        }
-        if (this.positions.up || this.positions.down) continue;
-        if (this.isBuyBlocked(state)) continue;
-        await this.executeOrder(
-          state,
-          marker.side,
-          "buy",
-          marker.shares,
-          "auto",
-          "shares",
-          "FAK",
-          centsToPrice(marker.triggerCents ?? phase.buyTrigger),
-          marker.phaseIndex ?? phaseIndexForState(state, setup.phaseSplit, marker.t),
+    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
+    const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
+    const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+
+    if (this.liveFakWatch && this.liveFakWatch.phaseIdx !== phaseIdx) {
+      this.liveFakWatch = null;
+    }
+
+    if (
+      !phase.buyOptimize ||
+      !phase.buyEnabled ||
+      this.isLivePhaseBuyAborted(phaseIdx)
+    ) {
+      this.liveFakWatch = null;
+      return;
+    }
+
+    if (!this.liveFakWatch) {
+      const shares = Math.max(1, phase.buyShares || 1);
+      const triggerCents = phase.buyTrigger;
+      for (const side of SIDES_ORDER) {
+        const askCents = this.liveAskCents(state, side);
+        if (askCents == null || askCents !== triggerCents) continue;
+        if (!gapAllowsBuy(side, phase, state.assetGap)) continue;
+        if (!stabilizeAllowsBuyForSide(phase, state, side)) continue;
+        this.liveFakWatch = {
+          side,
+          phaseIdx,
+          shares,
+          triggerCents,
+          armed: true,
+          stallCents: null,
+          stallTicks: 0,
+          prevAskCents: askCents,
+          lastBookSampleCount: state.bookTickSequence ?? 0,
+        };
+        logService.info(
+          "trading",
+          `FAK optimize armed: ${side} touched ${triggerCents}¢`,
         );
-        if (this.positions.up || this.positions.down || this.isBuyBlocked(state)) break;
-      } else if (marker.type === "sell") {
-        // Auto sells are resting GTD maker limits managed locally — do not mirror
-        // sim market/taker sells.
-        continue;
+        return;
+      }
+      return;
+    }
+
+    const w = this.liveFakWatch;
+    const askCents = this.liveAskCents(state, w.side);
+    if (askCents == null) return;
+
+    const bookSampleCount = state.bookTickSequence ?? 0;
+    if (bookSampleCount <= w.lastBookSampleCount) return;
+    w.lastBookSampleCount = bookSampleCount;
+
+    if (askCents > w.triggerCents) {
+      w.armed = false;
+      w.stallCents = null;
+      w.stallTicks = 0;
+      w.prevAskCents = askCents;
+      return;
+    }
+
+    if (!w.armed) {
+      if (askCents !== w.triggerCents) {
+        w.prevAskCents = askCents;
+        return;
+      }
+      if (!stabilizeAllowsBuyForSide(phase, state, w.side)) {
+        w.prevAskCents = askCents;
+        return;
+      }
+      w.armed = true;
+      w.stallCents = null;
+      w.stallTicks = 0;
+      w.prevAskCents = askCents;
+      logService.info("trading", `FAK optimize re-armed: ${w.side} @ ${w.triggerCents}¢`);
+      return;
+    }
+
+    if (!stabilizeAllowsBuyForSide(phase, state, w.side)) return;
+
+    let shouldFire = false;
+    if (askCents <= w.triggerCents) {
+      if (w.prevAskCents != null && askCents > w.prevAskCents) {
+        shouldFire = true;
+      } else if (w.stallCents === askCents) {
+        w.stallTicks += 1;
+        if (w.stallTicks >= 3) shouldFire = true;
+      } else {
+        w.stallCents = askCents;
+        w.stallTicks = 1;
       }
     }
-    this.mirroredMarkerCount = simMarkers.length;
+    w.prevAskCents = askCents;
+    if (!shouldFire) return;
+
+    this.liveFakWatch = null;
+    logService.info(
+      "trading",
+      `FAK buy firing: ${w.side} up to ${w.shares} sh @ ≤${w.triggerCents}¢`,
+    );
+    await this.executeOrder(
+      state,
+      w.side,
+      "buy",
+      w.shares,
+      "auto",
+      "shares",
+      "FAK",
+      centsToPrice(w.triggerCents),
+      phaseIdx,
+    );
   }
 
   private async cancelRestingBuy(reason: string, nowMs?: number): Promise<void> {
@@ -1942,8 +2132,11 @@ export class LiveTradingService {
     );
     this.overrideHoldWindowKey = sessionKey(state);
     this.overrideRestingBuy = null;
-    this.autoEngine.suppressBuysForWindow();
-    this.autoEngine.suppressSellsForWindow();
+    this.liveFakWatch = null;
+    if (!this.isLiveArmed()) {
+      this.autoEngine.suppressBuysForWindow();
+      this.autoEngine.suppressSellsForWindow();
+    }
     this.blockFurtherBuys(state, "buy override fill");
     if (isTradingExecutor()) {
       await cancelOpenOrder(this.userId, resting.orderId);
@@ -2123,7 +2316,7 @@ export class LiveTradingService {
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const key = sessionKey(state);
-    const crossingAborted = this.autoEngine.isPhaseBuyAborted(phaseIdx);
+    const crossingAborted = this.isLivePhaseBuyAborted(phaseIdx);
 
     // Phase boundary must not inherit gap/stabilize repress from the prior phase.
     if (this.lastGtdBuyPhaseIdx !== phaseIdx) {
@@ -2264,7 +2457,7 @@ export class LiveTradingService {
     const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
-    const crossingCancellationDue = this.autoEngine.isPhaseAbortCancellationDue(phaseIdx);
+    const crossingCancellationDue = this.isLivePhaseAbortCancellationDue(phaseIdx);
     if (!crossingCancellationDue && !gapAllowsBuy(resting.side, phase, state.assetGap)) {
       await this.cancelRestingBuy("gap filter", nowMs ?? nowSec * 1000);
       return;
@@ -2564,7 +2757,7 @@ export class LiveTradingService {
       total: proceeds,
     });
     this.positions[side] = null;
-    this.autoEngine.clearExternalPosition(side);
+    if (!this.isLiveArmed()) this.autoEngine.clearExternalPosition(side);
     this.restingSell = null;
     void refreshCollateralBalance(this.userId);
     this.notify();
@@ -2707,12 +2900,19 @@ export class LiveTradingService {
 
     const pos = this.positions[side];
     if (pos) {
-      this.autoEngine.adoptExternalBuy(state, side, pos.shares, pos.avgPrice, phaseIdx, nowSec);
+      // Keep sim in sync only while previewing — live must not drive SimulatorEngine.
+      if (!this.isLiveArmed()) {
+        this.autoEngine.adoptExternalBuy(state, side, pos.shares, pos.avgPrice, phaseIdx, nowSec);
+        if (holdToSettlement) {
+          this.autoEngine.suppressBuysForWindow();
+          this.autoEngine.suppressSellsForWindow();
+        } else {
+          this.autoEngine.setExternalBuyPaused(false);
+        }
+      }
       if (holdToSettlement) {
-        this.autoEngine.suppressBuysForWindow();
-        this.autoEngine.suppressSellsForWindow();
+        this.liveFakWatch = null;
       } else {
-        this.autoEngine.setExternalBuyPaused(false);
         // Phase/manual fill won the window — cancel any competing override rest.
         if (this.overrideRestingBuy) {
           await this.cancelOverrideRestingBuy("phase/manual fill first");
@@ -2762,7 +2962,8 @@ export class LiveTradingService {
       leg === "sell" || this.config.autoTrade ? "shares" : this.config.manualOrderUnit;
     if (leg === "buy") {
       this.manualBuyPending = true;
-      this.autoEngine.setExternalBuyPaused(true);
+      this.liveFakWatch = null;
+      if (!this.isLiveArmed()) this.autoEngine.setExternalBuyPaused(true);
       await this.cancelRestingBuy("manual buy override");
       await this.cancelOverrideRestingBuy("manual buy override");
     } else {
@@ -2773,27 +2974,26 @@ export class LiveTradingService {
       const result = await this.executeOrder(state, side, leg, size, "manual", sizeUnit);
       if (result.ok) {
         if (leg === "buy") {
-          const nowSec = Math.floor(Date.now() / 1000);
-          const setup = this.resolveAutoSimSetup(state);
-          const phaseIdx = setup
-            ? phaseIndexForState(state, setup.phaseSplit, nowSec)
-            : 0;
-          if (
-            result.fillShares != null &&
-            result.fillPrice != null
-          ) {
-            this.autoEngine.adoptExternalBuy(
-              state,
-              side,
-              result.fillShares,
-              result.fillPrice,
-              phaseIdx,
-              nowSec,
-            );
+          if (!this.isLiveArmed()) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            const setup = this.resolveAutoSimSetup(state);
+            const phaseIdx = setup
+              ? phaseIndexForState(state, setup.phaseSplit, nowSec)
+              : 0;
+            if (result.fillShares != null && result.fillPrice != null) {
+              this.autoEngine.adoptExternalBuy(
+                state,
+                side,
+                result.fillShares,
+                result.fillPrice,
+                phaseIdx,
+                nowSec,
+              );
+            }
+            this.autoEngine.suppressBuysForWindow();
           }
-          this.autoEngine.suppressBuysForWindow();
           this.manualBuyOverrideWindowKey = sessionKey(state);
-        } else {
+        } else if (!this.isLiveArmed()) {
           this.autoEngine.clearExternalPosition(side);
         }
         return result;
@@ -2806,7 +3006,10 @@ export class LiveTradingService {
     } finally {
       if (leg === "buy") {
         this.manualBuyPending = false;
-        if (this.manualBuyOverrideWindowKey !== sessionKey(state)) {
+        if (
+          !this.isLiveArmed() &&
+          this.manualBuyOverrideWindowKey !== sessionKey(state)
+        ) {
           this.autoEngine.setExternalBuyPaused(false);
         }
       }
