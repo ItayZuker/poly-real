@@ -2093,10 +2093,6 @@ export class LiveTradingService {
         conditionId: result.conditionId,
         slug: result.slug,
       };
-      logService.info(
-        "trading",
-        `Buy override resting ${shares} ${side.toUpperCase()} @ ${(limitPrice * 100).toFixed(0)}¢`,
-      );
       this.notify();
     } finally {
       this.orderInFlight = false;
@@ -3237,7 +3233,6 @@ export class LiveTradingService {
         this.notify();
       }
 
-      logService.info("trading", `${source} ${leg} ${side} filled`);
       return { ok: true, fillShares, fillPrice };
     } finally {
       this.orderInFlight = false;
