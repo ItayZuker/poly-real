@@ -26,6 +26,8 @@ export interface TradingSetupListItem {
   color: string;
   setup: TradingPhaseSetup;
   createdAt: string;
+  /** Lower = higher in the schedule setups list. */
+  sortOrder?: number;
   /** True while placed on the live (real) schedule. */
   liveScheduleInUse: boolean;
   /** True while placed on the sim schedule. */
@@ -142,8 +144,30 @@ function serializeTradingSetup(doc: TradingSetupDoc): TradingSetupListItem {
     liveScheduleInUse: doc.liveScheduleInUse === true,
     simScheduleInUse: doc.simScheduleInUse === true,
   };
+  if (typeof doc.sortOrder === "number" && Number.isFinite(doc.sortOrder)) {
+    item.sortOrder = doc.sortOrder;
+  }
   if (doc.description) item.description = doc.description;
   return item;
+}
+
+function createdAtMs(value: Date | string | undefined): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  return 0;
+}
+
+/** sortOrder ascending, then newest-first for unset orders. */
+function compareSetupDocs(a: TradingSetupDoc, b: TradingSetupDoc): number {
+  const ao = typeof a.sortOrder === "number" && Number.isFinite(a.sortOrder) ? a.sortOrder : null;
+  const bo = typeof b.sortOrder === "number" && Number.isFinite(b.sortOrder) ? b.sortOrder : null;
+  if (ao != null && bo != null && ao !== bo) return ao - bo;
+  if (ao != null && bo == null) return -1;
+  if (ao == null && bo != null) return 1;
+  return createdAtMs(b.createdAt) - createdAtMs(a.createdAt);
 }
 
 /** Marks whether a setup is referenced by any live schedule placement. */
@@ -181,8 +205,8 @@ export async function listTradingSetups(userId: string): Promise<TradingSetupLis
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
     .find({ userId })
-    .sort({ createdAt: -1 })
     .toArray();
+  docs.sort(compareSetupDocs);
   return docs.map(serializeTradingSetup);
 }
 
@@ -196,13 +220,17 @@ export async function insertTradingSetup(
     .db(getMongoDbName())
     .collection<TradingSetupDoc>(COLLECTION)
     .find({ userId })
-    .project({ color: 1 })
+    .project({ color: 1, sortOrder: 1 })
     .toArray();
   const usedColors = new Set(
     existing
       .map((doc) => (doc.color ? normalizeSetupColor(doc.color) : null))
       .filter((color): color is string => color != null),
   );
+  const existingOrders = existing
+    .map((doc) => doc.sortOrder)
+    .filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+  const sortOrder = existingOrders.length > 0 ? Math.min(...existingOrders) - 1 : 0;
 
   const setup = normalizePhaseSetup(input.setup);
   if (!setup) throw new Error("Invalid setup phases");
@@ -213,6 +241,7 @@ export async function insertTradingSetup(
     color: pickUniqueSetupColor(usedColors, existing.length),
     setup,
     createdAt: new Date(),
+    sortOrder,
   };
   if (input.description) {
     doc.description = input.description;
@@ -340,4 +369,53 @@ export async function deleteTradingSetup(userId: string, id: string): Promise<bo
     .collection(COLLECTION)
     .deleteOne({ _id: oid, userId });
   return result.deletedCount === 1;
+}
+
+/** Persist list order; `orderedIds` must list every setup for the user exactly once. */
+export async function reorderTradingSetups(
+  userId: string,
+  orderedIds: string[],
+): Promise<TradingSetupListItem[]> {
+  await ensureReady();
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    throw new Error("orderedIds is required");
+  }
+  const unique = new Set(orderedIds.map(String));
+  if (unique.size !== orderedIds.length) {
+    throw new Error("orderedIds must be unique");
+  }
+
+  const { ObjectId } = await import("mongodb");
+  const oids: ObjectId[] = [];
+  for (const id of orderedIds) {
+    try {
+      oids.push(new ObjectId(String(id)));
+    } catch {
+      throw new Error(`Invalid setup id: ${id}`);
+    }
+  }
+
+  const mongo = await getMongoClient();
+  const col = mongo.db(getMongoDbName()).collection<TradingSetupDoc>(COLLECTION);
+  const existing = await col.find({ userId }).project({ _id: 1 }).toArray();
+  if (existing.length !== oids.length) {
+    throw new Error("orderedIds must include every setup");
+  }
+  const existingIds = new Set(existing.map((doc) => String(doc._id)));
+  for (const id of orderedIds) {
+    if (!existingIds.has(String(id))) {
+      throw new Error(`Unknown setup id: ${id}`);
+    }
+  }
+
+  const ops = oids.map((oid, index) => ({
+    updateOne: {
+      filter: { _id: oid, userId },
+      update: { $set: { sortOrder: index } },
+    },
+  }));
+  if (ops.length > 0) {
+    await col.bulkWrite(ops, { ordered: false });
+  }
+  return listTradingSetups(userId);
 }

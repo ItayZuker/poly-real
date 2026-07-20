@@ -34,6 +34,7 @@ import {
   getTradingSetupById,
   updateTradingSetup,
   deleteTradingSetup,
+  reorderTradingSetups,
   normalizePhaseSetup,
   ensureTradingSetupsUserId,
 } from "./db/trading-setup-repository.js";
@@ -783,6 +784,37 @@ app.get("/api/trading-setups", async (req, res) => {
     const message = String(err);
     if (message.includes("MONGODB_URI")) {
       res.status(503).json({ error: message });
+      return;
+    }
+    res.status(500).json({ error: message });
+  }
+});
+
+app.put("/api/trading-setups/reorder", async (req, res) => {
+  try {
+    const orderedIds = Array.isArray(req.body?.orderedIds)
+      ? req.body.orderedIds.map((id: unknown) => String(id))
+      : null;
+    if (!orderedIds) {
+      res.status(400).json({ error: "orderedIds is required" });
+      return;
+    }
+    const setups = await reorderTradingSetups(requireUserId(req), orderedIds);
+    res.json(setups);
+  } catch (err) {
+    const message = String(err);
+    if (message.includes("MONGODB_URI")) {
+      res.status(503).json({ error: message });
+      return;
+    }
+    if (
+      message.includes("required") ||
+      message.includes("unique") ||
+      message.includes("every setup") ||
+      message.includes("Unknown setup") ||
+      message.includes("Invalid setup")
+    ) {
+      res.status(400).json({ error: message });
       return;
     }
     res.status(500).json({ error: message });

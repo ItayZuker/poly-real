@@ -826,6 +826,34 @@ body {
   cursor: pointer;
 }
 
+.schedule-setup-item.is-list-reordering {
+  position: fixed;
+  z-index: 1200;
+  margin: 0;
+  opacity: 0.95;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  cursor: grabbing;
+}
+
+.schedule-setup-reorder-placeholder {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  border: 1px dashed rgba(88, 166, 255, 0.55);
+  border-radius: 4px;
+  background: rgba(88, 166, 255, 0.08);
+  pointer-events: none;
+}
+
+body.is-schedule-list-reordering {
+  cursor: grabbing;
+  user-select: none;
+}
+
+body.is-schedule-list-reordering .schedule-setup-drag-handle {
+  cursor: grabbing;
+}
+
 body.is-schedule-dragging {
   cursor: grabbing;
   user-select: none;

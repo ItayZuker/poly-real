@@ -285,6 +285,8 @@ export interface TradingSetupRecord {
   color?: string;
   setup: TradingPhaseSetup;
   createdAt: Date;
+  /** Lower = higher in the schedule setups list. */
+  sortOrder?: number;
   /**
    * True while at least one card using this setup is on the live schedule
    * (`schedual_setups_real`). Sim apps should refuse to delete when set.

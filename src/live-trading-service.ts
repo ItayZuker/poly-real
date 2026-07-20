@@ -20,17 +20,19 @@ import { getTradingClient, initTradingClient, refreshCollateralBalance } from ".
 import { SimulatorEngine } from "./simulator-engine.js";
 import { simulatorService, phaseSetupToSimSetup } from "./simulator-service.js";
 import { logService } from "./log-service.js";
-import { resolveWindowOutcome } from "./window-outcome.js";
 import {
   fetchClosedPositions,
   fetchUserPositions,
   fetchUserTrades,
   findClosedPosition,
   findPosition,
+  findResolvedPosition,
   findTrade,
   pollUntil,
   isValidSharePrice,
   isValidShareSize,
+  type PolymarketClosedPosition,
+  type PolymarketPosition,
 } from "./polymarket-portfolio.js";
 import {
   DEFAULT_CRYPTO_TAKER_FEE_PARAMS,
@@ -546,9 +548,6 @@ export class LiveTradingService {
   private scheduleContextFetchedAt = 0;
   private activePhaseSetup: TradingPhaseSetup | null = null;
   private readonly autoEngine = new SimulatorEngine();
-  private lastAssetPrice: number | undefined;
-  private lastPrevCloseAsset: number | undefined;
-  private lastAssetGap: number | undefined;
   private readonly listeners = new Set<UpdateListener>();
   private confirmLoopTimer: ReturnType<typeof setInterval> | null = null;
   private confirmInFlight = false;
@@ -659,6 +658,7 @@ export class LiveTradingService {
         `Hydrated ${events.length} live stat event(s) from Mongo (${restored.length} position card(s), ${this.knownPlacementIds.size} placement(s))`,
       );
       await this.syncActivatedSchedulePlacements();
+      this.ensureConfirmLoop();
     } catch (err) {
       logService.warn("trading", `Failed to hydrate live stats from Mongo: ${String(err)}`);
     }
@@ -1223,16 +1223,125 @@ export class LiveTradingService {
     return simulatorService.getPhaseSetup();
   }
 
-  private rememberSettlementPrices(state: LiveWindowState): void {
-    if (state.assetPrice != null && Number.isFinite(state.assetPrice)) {
-      this.lastAssetPrice = state.assetPrice;
+  /**
+   * Apply Polymarket closed-position data onto a held card. Returns true when confirmed.
+   * Losses often never appear here — use redeemable open positions instead.
+   */
+  private async applyClosedHeldSettlement(
+    card: TradingPositionCard,
+    closed: PolymarketClosedPosition,
+  ): Promise<boolean> {
+    const grossPl = Number(closed.realizedPnl);
+    if (!Number.isFinite(grossPl)) return false;
+    if (closed.avgPrice != null && isValidSharePrice(closed.avgPrice)) {
+      card.buyPrice = Number(closed.avgPrice);
     }
-    if (state.prevCloseAsset != null && Number.isFinite(state.prevCloseAsset)) {
-      this.lastPrevCloseAsset = state.prevCloseAsset;
+    if (closed.totalBought != null && isValidShareSize(closed.totalBought)) {
+      card.shares = Number(closed.totalBought);
+      card.buyCost = card.shares * card.buyPrice;
     }
-    if (state.assetGap != null && Number.isFinite(state.assetGap)) {
-      this.lastAssetGap = state.assetGap;
+    card.asset = card.asset ?? closed.asset;
+    card.conditionId = card.conditionId ?? closed.conditionId;
+    card.slug = card.slug ?? closed.slug;
+    card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
+    const settled = resolveHeldSettlement(card, {
+      curPrice: closed.curPrice,
+      grossPl,
+    });
+    card.status = settled.status;
+    card.outcome = settled.outcome;
+    card.pl = settled.pl;
+    if (!isValidSharePrice(card.buyPrice) || !isValidShareSize(card.shares)) return false;
+    card.confirmed = true;
+    return true;
+  }
+
+  /** Apply redeemable / near-settled open position (typical path for held losses). */
+  private async applyRedeemableHeldSettlement(
+    card: TradingPositionCard,
+    openPos: PolymarketPosition,
+  ): Promise<boolean> {
+    const grossPl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
+    if (openPos.avgPrice != null && isValidSharePrice(openPos.avgPrice)) {
+      card.buyPrice = Number(openPos.avgPrice);
     }
+    if (openPos.size != null && isValidShareSize(openPos.size)) {
+      card.shares = Number(openPos.size);
+      card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
+    }
+    card.asset = card.asset ?? openPos.asset;
+    card.conditionId = card.conditionId ?? openPos.conditionId;
+    card.slug = card.slug ?? openPos.slug;
+    card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
+    const settled = resolveHeldSettlement(card, {
+      curPrice: openPos.curPrice,
+      grossPl: Number.isFinite(grossPl) ? grossPl : null,
+    });
+    card.status = settled.status;
+    card.outcome = settled.outcome;
+    card.pl = settled.pl;
+    if (!isValidSharePrice(card.buyPrice) || !isValidShareSize(card.shares)) return false;
+    card.confirmed = true;
+    return true;
+  }
+
+  /** Fetch a resolved open position; broaden beyond market filter when needed. */
+  private async fetchResolvedHeldPosition(
+    card: TradingPositionCard,
+  ): Promise<PolymarketPosition | null> {
+    if (!card.asset && !card.conditionId) return null;
+
+    const rows = await fetchUserPositions(this.userId, {
+      conditionId: card.conditionId,
+      sizeThreshold: 0,
+    });
+    let match = findResolvedPosition(rows, {
+      asset: card.asset,
+      conditionId: card.conditionId,
+    });
+    if (match) return match;
+
+    // Market filter can miss rows; scan recent open positions by asset/conditionId.
+    if (card.asset || card.conditionId) {
+      const broad = await fetchUserPositions(this.userId, {
+        sizeThreshold: 0,
+        limit: 200,
+      });
+      match = findResolvedPosition(broad, {
+        asset: card.asset,
+        conditionId: card.conditionId,
+      });
+      if (match) return match;
+    }
+    return null;
+  }
+
+  /** One Polymarket settlement attempt for a held (open or provisional win/loss) card. */
+  private async trySettleHeldCardFromPolymarket(card: TradingPositionCard): Promise<boolean> {
+    if (!card.asset && !card.conditionId) return false;
+
+    try {
+      const closedRows = await fetchClosedPositions(this.userId, {
+        conditionId: card.conditionId,
+        limit: 30,
+      });
+      const closed = findClosedPosition(closedRows, {
+        asset: card.asset,
+        conditionId: card.conditionId,
+        afterTs: card.buyAt - 30,
+      });
+      if (closed) {
+        return await this.applyClosedHeldSettlement(card, closed);
+      }
+
+      const openPos = await this.fetchResolvedHeldPosition(card);
+      if (openPos) {
+        return await this.applyRedeemableHeldSettlement(card, openPos);
+      }
+    } catch {
+      // confirm loop retries
+    }
+    return false;
   }
 
   private async settleOpenCardsForWindow(windowKey: string): Promise<boolean> {
@@ -1241,7 +1350,9 @@ export class LiveTradingService {
     );
     if (openCards.length === 0) return false;
 
+    let settledCount = 0;
     for (const card of openCards) {
+      // Keep status open until Polymarket confirms — no Chainlink provisional win/loss.
       const closed = await pollUntil(
         async () => {
           const rows = await fetchClosedPositions(this.userId, {
@@ -1259,90 +1370,38 @@ export class LiveTradingService {
         { attempts: 4, delayMs: 900 },
       );
 
-      if (closed) {
-        const grossPl = Number(closed.realizedPnl);
-        card.confirmed = true;
-        if (closed.avgPrice != null && Number.isFinite(Number(closed.avgPrice))) {
-          card.buyPrice = Number(closed.avgPrice);
-        }
-        if (closed.totalBought != null && Number.isFinite(Number(closed.totalBought))) {
-          card.shares = Number(closed.totalBought);
-          card.buyCost = card.shares * card.buyPrice;
-        }
-        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const settled = resolveHeldSettlement(card, {
-          curPrice: closed.curPrice,
-          grossPl: Number.isFinite(grossPl) ? grossPl : null,
-        });
-        card.status = settled.status;
-        card.outcome = settled.outcome;
-        card.pl = settled.pl;
+      if (closed && (await this.applyClosedHeldSettlement(card, closed))) {
+        settledCount += 1;
         continue;
       }
 
       const openPos = await pollUntil(
-        async () => {
-          const rows = await fetchUserPositions(this.userId, {
-            conditionId: card.conditionId,
-            sizeThreshold: 0,
-          });
-          const match = findPosition(rows, {
-            asset: card.asset,
-            conditionId: card.conditionId,
-          });
-          if (!match) return null;
-          if (!isValidSharePrice(match.avgPrice) || !isValidShareSize(match.size)) return null;
-          if (match.redeemable || (match.curPrice != null && (match.curPrice <= 0.02 || match.curPrice >= 0.98))) {
-            return match;
-          }
-          return null;
-        },
-        { attempts: 3, delayMs: 900 },
+        async () => this.fetchResolvedHeldPosition(card),
+        { attempts: 5, delayMs: 900 },
       );
 
-      if (openPos) {
-        const grossPl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
-        card.confirmed = true;
-        if (openPos.avgPrice != null) card.buyPrice = Number(openPos.avgPrice);
-        if (openPos.size != null) {
-          card.shares = Number(openPos.size);
-          card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
-        }
-        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const settled = resolveHeldSettlement(card, {
-          curPrice: openPos.curPrice,
-          grossPl: Number.isFinite(grossPl) ? grossPl : null,
-        });
-        card.status = settled.status;
-        card.outcome = settled.outcome;
-        card.pl = settled.pl;
+      if (openPos && (await this.applyRedeemableHeldSettlement(card, openPos))) {
+        settledCount += 1;
         continue;
       }
 
-      // Local fallback from last known window prices
-      const outcome = resolveWindowOutcome(
-        this.lastAssetPrice,
-        this.lastPrevCloseAsset,
-        this.lastAssetGap,
-      );
-      if (!outcome) continue;
-      const won = card.side === outcome;
-      card.status = won ? "win" : "loss";
-      card.outcome = outcome;
-      if (card.buyFees == null) {
-        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-      }
-      card.pl = feeAwarePlHeld(card, won);
+      // Still unresolved — leave open + unconfirmed; confirm loop keeps polling.
       card.confirmed = false;
     }
 
-    logService.info("trading", `Settled ${openCards.length} open position(s) for prior window`);
+    logService.info(
+      "trading",
+      `Settled ${settledCount}/${openCards.length} held position(s) for prior window` +
+        (settledCount < openCards.length
+          ? ` (${openCards.length - settledCount} waiting on Polymarket)`
+          : ""),
+    );
     for (const card of openCards) {
       this.persistCardStat(card);
     }
     this.notify();
     this.ensureConfirmLoop();
-    return true;
+    return settledCount > 0 || openCards.length > 0;
   }
 
   private resetWindow(state: LiveWindowState): void {
@@ -1596,7 +1655,6 @@ export class LiveTradingService {
     const prevSessionKey = this.sessionKey;
     this.ensureWindow(state);
     const windowRolled = prevSessionKey != null && prevSessionKey !== this.sessionKey;
-    this.rememberSettlementPrices(state);
     await this.refreshScheduleContext(windowRolled);
 
     if (!this.config.autoTrade) {
@@ -2647,7 +2705,14 @@ export class LiveTradingService {
   }
 
   private hasPendingCards(): boolean {
-    return this.positionCards.some((card) => !card.confirmed || this.isCorruptConfirmedCard(card));
+    const currentKey = this.sessionKey;
+    return this.positionCards.some((card) => {
+      if (this.isCorruptConfirmedCard(card)) return true;
+      if (!card.confirmed) return true;
+      // Prior-window holds need Polymarket settlement even if the buy was confirmed.
+      if (card.status === "open" && currentKey && card.windowKey !== currentKey) return true;
+      return false;
+    });
   }
 
   /** Confirmed cards that clearly used bad Polymarket data (e.g. 0¢) should be re-verified. */
@@ -2687,9 +2752,13 @@ export class LiveTradingService {
   private async reconfirmPendingCards(): Promise<void> {
     if (this.confirmInFlight) return;
     this.invalidateCorruptConfirmedCards();
-    const pending = this.positionCards.filter(
-      (card) => !card.confirmed || this.isCorruptConfirmedCard(card),
-    );
+    const currentKey = this.sessionKey;
+    const pending = this.positionCards.filter((card) => {
+      if (this.isCorruptConfirmedCard(card)) return true;
+      if (!card.confirmed) return true;
+      if (card.status === "open" && currentKey && card.windowKey !== currentKey) return true;
+      return false;
+    });
     if (pending.length === 0) {
       this.stopConfirmLoopIfIdle();
       return;
@@ -2730,18 +2799,28 @@ export class LiveTradingService {
 
   /** One verification pass against Polymarket Data API. Does not poll long — the confirm loop retries. */
   private async tryConfirmCard(card: TradingPositionCard): Promise<void> {
-    if (card.confirmed) return;
-
-    if (card.status === "open") {
-      await this.tryConfirmOpenCard(card);
-      return;
-    }
     if (card.status === "sold") {
+      if (card.confirmed) return;
       await this.tryConfirmSoldCard(card);
       return;
     }
     if (card.status === "win" || card.status === "loss") {
+      if (card.confirmed) return;
       await this.tryConfirmSettledCard(card);
+      return;
+    }
+    if (card.status === "open") {
+      const priorWindow =
+        Boolean(this.sessionKey) && Boolean(card.windowKey) && card.windowKey !== this.sessionKey;
+      if (priorWindow) {
+        // Held past window end — only Polymarket may mark win/loss.
+        const settled = await this.trySettleHeldCardFromPolymarket(card);
+        if (!settled) card.confirmed = false;
+        return;
+      }
+      if (!card.confirmed) {
+        await this.tryConfirmOpenCard(card);
+      }
     }
   }
 
@@ -2919,74 +2998,7 @@ export class LiveTradingService {
   }
 
   private async tryConfirmSettledCard(card: TradingPositionCard): Promise<void> {
-    if (!card.asset && !card.conditionId) return;
-
-    try {
-      const closedRows = await fetchClosedPositions(this.userId, {
-        conditionId: card.conditionId,
-        limit: 30,
-      });
-      const closed = findClosedPosition(closedRows, {
-        asset: card.asset,
-        conditionId: card.conditionId,
-        afterTs: card.buyAt - 30,
-      });
-      if (closed?.realizedPnl != null && Number.isFinite(Number(closed.realizedPnl))) {
-        const grossPl = Number(closed.realizedPnl);
-        if (closed.avgPrice != null && isValidSharePrice(closed.avgPrice)) {
-          card.buyPrice = Number(closed.avgPrice);
-        }
-        if (closed.totalBought != null && isValidShareSize(closed.totalBought)) {
-          card.shares = Number(closed.totalBought);
-          card.buyCost = card.shares * card.buyPrice;
-        }
-        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const settled = resolveHeldSettlement(card, {
-          curPrice: closed.curPrice,
-          grossPl,
-        });
-        card.status = settled.status;
-        card.outcome = settled.outcome;
-        card.pl = settled.pl;
-        if (isValidSharePrice(card.buyPrice) && isValidShareSize(card.shares)) {
-          card.confirmed = true;
-        }
-        return;
-      }
-
-      const openRows = await fetchUserPositions(this.userId, {
-        conditionId: card.conditionId,
-        sizeThreshold: 0,
-      });
-      const openPos = findPosition(openRows, {
-        asset: card.asset,
-        conditionId: card.conditionId,
-      });
-      if (
-        openPos &&
-        isValidShareSize(openPos.size) &&
-        isValidSharePrice(openPos.avgPrice) &&
-        (openPos.redeemable ||
-          (openPos.curPrice != null &&
-            (Number(openPos.curPrice) <= 0.02 || Number(openPos.curPrice) >= 0.98)))
-      ) {
-        const grossPl = Number(openPos.cashPnl ?? openPos.realizedPnl ?? 0);
-        card.buyPrice = Number(openPos.avgPrice);
-        card.shares = Number(openPos.size);
-        card.buyCost = Number(openPos.initialValue ?? card.shares * card.buyPrice);
-        card.buyFees = await estimateLiveTakerFee(this.userId, card.asset, card.shares, card.buyPrice);
-        const settled = resolveHeldSettlement(card, {
-          curPrice: openPos.curPrice,
-          grossPl: Number.isFinite(grossPl) ? grossPl : null,
-        });
-        card.status = settled.status;
-        card.outcome = settled.outcome;
-        card.pl = settled.pl;
-        card.confirmed = true;
-      }
-    } catch {
-      // keep pending
-    }
+    await this.trySettleHeldCardFromPolymarket(card);
   }
 
   private async enrichCardFromPolymarketBuy(cardId: string): Promise<void> {

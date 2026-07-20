@@ -85,13 +85,14 @@ export async function fetchUserPositions(
   options: {
     conditionId?: string;
     sizeThreshold?: number;
+    limit?: number;
   },
 ): Promise<PolymarketPosition[]> {
   const user = funderAddress(userId);
   if (!user) return [];
   const params = new URLSearchParams({
     user,
-    limit: "100",
+    limit: String(Math.max(1, Math.min(500, options.limit ?? 100))),
     sizeThreshold: String(options.sizeThreshold ?? 0),
   });
   if (options.conditionId) params.set("market", options.conditionId);
@@ -188,6 +189,42 @@ export function findPosition(
     }
     return isValidShareSize(p.size) && isValidSharePrice(p.avgPrice);
   });
+}
+
+/** True when an open position has resolved (redeemable or token ~0¢/~100¢). Losses often stay here instead of closed-positions. */
+export function isResolvedPosition(p: PolymarketPosition): boolean {
+  if (!isValidShareSize(p.size) || !isValidSharePrice(p.avgPrice)) return false;
+  if (p.redeemable) return true;
+  if (p.curPrice == null || !Number.isFinite(Number(p.curPrice))) return false;
+  const cur = Number(p.curPrice);
+  return cur <= 0.02 || cur >= 0.98;
+}
+
+/**
+ * Find a resolved open position for held-to-settlement confirmation.
+ * Prefer exact asset match; fall back to conditionId (token id can drift).
+ */
+export function findResolvedPosition(
+  positions: PolymarketPosition[],
+  opts: { asset?: string; conditionId?: string },
+): PolymarketPosition | undefined {
+  if (!opts.asset && !opts.conditionId) return undefined;
+
+  if (opts.asset) {
+    const byAsset = positions.find(
+      (p) =>
+        p.asset === opts.asset &&
+        isResolvedPosition(p) &&
+        (!opts.conditionId || p.conditionId === opts.conditionId),
+    );
+    if (byAsset) return byAsset;
+  }
+
+  if (opts.conditionId) {
+    return positions.find((p) => p.conditionId === opts.conditionId && isResolvedPosition(p));
+  }
+
+  return undefined;
 }
 
 export function findClosedPosition(

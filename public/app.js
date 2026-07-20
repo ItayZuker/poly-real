@@ -1757,6 +1757,7 @@ function renderPositionCard(card) {
     detailHtml += `<div class="position-card-row"><span>P/L</span><strong class="position-card-pl ${plClass}">${hasPl ? fmtUsdSigned(card.pl) : ""}</strong></div>`;
   }
 
+  // Provisional win/loss (legacy Chainlink path) keep Waiting until Polymarket confirms.
   const statusLabel = plPending && (status === "win" || status === "loss")
     ? "Waiting"
     : positionStatusLabel(status);
@@ -2471,6 +2472,10 @@ async function afterTradingSetupChange(updatedSetup) {
 
 window.onTradingSetupUpdated = afterTradingSetupChange;
 window.refreshScheduleSetupsList = () => loadScheduleSetups();
+window.applyScheduleSetupsOrder = (setups) => {
+  if (!Array.isArray(setups)) return;
+  scheduleSetupsCache = setups;
+};
 
 async function deleteTradingSetup(setup) {
   closeSetupMenus();
@@ -2656,8 +2661,8 @@ function renderScheduleSetupsList(setups, errorMessage) {
 
     const handle = document.createElement("div");
     handle.className = "schedule-setup-drag-handle";
-    handle.setAttribute("aria-label", "Drag to schedule");
-    handle.title = "Drag to schedule";
+    handle.setAttribute("aria-label", "Drag to reorder or place on schedule");
+    handle.title = "Drag to reorder or place on schedule";
     handle.innerHTML =
       '<svg viewBox="0 0 8 14" aria-hidden="true"><circle cx="2" cy="2" r="1.2" fill="currentColor"/><circle cx="6" cy="2" r="1.2" fill="currentColor"/><circle cx="2" cy="7" r="1.2" fill="currentColor"/><circle cx="6" cy="7" r="1.2" fill="currentColor"/><circle cx="2" cy="12" r="1.2" fill="currentColor"/><circle cx="6" cy="12" r="1.2" fill="currentColor"/></svg>';
 

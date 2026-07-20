@@ -23,6 +23,8 @@
   /** Per-series heatmap data version (`windowStart:savedAt`) for stats cache invalidation. */
   let heatmapSeriesVersions = {};
   let dragState = null;
+  /** Pending/active drag from the setups list: reorder in-column or place on grid. */
+  let listDragState = null;
   let moveDragState = null;
   let resizeState = null;
   let openMenuId = null;
@@ -2202,8 +2204,329 @@
     if (!isScheduleView()) return;
     if (e.button !== 0) return;
     e.preventDefault();
-    dragState = { setupId, title, preview: null, headerDay: null };
+    const item = e.currentTarget?.closest?.(".schedule-setup-item") ?? null;
+    const list = document.getElementById("schedule-setups-list");
+    if (!item || !list) return;
+    listDragState = {
+      setupId,
+      title,
+      item,
+      list,
+      startX: e.clientX,
+      startY: e.clientY,
+      mode: null,
+      orderChanged: false,
+      placeholder: null,
+      offsetX: 0,
+      offsetY: 0,
+      itemHeight: 0,
+      originIds: [...list.querySelectorAll(".schedule-setup-item")].map((el) => el.dataset.setupId),
+    };
+  }
+
+  function clearFloatingListItemStyles(item) {
+    if (!item) return;
+    item.classList.remove("is-list-reordering");
+    item.style.left = "";
+    item.style.top = "";
+    item.style.width = "";
+  }
+
+  function isListItemFloating(item) {
+    return Boolean(item?.classList.contains("is-list-reordering") && item.parentNode === document.body);
+  }
+
+  function settleFloatingListItem() {
+    if (!listDragState?.item) return;
+    const { list, item, placeholder } = listDragState;
+    if (placeholder?.parentNode) {
+      placeholder.parentNode.insertBefore(item, placeholder);
+      placeholder.remove();
+    } else if (item.parentNode !== list) {
+      list.appendChild(item);
+    }
+    listDragState.placeholder = null;
+    clearFloatingListItemStyles(item);
+    document.body.classList.remove("is-schedule-list-reordering");
+  }
+
+  function positionFloatingListItem(clientX, clientY) {
+    if (!listDragState?.item || !isListItemFloating(listDragState.item)) return;
+    const { item, offsetX, offsetY } = listDragState;
+    item.style.left = `${clientX - offsetX}px`;
+    item.style.top = `${clientY - offsetY}px`;
+  }
+
+  function makeListPlaceholder(heightPx) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "schedule-setup-reorder-placeholder";
+    placeholder.style.height = `${Math.max(36, heightPx || 0)}px`;
+    return placeholder;
+  }
+
+  /** Rebuild list in origin order with a gap where the floating card belongs. */
+  function rebuildListWithOriginPlaceholder(list, orderedIds, floatingId, heightPx) {
+    const byId = new Map(
+      [...list.querySelectorAll(".schedule-setup-item")].map((el) => [el.dataset.setupId, el]),
+    );
+    list.replaceChildren();
+    let placeholder = null;
+    for (const id of orderedIds) {
+      if (id === floatingId) {
+        placeholder = makeListPlaceholder(heightPx);
+        list.appendChild(placeholder);
+        continue;
+      }
+      const el = byId.get(id);
+      if (el) list.appendChild(el);
+    }
+    if (!placeholder) {
+      placeholder = makeListPlaceholder(heightPx);
+      list.appendChild(placeholder);
+    }
+    return placeholder;
+  }
+
+  function liftListItem(clientX, clientY) {
+    if (!listDragState) return;
+    const { list, item } = listDragState;
+    if (isListItemFloating(item)) {
+      positionFloatingListItem(clientX, clientY);
+      return;
+    }
+    const rect = item.getBoundingClientRect();
+    const placeholder = makeListPlaceholder(rect.height);
+    list.insertBefore(placeholder, item);
+
+    listDragState.placeholder = placeholder;
+    listDragState.offsetX = clientX - rect.left;
+    listDragState.offsetY = clientY - rect.top;
+    listDragState.itemHeight = rect.height;
+
+    item.classList.add("is-list-reordering");
+    item.style.width = `${rect.width}px`;
+    document.body.appendChild(item);
+    positionFloatingListItem(clientX, clientY);
+    document.body.classList.add("is-schedule-list-reordering");
+  }
+
+  function beginListReorderMode(clientX, clientY) {
+    if (!listDragState || listDragState.mode === "reorder") return;
+
+    // Returning from the schedule column — keep the float, clear place preview.
+    if (listDragState.mode === "place") {
+      dragState = null;
+      clearDropPreview();
+      clearHeaderFillPreview();
+      document.body.classList.remove("is-schedule-dragging");
+      listDragState.mode = "reorder";
+      document.body.classList.add("is-schedule-list-reordering");
+      positionFloatingListItem(clientX, clientY);
+      return;
+    }
+
+    listDragState.mode = "reorder";
+    liftListItem(clientX, clientY);
+  }
+
+  function beginListPlaceMode(clientX, clientY) {
+    if (!listDragState || listDragState.mode === "place") return;
+    const { list, item, originIds, setupId } = listDragState;
+
+    if (listDragState.mode === "reorder") {
+      if (listDragState.placeholder?.parentNode) {
+        listDragState.placeholder.remove();
+      }
+      listDragState.placeholder = rebuildListWithOriginPlaceholder(
+        list,
+        originIds,
+        setupId,
+        listDragState.itemHeight || item.getBoundingClientRect().height,
+      );
+      listDragState.orderChanged = false;
+      if (!isListItemFloating(item)) {
+        liftListItem(clientX, clientY);
+      } else {
+        positionFloatingListItem(clientX, clientY);
+        document.body.classList.add("is-schedule-list-reordering");
+      }
+    } else {
+      liftListItem(clientX, clientY);
+    }
+
+    listDragState.mode = "place";
+    dragState = {
+      setupId: listDragState.setupId,
+      title: listDragState.title,
+      preview: null,
+      headerDay: null,
+    };
     document.body.classList.add("is-schedule-dragging");
+    positionFloatingListItem(clientX, clientY);
+  }
+
+  function restoreListOrder(list, orderedIds) {
+    if (!list || !orderedIds?.length) return;
+    const byId = new Map(
+      [...list.querySelectorAll(".schedule-setup-item")].map((el) => [el.dataset.setupId, el]),
+    );
+    for (const id of orderedIds) {
+      const el = byId.get(id);
+      if (el) list.appendChild(el);
+    }
+  }
+
+  function updateListReorder(clientX, clientY) {
+    if (!listDragState || listDragState.mode !== "reorder") return;
+    const { list, item, placeholder } = listDragState;
+    if (!placeholder) return;
+    positionFloatingListItem(clientX, clientY);
+
+    const siblings = [...list.querySelectorAll(".schedule-setup-item")].filter((el) => el !== item);
+    let inserted = false;
+    for (const sibling of siblings) {
+      const rect = sibling.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      if (clientY < mid) {
+        if (placeholder.nextElementSibling !== sibling) {
+          list.insertBefore(placeholder, sibling);
+          listDragState.orderChanged = true;
+        }
+        inserted = true;
+        break;
+      }
+    }
+    if (!inserted) {
+      const last = list.lastElementChild;
+      if (last !== placeholder) {
+        list.appendChild(placeholder);
+        listDragState.orderChanged = true;
+      }
+    }
+  }
+
+  function resolveListDragMode(clientX, clientY) {
+    if (!listDragState || listDragState.mode) return;
+    const dx = clientX - listDragState.startX;
+    const dy = clientY - listDragState.startY;
+    if (Math.hypot(dx, dy) < 6) return;
+
+    const listRect = listDragState.list.getBoundingClientRect();
+    const inListColumn = clientX <= listRect.right + 24 && clientX >= listRect.left - 8;
+    if (inListColumn) {
+      beginListReorderMode(clientX, clientY);
+      updateListReorder(clientX, clientY);
+      return;
+    }
+    beginListPlaceMode(clientX, clientY);
+    updateDragPreview(clientX, clientY);
+  }
+
+  function updatePendingListDrag(clientX, clientY) {
+    if (!listDragState) return;
+    if (!listDragState.mode) {
+      resolveListDragMode(clientX, clientY);
+      return;
+    }
+    const listRect = listDragState.list.getBoundingClientRect();
+    if (listDragState.mode === "reorder") {
+      // Dragging out of the column onto the calendar switches to place mode.
+      if (clientX > listRect.right + 36) {
+        beginListPlaceMode(clientX, clientY);
+        updateDragPreview(clientX, clientY);
+        return;
+      }
+      updateListReorder(clientX, clientY);
+      return;
+    }
+    // Place mode: dragging back into the side list resumes reorder.
+    if (clientX <= listRect.right + 12 && clientX >= listRect.left - 8) {
+      beginListReorderMode(clientX, clientY);
+      updateListReorder(clientX, clientY);
+      return;
+    }
+    positionFloatingListItem(clientX, clientY);
+    updateDragPreview(clientX, clientY);
+  }
+
+  async function commitListReorder() {
+    if (!listDragState) return;
+    const { list, originIds, orderChanged } = listDragState;
+    settleFloatingListItem();
+    const orderedIds = [...list.querySelectorAll(".schedule-setup-item")].map(
+      (el) => el.dataset.setupId,
+    );
+    listDragState = null;
+
+    if (!orderChanged) return;
+    const unchanged =
+      orderedIds.length === originIds.length &&
+      orderedIds.every((id, i) => id === originIds[i]);
+    if (unchanged) return;
+
+    try {
+      const res = await fetch("/api/trading-setups/reorder", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderedIds }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Reorder failed (${res.status})`);
+      }
+      const setups = await res.json();
+      if (typeof window.applyScheduleSetupsOrder === "function") {
+        window.applyScheduleSetupsOrder(setups);
+      } else if (typeof window.refreshScheduleSetupsList === "function") {
+        void window.refreshScheduleSetupsList();
+      }
+    } catch (err) {
+      console.error(err);
+      restoreListOrder(list, originIds);
+      if (typeof window.refreshScheduleSetupsList === "function") {
+        void window.refreshScheduleSetupsList();
+      }
+    }
+  }
+
+  function endFloatingListPlace() {
+    if (!listDragState) return;
+    const { list, originIds } = listDragState;
+    settleFloatingListItem();
+    restoreListOrder(list, originIds);
+    listDragState = null;
+  }
+
+  async function commitListDrag() {
+    if (!listDragState) return;
+    const mode = listDragState.mode;
+    if (mode === "reorder") {
+      await commitListReorder();
+      return;
+    }
+    if (mode === "place") {
+      endFloatingListPlace();
+      await commitDrop();
+      return;
+    }
+    // Click without meaningful drag — cancel.
+    listDragState = null;
+  }
+
+  function cancelListDrag() {
+    if (!listDragState) return;
+    if (listDragState.mode === "reorder" || listDragState.mode === "place") {
+      const { list, originIds } = listDragState;
+      settleFloatingListItem();
+      restoreListOrder(list, originIds);
+    }
+    if (listDragState.mode === "place" || dragState) {
+      dragState = null;
+      clearDropPreview();
+      clearHeaderFillPreview();
+      document.body.classList.remove("is-schedule-dragging");
+    }
+    listDragState = null;
   }
 
   function updateDragPreview(clientX, clientY) {
@@ -2287,19 +2610,23 @@
 
   function bindGlobalPointer() {
     window.addEventListener("mousemove", (e) => {
-      if (dragState) updateDragPreview(e.clientX, e.clientY);
+      if (listDragState) updatePendingListDrag(e.clientX, e.clientY);
+      else if (dragState) updateDragPreview(e.clientX, e.clientY);
       if (moveDragState) updateMoveDragPreview(e.clientX, e.clientY);
       if (resizeState) updateResizePreview(e.clientY);
     });
 
     window.addEventListener("mouseup", () => {
-      if (dragState) void commitDrop();
+      if (listDragState) void commitListDrag();
+      else if (dragState) void commitDrop();
       if (moveDragState) void commitMove();
       if (resizeState) void commitResize();
     });
 
     window.addEventListener("blur", () => {
-      if (dragState) {
+      if (listDragState) {
+        cancelListDrag();
+      } else if (dragState) {
         dragState = null;
         clearDropPreview();
         clearHeaderFillPreview();
