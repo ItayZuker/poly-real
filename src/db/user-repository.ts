@@ -3,6 +3,7 @@ import { ObjectId as MongoObjectId } from "mongodb";
 import { isAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { hashPassword, verifyPassword } from "../auth/password.js";
+import { DEFAULT_MARKET_SERIES } from "../collections.js";
 import type { TradingConfig } from "../types.js";
 import { decryptSecret, encryptSecret, privateKeyHint } from "../wallet-crypto.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
@@ -33,7 +34,10 @@ export interface UserDocument {
   /** scrypt password hash — required for login. */
   passwordHash?: string;
   wallet: UserWalletStored;
+  /** Legacy flat trading config (also mirrored for DEFAULT_MARKET_SERIES). */
   trading: TradingConfig;
+  /** Per-market trading settings. */
+  tradingBySeries?: Record<string, TradingConfig>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -457,31 +461,58 @@ export async function deleteUserById(id: string | ObjectId): Promise<boolean> {
 
 export async function updateDefaultUserTrading(
   patch: Partial<TradingConfig>,
+  series: string = DEFAULT_MARKET_SERIES,
 ): Promise<TradingConfig> {
   const user = await getDefaultUser();
-  return updateUserTrading(user._id, patch);
+  return updateUserTrading(user._id, patch, series);
+}
+
+export function resolveUserTradingForSeries(
+  user: Pick<UserDocument, "trading" | "tradingBySeries">,
+  series: string,
+): TradingConfig {
+  const key = String(series || DEFAULT_MARKET_SERIES).trim() || DEFAULT_MARKET_SERIES;
+  const bySeries = user.tradingBySeries?.[key];
+  if (bySeries) return normalizeTrading(bySeries);
+  // Legacy flat `trading` belongs to the default market only.
+  if (key === DEFAULT_MARKET_SERIES) return normalizeTrading(user.trading);
+  return normalizeTrading(undefined);
 }
 
 export async function updateUserTrading(
   userId: string | ObjectId,
   patch: Partial<TradingConfig>,
+  series: string = DEFAULT_MARKET_SERIES,
 ): Promise<TradingConfig> {
   const user = await getUserById(userId);
   if (!user) throw new Error("User not found");
-  const next = normalizeTrading({ ...user.trading, ...patch });
+  const key = String(series || DEFAULT_MARKET_SERIES).trim() || DEFAULT_MARKET_SERIES;
+  const current = resolveUserTradingForSeries(user, key);
+  const next = normalizeTrading({ ...current, ...patch });
   const now = new Date();
+  const tradingBySeries = { ...(user.tradingBySeries ?? {}) };
+  // Seed default market from legacy flat field once so other markets stay independent.
+  if (!tradingBySeries[DEFAULT_MARKET_SERIES] && user.trading) {
+    tradingBySeries[DEFAULT_MARKET_SERIES] = normalizeTrading(user.trading);
+  }
+  tradingBySeries[key] = next;
   const col = await collection();
-  await col.updateOne(
-    { _id: user._id },
-    { $set: { trading: next, updatedAt: now } },
-  );
+  const $set: Record<string, unknown> = {
+    tradingBySeries,
+    updatedAt: now,
+  };
+  // Keep flat `trading` in sync with the default market for older readers / queries.
+  if (key === DEFAULT_MARKET_SERIES) {
+    $set.trading = next;
+  }
+  await col.updateOne({ _id: user._id }, { $set });
   return next;
 }
 
 /** Users that may need a live engine (wallet configured and/or trading armed). */
 export async function listUsersForLiveTrading(): Promise<UserDocument[]> {
   const col = await collection();
-  return col
+  const docs = await col
     .find({
       $or: [
         { "wallet.privateKeyEnc": { $type: "string" }, "wallet.funderAddress": { $type: "string" } },
@@ -490,6 +521,26 @@ export async function listUsersForLiveTrading(): Promise<UserDocument[]> {
       ],
     })
     .toArray();
+
+  // Also include users who only armed a non-default market via tradingBySeries.
+  const extra = await col
+    .find({
+      tradingBySeries: { $exists: true },
+      "wallet.privateKeyEnc": { $type: "string" },
+      "wallet.funderAddress": { $type: "string" },
+    })
+    .toArray();
+
+  const byId = new Map<string, UserDocument>();
+  for (const doc of docs) byId.set(String(doc._id), doc);
+  for (const doc of extra) {
+    const id = String(doc._id);
+    if (byId.has(id)) continue;
+    const map = doc.tradingBySeries ?? {};
+    const armed = Object.values(map).some((t) => t?.autoTrade || t?.startTrading);
+    if (armed) byId.set(id, doc);
+  }
+  return [...byId.values()];
 }
 
 export interface UpdateUserProfileInput {

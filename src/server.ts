@@ -323,14 +323,23 @@ function scheduleFullWindowPush(): void {
   }, FULL_WINDOW_SSE_MS);
 }
 
-async function broadcastSchedulePlacements(userId: string): Promise<void> {
-  const placements = await listSchedulePlacements(userId);
+async function broadcastSchedulePlacements(
+  userId: string,
+  series?: string | null,
+): Promise<void> {
+  const placements = await listSchedulePlacements(userId, series ?? undefined);
   broadcast("schedule-placements", placements, userId);
 }
 
 function getDisplaySeries(req: express.Request): string {
   const series = String(req.query.series ?? displayService.getState().series);
   return series;
+}
+
+function parseSeriesParam(req: express.Request, bodySeries?: unknown): string {
+  const fromQuery = typeof req.query.series === "string" ? req.query.series.trim() : "";
+  const fromBody = typeof bodySeries === "string" ? bodySeries.trim() : "";
+  return fromQuery || fromBody || displayService.getState().series || "btc-5m";
 }
 
 function parsePlacementIdsQuery(req: express.Request): string[] | undefined {
@@ -491,17 +500,22 @@ app.patch("/api/account/wallet", async (req, res) => {
   }
 });
 
-app.get("/api/trading/config", (req, res) => {
+app.get("/api/trading/config", async (req, res) => {
   try {
-    res.json(tradingFor(req).getConfig());
+    const series = parseSeriesParam(req);
+    const engine = tradingFor(req);
+    await engine.ensureBoundToSeries(series);
+    res.json(engine.getConfig());
   } catch (err) {
     res.status(401).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
-app.put("/api/trading/config", (req, res) => {
+app.put("/api/trading/config", async (req, res) => {
   try {
+    const series = parseSeriesParam(req, req.body?.series);
     const engine = tradingFor(req);
+    await engine.ensureBoundToSeries(series);
     const body = req.body as Partial<import("./types.js").TradingConfig>;
     const config = engine.setConfig(body);
     void engine.refreshScheduleContext(true);
@@ -691,6 +705,9 @@ app.get("/api/window", async (req, res) => {
     const series = getDisplaySeries(req);
     displayService.setSeries(series);
     const userId = (req as AuthedRequest).authUser?.id;
+    if (userId) {
+      void tradingFor(req).ensureBoundToSeries(series);
+    }
     res.json(enrichWindowStateForUser(userId, displayService.getState()));
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -866,9 +883,10 @@ app.delete("/api/trading-setups/:id", async (req, res) => {
   }
 });
 
-app.get("/api/heatmap", (_req, res) => {
+app.get("/api/heatmap", (req, res) => {
   try {
-    res.json(getHeatmapState());
+    const series = parseSeriesParam(req);
+    res.json(getHeatmapState(series));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -876,7 +894,8 @@ app.get("/api/heatmap", (_req, res) => {
 
 app.get("/api/schedule-placements", async (req, res) => {
   try {
-    const placements = await listSchedulePlacements(requireUserId(req));
+    const series = parseSeriesParam(req);
+    const placements = await listSchedulePlacements(requireUserId(req), series);
     res.json(placements);
   } catch (err) {
     const message = String(err);
@@ -891,7 +910,9 @@ app.get("/api/schedule-placements", async (req, res) => {
 app.post("/api/schedule-placements", async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const series = parseSeriesParam(req, req.body?.series);
     const saved = await insertSchedulePlacement(userId, {
+      series,
       setupId: String(req.body?.setupId ?? ""),
       title: String(req.body?.title ?? ""),
       day: String(req.body?.day ?? ""),
@@ -899,7 +920,7 @@ app.post("/api/schedule-placements", async (req, res) => {
       durationHours: Number(req.body?.durationHours),
     });
     await syncLiveScheduleInUseForSetup(userId, saved.setupId);
-    await broadcastSchedulePlacements(userId);
+    await broadcastSchedulePlacements(userId, series);
     res.status(201).json(saved);
   } catch (err) {
     const message = String(err);
@@ -918,14 +939,15 @@ app.post("/api/schedule-placements", async (req, res) => {
 app.delete("/api/schedule-placements/day/:day", async (req, res) => {
   try {
     const userId = requireUserId(req);
-    const before = await listSchedulePlacements(userId);
+    const series = parseSeriesParam(req);
+    const before = await listSchedulePlacements(userId, series);
     const removed = before.filter((placement) => placement.day === req.params.day);
-    await deletePlacementsByDay(userId, req.params.day);
+    await deletePlacementsByDay(userId, req.params.day, series);
     for (const placement of removed) tradingFor(req).forgetPlacement(placement._id);
     await reconcileLiveScheduleInUseFlags(userId);
     await tradingFor(req).refreshScheduleContext(true);
-    const placements = await listSchedulePlacements(userId);
-    await broadcastSchedulePlacements(userId);
+    const placements = await listSchedulePlacements(userId, series);
+    await broadcastSchedulePlacements(userId, series);
     pushWindowStateImmediate();
     res.json(placements);
   } catch (err) {
@@ -936,20 +958,21 @@ app.delete("/api/schedule-placements/day/:day", async (req, res) => {
 app.post("/api/schedule-placements/replace-day", async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const series = parseSeriesParam(req, req.body?.series);
     const setupId = String(req.body?.setupId ?? "");
     const setup = await getTradingSetupById(userId, setupId);
     if (!setup) {
       res.status(404).json({ error: "Trading setup not found" });
       return;
     }
-    const before = await listSchedulePlacements(userId);
+    const before = await listSchedulePlacements(userId, series);
     const day = String(req.body?.day ?? "");
     const removed = before.filter((placement) => placement.day === day);
-    const placements = await replaceDayWithSetup(userId, day, setupId, setup.title);
+    const placements = await replaceDayWithSetup(userId, day, setupId, setup.title, series);
     for (const placement of removed) tradingFor(req).forgetPlacement(placement._id);
     await reconcileLiveScheduleInUseFlags(userId);
     await tradingFor(req).refreshScheduleContext(true);
-    await broadcastSchedulePlacements(userId);
+    await broadcastSchedulePlacements(userId, series);
     pushWindowStateImmediate();
     res.json(placements);
   } catch (err) {
@@ -960,6 +983,7 @@ app.post("/api/schedule-placements/replace-day", async (req, res) => {
 app.post("/api/schedule-placements/apply-setup", async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const series = parseSeriesParam(req, req.body?.series);
     const setupId = String(req.body?.setupId ?? "");
     const title = String(req.body?.title ?? "");
     const setup = await getTradingSetupById(userId, setupId);
@@ -967,9 +991,14 @@ app.post("/api/schedule-placements/apply-setup", async (req, res) => {
       res.status(404).json({ error: "Trading setup not found" });
       return;
     }
-    const placements = await replaceAllPlacementsSetup(userId, setupId, title || setup.title);
+    const placements = await replaceAllPlacementsSetup(
+      userId,
+      setupId,
+      title || setup.title,
+      series,
+    );
     await reconcileLiveScheduleInUseFlags(userId);
-    await broadcastSchedulePlacements(userId);
+    await broadcastSchedulePlacements(userId, series);
     res.json(placements);
   } catch (err) {
     const message = String(err);
@@ -997,7 +1026,7 @@ app.patch("/api/schedule-placements/:id", async (req, res) => {
       res.status(404).json({ error: "Placement not found" });
       return;
     }
-    await broadcastSchedulePlacements(userId);
+    await broadcastSchedulePlacements(userId, updated.series);
     res.json(updated);
   } catch (err) {
     const message = String(err);
@@ -1027,7 +1056,7 @@ app.delete("/api/schedule-placements/:id", async (req, res) => {
       await syncLiveScheduleInUseForSetup(userId, existing.setupId);
     }
     tradingFor(req).forgetPlacement(id);
-    await broadcastSchedulePlacements(userId);
+    await broadcastSchedulePlacements(userId, existing?.series);
     pushWindowStateImmediate();
     res.status(204).send();
   } catch (err) {
@@ -1043,8 +1072,10 @@ app.delete("/api/schedule-placements/:id", async (req, res) => {
 app.get("/api/schedule-placement-stats", async (req, res) => {
   try {
     const userId = requireUserId(req);
+    const series = parseSeriesParam(req);
     const engine = await liveTradingRegistry.ensureLoaded(userId);
-    const allPlacements = await listSchedulePlacements(userId);
+    await engine.ensureBoundToSeries(series);
+    const allPlacements = await listSchedulePlacements(userId, series);
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
     const stats = engine.getPlacementStats(placements.map((p) => p._id));
@@ -1079,9 +1110,11 @@ app.get("/api/schedule-placement-stats/stream", async (req, res) => {
 
   try {
     const userId = requireUserId(req);
+    const series = parseSeriesParam(req);
     writeEvent("progress", { completed: 1, total: 1 });
     const engine = await liveTradingRegistry.ensureLoaded(userId);
-    const allPlacements = await listSchedulePlacements(userId);
+    await engine.ensureBoundToSeries(series);
+    const allPlacements = await listSchedulePlacements(userId, series);
     const placementIds = parsePlacementIdsQuery(req);
     const placements = filterSchedulePlacements(allPlacements, placementIds);
     const stats = engine.getPlacementStats(placements.map((p) => p._id));
@@ -1144,9 +1177,10 @@ app.get("/api/stream", (req, res) => {
         `event: window\ndata: ${JSON.stringify(enrichWindowStateForUser(userId, displayService.getState()))}\n\n`,
       );
       res.write(`event: log-history\ndata: ${JSON.stringify(logService.getRecent())}\n\n`);
-      res.write(`event: heatmap\ndata: ${JSON.stringify(getHeatmapState())}\n\n`);
+      const series = displayService.getState().series || "btc-5m";
+      res.write(`event: heatmap\ndata: ${JSON.stringify(getHeatmapState(series))}\n\n`);
       if (userId) {
-        const placements = await listSchedulePlacements(userId);
+        const placements = await listSchedulePlacements(userId, series);
         res.write(`event: schedule-placements\ndata: ${JSON.stringify(placements)}\n\n`);
       }
     } catch {

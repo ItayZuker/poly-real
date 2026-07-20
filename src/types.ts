@@ -299,6 +299,8 @@ export type ScheduleDayId = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun
 export interface SchedulePlacementRecord {
   /** Owner — required for multi-user isolation. */
   userId: string;
+  /** Market series this schedule board belongs to (e.g. btc-5m). */
+  series: string;
   setupId: string;
   title: string;
   day: ScheduleDayId;

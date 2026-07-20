@@ -137,11 +137,13 @@ function seriesDataVersionsFromStore(): Record<string, string> {
   return versions;
 }
 
-function rebuildState(): HeatmapPublicState {
+function rebuildState(seriesFilter?: string | null): HeatmapPublicState {
   const cutoffUtc = getRollingCutoffUtcSec();
   const buckets = new Map<string, BucketAccumulator>();
+  const filter = seriesFilter ? String(seriesFilter).trim() : "";
 
   for (const stored of windowStore.values()) {
+    if (filter && stored.series !== filter) continue;
     if (!isInRollingWindow(stored.windowStart, cutoffUtc)) continue;
     const key = bucketKey(stored.day, stored.hour);
     const bucket = buckets.get(key) ?? {
@@ -189,9 +191,9 @@ function pruneExpiredWindows(): void {
   }
 }
 
-export function getHeatmapState(): HeatmapPublicState {
+export function getHeatmapState(series?: string | null): HeatmapPublicState {
   pruneExpiredWindows();
-  return rebuildState();
+  return rebuildState(series);
 }
 
 export function ingestRecordedWindow(

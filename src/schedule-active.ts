@@ -1,3 +1,4 @@
+import { DEFAULT_MARKET_SERIES } from "./collections.js";
 import { listSchedulePlacements } from "./db/schedule-placement-repository.js";
 import { getTradingSetupById } from "./db/trading-setup-repository.js";
 import type { ScheduleDayId, TradingPhaseSetup } from "./types.js";
@@ -65,12 +66,13 @@ export function isScheduleContextActive(
 
 export async function findActiveScheduleContext(
   userId: string,
+  series: string = DEFAULT_MARKET_SERIES,
   now = new Date(),
 ): Promise<ActiveScheduleContext | null> {
   const { day, hour } = getUtcScheduleClock(now);
   if (!VALID_DAYS.includes(day)) return null;
 
-  const placements = await listSchedulePlacements(userId);
+  const placements = await listSchedulePlacements(userId, series);
   const placement = placements.find(
     (p) => p.day === day && hour >= p.startHour && hour < p.startHour + p.durationHours,
   );
@@ -82,7 +84,7 @@ export async function findActiveScheduleContext(
   return {
     placementId: placement._id,
     setupId: placement.setupId,
-    title: doc.title,
+    title: placement.title,
     setup: doc.setup,
     day: placement.day,
     startHour: placement.startHour,

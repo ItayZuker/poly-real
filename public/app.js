@@ -2011,16 +2011,20 @@ function updatePositionsPanel(state) {
 
   ingestDemoPositionCards(state);
 
-  const cards =
+  const series = selectedSeries;
+  const rawCards =
     positionsView === "demo"
       ? demoPositionCards
       : state?.trading?.positionCards;
+  const cards = Array.isArray(rawCards)
+    ? rawCards.filter((c) => !c?.series || c.series === series)
+    : [];
 
   const fingerprint = positionsFingerprint(cards);
   if (fingerprint === lastPositionsFingerprint) return;
   lastPositionsFingerprint = fingerprint;
 
-  if (!Array.isArray(cards) || cards.length === 0) {
+  if (cards.length === 0) {
     list.innerHTML = "";
     empty.hidden = false;
     empty.textContent = positionsView === "demo" ? "No demo positions yet" : "No positions yet";
@@ -2242,16 +2246,18 @@ function connectSSE() {
     appendLogEntry(JSON.parse(e.data));
   });
 
-  es.addEventListener("heatmap", (e) => {
-    const state = JSON.parse(e.data);
-    renderHeatmap(state);
-    window.SchedulePlacements?.onHeatmapUpdated?.(state);
+  es.addEventListener("heatmap", () => {
+    // Always re-fetch for the selected market (broadcast may be multi-series aggregate).
+    void loadHeatmap();
   });
 
   es.addEventListener("schedule-placements", (e) => {
-    if (window.SchedulePlacements) {
-      window.SchedulePlacements.setPlacements(JSON.parse(e.data));
-    }
+    if (!window.SchedulePlacements) return;
+    const data = JSON.parse(e.data);
+    if (!Array.isArray(data)) return;
+    // Ignore boards for other markets (broadcasts are per-series).
+    if (data.length > 0 && data[0]?.series && data[0].series !== selectedSeries) return;
+    window.SchedulePlacements.setPlacements(data);
   });
 
   es.onerror = () => {
@@ -2261,13 +2267,24 @@ function connectSSE() {
   };
 }
 
-$("market-select").addEventListener("change", async (e) => {
-  selectedSeries = e.target.value;
+async function onMarketSeriesChanged(nextSeries) {
+  selectedSeries = nextSeries;
+  lastPositionsFingerprint = "";
   const res = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
   if (res.ok) updateWindowUI(await res.json());
-  if (window.SchedulePlacements?.refreshAllPlacementStats) {
-    void window.SchedulePlacements.refreshAllPlacementStats();
+  const config = await loadTradingConfig();
+  if (config) applyTradingConfigToUi(config);
+  void loadHeatmap();
+  if (window.SchedulePlacements?.loadPlacements) {
+    await window.SchedulePlacements.loadPlacements({ reloadStats: true });
+  } else if (window.SchedulePlacements?.refreshAllPlacementStats) {
+    void window.SchedulePlacements.refreshAllPlacementStats({ force: true });
   }
+  updatePositionsPanel(windowState);
+}
+
+$("market-select").addEventListener("change", async (e) => {
+  await onMarketSeriesChanged(e.target.value);
 });
 
 $("log-clear").addEventListener("click", () => {
@@ -2883,7 +2900,7 @@ function renderHeatmap(state) {
 
 async function loadHeatmap() {
   try {
-    const res = await fetch("/api/heatmap");
+    const res = await fetch(`/api/heatmap?series=${encodeURIComponent(selectedSeries)}`);
     if (!res.ok) return;
     const state = await res.json();
     renderHeatmap(state);
@@ -3050,9 +3067,16 @@ function normalizeManualAmount(value, unit) {
 
 const TRADING_CONFIG_STORAGE_KEY = "poly-trading-config";
 
+function tradingConfigStorageKey(series = selectedSeries) {
+  return `${TRADING_CONFIG_STORAGE_KEY}:${series || "btc-5m"}`;
+}
+
 function readLocalTradingConfig() {
   try {
-    const raw = localStorage.getItem(TRADING_CONFIG_STORAGE_KEY);
+    const raw =
+      localStorage.getItem(tradingConfigStorageKey()) ||
+      // Legacy unscoped key — only for default market.
+      (selectedSeries === "btc-5m" ? localStorage.getItem(TRADING_CONFIG_STORAGE_KEY) : null);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
@@ -3079,7 +3103,7 @@ function writeLocalTradingConfig(config) {
   try {
     const manualOrderUnit = config.manualOrderUnit === "usdc" ? "usdc" : "shares";
     localStorage.setItem(
-      TRADING_CONFIG_STORAGE_KEY,
+      tradingConfigStorageKey(),
       JSON.stringify({
         autoTrade: Boolean(config.autoTrade),
         useSchedule: Boolean(config.useSchedule),
@@ -3099,10 +3123,10 @@ function writeLocalTradingConfig(config) {
 
 async function pushTradingConfig(patch) {
   try {
-    const res = await fetch("/api/trading/config", {
+    const res = await fetch(`/api/trading/config?series=${encodeURIComponent(selectedSeries)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
+      body: JSON.stringify({ ...patch, series: selectedSeries }),
     });
     if (!res.ok) return null;
     const config = await res.json();
@@ -3115,7 +3139,7 @@ async function pushTradingConfig(patch) {
 
 async function loadTradingConfig() {
   try {
-    const res = await fetch("/api/trading/config");
+    const res = await fetch(`/api/trading/config?series=${encodeURIComponent(selectedSeries)}`);
     if (!res.ok) return null;
     const config = await res.json();
     writeLocalTradingConfig(config);
@@ -3175,6 +3199,18 @@ function coalesceTradingConfig(serverConfig, localPatch) {
   };
 }
 
+function applyTradingConfigToUi(config) {
+  if (!config) return;
+  const autoTradeInput = $("auto-trade");
+  const useScheduleInput = $("use-schedule");
+  const startTradingInput = $("start-trading");
+  if (autoTradeInput) autoTradeInput.checked = Boolean(config.autoTrade);
+  if (useScheduleInput) useScheduleInput.checked = Boolean(config.useSchedule);
+  if (startTradingInput) startTradingInput.checked = Boolean(config.startTrading);
+  syncWalletControls(config);
+  syncBuyOverrideControls(config);
+}
+
 function bindTradeToggles() {
   const autoTradeInput = $("auto-trade");
   const useScheduleInput = $("use-schedule");
@@ -3202,7 +3238,7 @@ function bindTradeToggles() {
     const patch = buildTradingConfigPatch();
     writeLocalTradingConfig(patch);
     const config = await pushTradingConfig(patch);
-    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    applyTradingConfigToUi(coalesceTradingConfig(config, patch) ?? patch);
   };
   const scheduleBuyOverrideSave = () => {
     if (buyOverrideSaveTimer != null) clearTimeout(buyOverrideSaveTimer);
@@ -3211,18 +3247,10 @@ function bindTradeToggles() {
     }, 300);
   };
 
-  const applyConfig = (config) => {
-    if (!config) return;
-    autoTradeInput.checked = Boolean(config.autoTrade);
-    useScheduleInput.checked = Boolean(config.useSchedule);
-    startTradingInput.checked = Boolean(config.startTrading);
-    syncWalletControls(config);
-  };
-
   // Restore immediately from localStorage, then sync from server
-  applyConfig(readLocalTradingConfig());
+  applyTradingConfigToUi(readLocalTradingConfig());
   void loadTradingConfig().then((config) => {
-    applyConfig(coalesceTradingConfig(config, readLocalTradingConfig()) ?? config);
+    applyTradingConfigToUi(coalesceTradingConfig(config, readLocalTradingConfig()) ?? config);
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
   });
@@ -3235,7 +3263,7 @@ function bindTradeToggles() {
     const patch = buildTradingConfigPatch();
     writeLocalTradingConfig(patch);
     const config = await pushTradingConfig(patch);
-    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    applyTradingConfigToUi(coalesceTradingConfig(config, patch) ?? patch);
     syncGraphSaveBtn(windowState);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
@@ -3254,7 +3282,7 @@ function bindTradeToggles() {
       window.Simulator.keepDisplayedSetupAsEditable(windowState);
     }
     const config = await pushTradingConfig(patch);
-    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    applyTradingConfigToUi(coalesceTradingConfig(config, patch) ?? patch);
     if (useScheduleInput.checked && windowState && window.Simulator?.forceSyncSetupFromState) {
       window.Simulator.forceSyncSetupFromState(windowState);
     } else if (turningOff && window.Simulator?.pushSetupToServer) {
@@ -3273,7 +3301,7 @@ function bindTradeToggles() {
     const patch = buildTradingConfigPatch();
     writeLocalTradingConfig(patch);
     const config = await pushTradingConfig(patch);
-    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    applyTradingConfigToUi(coalesceTradingConfig(config, patch) ?? patch);
     if (windowState) drawPriceChart(windowState);
     appendLogEntry({
       level: "info",
@@ -3308,7 +3336,7 @@ function bindTradeToggles() {
     syncBuyOverrideControls(patch);
     writeLocalTradingConfig(patch);
     const config = await pushTradingConfig(patch);
-    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    applyTradingConfigToUi(coalesceTradingConfig(config, patch) ?? patch);
     appendLogEntry({
       level: "info",
       source: "client",
@@ -3322,7 +3350,7 @@ function bindTradeToggles() {
     const patch = buildTradingConfigPatch();
     writeLocalTradingConfig(patch);
     const config = await pushTradingConfig(patch);
-    applyConfig(coalesceTradingConfig(config, patch) ?? patch);
+    applyTradingConfigToUi(coalesceTradingConfig(config, patch) ?? patch);
   });
 
   buyOverridePrice?.addEventListener("input", () => {

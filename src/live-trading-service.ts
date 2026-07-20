@@ -50,10 +50,12 @@ import {
   type TradingStatEvent,
 } from "./db/trading-session-memory-repository.js";
 import {
-  getUserPublicById,
+  getUserById,
   listUsersForLiveTrading,
+  resolveUserTradingForSeries,
   updateUserTrading,
 } from "./db/user-repository.js";
+import { DEFAULT_MARKET_SERIES } from "./collections.js";
 import { isTradingExecutor } from "./trading-executor.js";
 import {
   centsToPrice,
@@ -549,8 +551,14 @@ export class LiveTradingService {
   private readonly listeners = new Set<UpdateListener>();
   private confirmLoopTimer: ReturnType<typeof setInterval> | null = null;
   private confirmInFlight = false;
+  /** Market this engine's config/schedule/resting orders are bound to. */
+  private boundSeries: string = DEFAULT_MARKET_SERIES;
 
   constructor(private readonly userId: string) {}
+
+  getBoundSeries(): string {
+    return this.boundSeries;
+  }
 
   getUserId(): string {
     return this.userId;
@@ -569,13 +577,20 @@ export class LiveTradingService {
     return { ...this.config };
   }
 
-  async loadPersistedConfig(options?: { hydrateStats?: boolean }): Promise<TradingConfig> {
+  async loadPersistedConfig(options?: {
+    hydrateStats?: boolean;
+    series?: string;
+  }): Promise<TradingConfig> {
+    const series =
+      String(options?.series ?? this.boundSeries ?? DEFAULT_MARKET_SERIES).trim() ||
+      DEFAULT_MARKET_SERIES;
+    this.boundSeries = series;
     try {
-      const user = await getUserPublicById(this.userId);
+      const user = await getUserById(this.userId);
       if (!user) {
         throw new Error(`User not found: ${this.userId}`);
       }
-      this.config = normalizeTradingConfig(user.trading);
+      this.config = resolveUserTradingForSeries(user, series);
     } catch (err) {
       logService.warn("trading", `Failed to load trading config: ${String(err)}`);
       this.config = defaultTradingConfig();
@@ -675,7 +690,7 @@ export class LiveTradingService {
 
     let placements: Awaited<ReturnType<typeof listSchedulePlacements>>;
     try {
-      placements = await listSchedulePlacements(this.userId);
+      placements = await listSchedulePlacements(this.userId, this.boundSeries);
     } catch {
       return;
     }
@@ -690,23 +705,33 @@ export class LiveTradingService {
       .map((p) => ({ p, key: schedulePlacementSortKey(p) }))
       .sort((a, b) => a.key - b.key);
 
-    // Drop pre-run activations (before recording/collection start).
+    // Drop pre-run activations that fully ended before recording/collection start.
+    // Use end time (not start): a slot that was already running when collection began
+    // must stay activated — otherwise remember/prune thrash and the live card flickers.
     if (floorKey != null) {
       const keep: string[] = [];
       let pruned = false;
       for (const { p, key } of keyed) {
-        if (this.knownPlacementIds.has(p._id)) {
-          if (key + 1e-9 < floorKey) {
-            this.knownPlacementIds.delete(p._id);
-            pruned = true;
-          } else {
-            keep.push(p._id);
-          }
+        if (!this.knownPlacementIds.has(p._id)) continue;
+        // Never prune the slot that is live right now.
+        if (isScheduleContextActive(p)) {
+          keep.push(p._id);
+          continue;
+        }
+        const endKey = key + p.durationHours;
+        if (endKey <= floorKey + 1e-9) {
+          this.knownPlacementIds.delete(p._id);
+          pruned = true;
+        } else {
+          keep.push(p._id);
         }
       }
       // Keep ids not on this week's board (shouldn't happen) — only persist board survivors + events.
       for (const id of this.knownPlacementIds) {
         if (!keyed.some(({ p }) => p._id === id)) keep.push(id);
+      }
+      if (this.scheduleContext?.placementId) {
+        keep.push(this.scheduleContext.placementId);
       }
       if (pruned) {
         const unique = [...new Set(keep)];
@@ -726,10 +751,11 @@ export class LiveTradingService {
       changed = true;
     };
 
-    // While live: every elapsed slot at/after collection start is a real zero result.
+    // While live: every elapsed slot that overlaps/after collection start is a real zero result.
     if (this.config.startTrading && floorKey != null) {
       for (const { p, key } of keyed) {
-        if (key + 1e-9 < floorKey) continue;
+        const endKey = key + p.durationHours;
+        if (endKey <= floorKey + 1e-9) continue;
         if (isSchedulePlacementElapsed(p)) remember(p._id);
       }
     }
@@ -742,7 +768,8 @@ export class LiveTradingService {
     const seedKeys = keyed
       .filter(({ p, key }) => {
         if (!eventPlacementIds.has(p._id)) return false;
-        if (floorKey != null && key + 1e-9 < floorKey) return false;
+        const endKey = key + p.durationHours;
+        if (floorKey != null && endKey <= floorKey + 1e-9) return false;
         return true;
       })
       .map(({ key }) => key);
@@ -750,7 +777,8 @@ export class LiveTradingService {
       const minK = Math.min(...seedKeys);
       const maxK = Math.max(...seedKeys);
       for (const { p, key } of keyed) {
-        if (floorKey != null && key + 1e-9 < floorKey) continue;
+        const endKey = key + p.durationHours;
+        if (floorKey != null && endKey <= floorKey + 1e-9) continue;
         if (key >= minK && key <= maxK) remember(p._id);
       }
     }
@@ -827,8 +855,9 @@ export class LiveTradingService {
 
   private persistConfig(): void {
     const snapshot = this.getConfig();
+    const series = this.boundSeries;
     this.persistChain = this.persistChain
-      .then(() => updateUserTrading(this.userId, snapshot).then(() => undefined))
+      .then(() => updateUserTrading(this.userId, snapshot, series).then(() => undefined))
       .catch((err) => {
         logService.warn("trading", `Failed to save trading config: ${String(err)}`);
       });
@@ -888,7 +917,9 @@ export class LiveTradingService {
     const isLive =
       this.config.autoTrade && this.config.useSchedule && this.config.startTrading;
     if (isLive && (!wasLive || patch.startTrading === true || patch.useSchedule === true)) {
-      void this.ensureCollectionStarted().then(() => this.refreshScheduleContext(true));
+      void this.ensureCollectionStarted()
+        .then(() => this.syncActivatedSchedulePlacements())
+        .then(() => this.refreshScheduleContext(true));
     }
     if (wasOverrideActive && !this.isBuyOverrideConfigActive() && this.overrideRestingBuy) {
       void this.cancelOverrideRestingBuy("override disabled");
@@ -930,7 +961,9 @@ export class LiveTradingService {
         up: this.positions.up ? { ...this.positions.up } : null,
         down: this.positions.down ? { ...this.positions.down } : null,
       },
-      positionCards: this.positionCards.map((card) => ({ ...card })),
+      positionCards: this.positionCards
+        .filter((card) => this.cardMatchesBoundSeries(card))
+        .map((card) => ({ ...card })),
       placementStats: this.getPlacementStatsFromCards(),
       sessionTotals: {
         green: live.green,
@@ -954,6 +987,15 @@ export class LiveTradingService {
     };
   }
 
+  private cardMatchesBoundSeries(card: Pick<TradingPositionCard, "series">): boolean {
+    return !card.series || card.series === this.boundSeries;
+  }
+
+  private eventMatchesBoundSeries(event: TradingStatEvent): boolean {
+    const series = event.card?.series;
+    return !series || series === this.boundSeries;
+  }
+
   /** Aggregate real-trade outcomes for schedule placement cards. */
   getPlacementStats(placementIds: string[]): PlacementLiveStats[] {
     return placementIds.map((id) => this.statsForPlacement(id));
@@ -966,6 +1008,10 @@ export class LiveTradingService {
     }
     for (const card of this.positionCards) {
       if (card.placementId) ids.add(card.placementId);
+    }
+    // Always include the in-progress schedule slot so the live card stays stable.
+    if (this.scheduleContext?.placementId) {
+      ids.add(this.scheduleContext.placementId);
     }
     return this.getPlacementStats([...ids]);
   }
@@ -1004,6 +1050,7 @@ export class LiveTradingService {
 
     for (const card of this.positionCards) {
       if (card.placementId !== placementId) continue;
+      if (!this.cardMatchesBoundSeries(card)) continue;
       if (card.status === "open") continue;
       const contrib = confirmedContributionFromCard(card);
       if (!contrib) continue;
@@ -1020,6 +1067,7 @@ export class LiveTradingService {
 
     for (const event of this.liveStatLedger.values()) {
       if (event.placementId !== placementId) continue;
+      if (!this.eventMatchesBoundSeries(event)) continue;
       if (cardIdsFromRam.has(event.cardId)) continue;
       const contrib = eventStatContribution(event);
       if (!contrib) continue;
@@ -1034,7 +1082,9 @@ export class LiveTradingService {
     }
 
     if (!hasData) {
-      return this.knownPlacementIds.has(placementId)
+      const liveArmedSlot =
+        this.config.startTrading && this.scheduleContext?.placementId === placementId;
+      return this.knownPlacementIds.has(placementId) || liveArmedSlot
         ? this.zeroPlacementStats(placementId)
         : this.emptyPlacementStats(placementId);
     }
@@ -1079,6 +1129,7 @@ export class LiveTradingService {
 
     for (const card of this.positionCards) {
       if (card.status === "open") continue;
+      if (!this.cardMatchesBoundSeries(card)) continue;
       if (!this.countsTowardLiveHeader(cardSettledMs(card))) continue;
       const contrib = confirmedContributionFromCard(card);
       if (!contrib) continue;
@@ -1097,6 +1148,7 @@ export class LiveTradingService {
 
     for (const event of this.liveStatLedger.values()) {
       if (seen.has(event.cardId)) continue;
+      if (!this.eventMatchesBoundSeries(event)) continue;
       if (!this.countsTowardLiveHeader(eventSettledMs(event))) continue;
       const contrib = eventStatContribution(event);
       if (!contrib) continue;
@@ -1461,7 +1513,7 @@ export class LiveTradingService {
       this.activePhaseSetup = null;
     } else {
       try {
-        const next = await findActiveScheduleContext(this.userId);
+        const next = await findActiveScheduleContext(this.userId, this.boundSeries);
         if (next) {
           this.scheduleContext = next;
           this.activePhaseSetup = next.setup;
@@ -1477,15 +1529,17 @@ export class LiveTradingService {
     }
 
     const nextPlacementId = this.scheduleContext?.placementId ?? null;
+    // Do not run syncActivatedSchedulePlacements on this 5s cadence — pruning/gap-fill
+    // + notify was flipping active-card stats (zeros ↔ dashes) every refresh.
+    // Activation sync runs on hydrate, live arming, and settlement instead.
     if (
       this.config.startTrading &&
       this.config.autoTrade &&
       this.config.useSchedule &&
       nextPlacementId
     ) {
-      this.rememberActivatedPlacement(nextPlacementId);
+      this.rememberActivatedPlacement(nextPlacementId, { quiet: true });
     }
-    await this.syncActivatedSchedulePlacements();
     if (prevVisible !== this.shouldShowPhases() || prevPlacementId !== nextPlacementId) {
       this.notify();
     }
@@ -1516,7 +1570,28 @@ export class LiveTradingService {
     await queued;
   }
 
+  /**
+   * Bind this engine to a market series: load that market's trading config + schedule.
+   * Cancels resting orders when switching away from a previously armed market.
+   */
+  async ensureBoundToSeries(seriesInput: string): Promise<void> {
+    const series = String(seriesInput || DEFAULT_MARKET_SERIES).trim() || DEFAULT_MARKET_SERIES;
+    if (series === this.boundSeries) return;
+
+    if (this.restingBuy) await this.cancelRestingBuy("market switch");
+    if (this.restingSell) await this.cancelRestingSell("market switch");
+    if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("market switch");
+
+    this.boundSeries = series;
+    this.scheduleContext = null;
+    this.activePhaseSetup = null;
+    await this.loadPersistedConfig({ hydrateStats: false, series });
+    await this.refreshScheduleContext(true);
+    this.notify();
+  }
+
   private async tickUnlocked(state: LiveWindowState, nowMs?: number): Promise<void> {
+    await this.ensureBoundToSeries(state.series || this.boundSeries);
     const prevSessionKey = this.sessionKey;
     this.ensureWindow(state);
     const windowRolled = prevSessionKey != null && prevSessionKey !== this.sessionKey;

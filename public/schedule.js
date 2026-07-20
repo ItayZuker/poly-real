@@ -91,6 +91,9 @@
     );
   }
 
+  /** Last highlight key — avoid restarting pulse (causes visible border flicker). */
+  let lastNowHighlightKey = "";
+
   /**
    * Now highlights:
    * - Schedule view: UTC hour + active setup card (slots behind card do not pulse)
@@ -102,11 +105,8 @@
     const active = findActivePlacement();
     const onSchedule = isScheduleView();
     const onHeatmap = isSchedulePage() && !onSchedule;
-    const periodMs = 1300;
-    const delay = `${-(Date.now() % periodMs)}ms`;
-
-    // Set delay before toggling pulse classes so new animations start in phase.
-    document.documentElement.style.setProperty("--schedule-pulse-delay", delay);
+    const activeId = onSchedule && active ? active._id : "";
+    const highlightKey = `${isSchedulePage() ? 1 : 0}|${onSchedule ? 1 : 0}|${day}|${hourSlot}|${activeId}`;
 
     document.querySelectorAll(".schedule-utc-hour").forEach((el) => {
       el.classList.toggle(
@@ -132,7 +132,24 @@
       );
     });
 
-    restartPulseAnimations();
+    // Only resync animation phase when the live target changes. Restarting every
+    // call briefly drops is-pulse-synced and the red border flickers.
+    if (highlightKey !== lastNowHighlightKey) {
+      lastNowHighlightKey = highlightKey;
+      const periodMs = 1300;
+      document.documentElement.style.setProperty(
+        "--schedule-pulse-delay",
+        `${-(Date.now() % periodMs)}ms`,
+      );
+      restartPulseAnimations();
+    } else {
+      // Cards rebuilt with is-live but lost is-pulse-synced — restore without restart.
+      document
+        .querySelectorAll(
+          ".schedule-utc-hour.is-now, .schedule-hour-slot.is-now, .schedule-placement-card.is-live",
+        )
+        .forEach((el) => el.classList.add("is-pulse-synced"));
+    }
   }
 
   /** Restart pulse animations so every active highlight shares the same phase. */
@@ -313,9 +330,10 @@
     clearHeaderFillPreview();
     setDayBusy(day, true);
     try {
-      const res = await fetch(`/api/schedule-placements/day/${encodeURIComponent(day)}`, {
-        method: "DELETE",
-      });
+      const res = await fetch(
+        `/api/schedule-placements/day/${encodeURIComponent(day)}?${seriesQuery()}`,
+        { method: "DELETE" },
+      );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `Clear day failed (${res.status})`);
@@ -343,7 +361,7 @@
       const res = await fetch("/api/schedule-placements/replace-day", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ day, setupId, title }),
+        body: JSON.stringify(withSeries({ day, setupId, title })),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -554,6 +572,14 @@
     return window.getSelectedSeries?.() || "btc-5m";
   }
 
+  function seriesQuery() {
+    return `series=${encodeURIComponent(selectedSeries())}`;
+  }
+
+  function withSeries(body) {
+    return { ...body, series: selectedSeries() };
+  }
+
   function simLatencyMs() {
     if (typeof window.getSimLatencyMs === "function") {
       return window.getSimLatencyMs();
@@ -586,17 +612,10 @@
   }
 
   function onHeatmapUpdated(state) {
-    const versionChanged = syncHeatmapSeriesVersions(state);
-    if (!versionChanged || placements.length === 0) return;
-
-    const active = findActivePlacement();
-    if (!active) return;
-
-    void scheduleStatsRefresh({
-      placementIds: [active._id],
-      force: true,
-      quiet: true,
-    });
+    // Placement card stats are live trade counters (not heatmap backtests).
+    // Only track heatmap versions for any future cache keys — do not refetch
+    // the active card on every heatmap ingest (that caused stats flicker).
+    syncHeatmapSeriesVersions(state);
   }
 
   function placementCacheKey(placement) {
@@ -749,9 +768,18 @@
     return placementStats.get(placementId)?.hasData !== true;
   }
 
+  function cardStatsShowLoading(placementId) {
+    return (
+      statsBatchFetching &&
+      statsPendingIds.has(placementId) &&
+      !(statsFetchQuiet && placementStats.has(placementId))
+    );
+  }
+
   function applyCardStatsVisualState(card, placementId) {
-    const isLoading = statsBatchFetching && statsPendingIds.has(placementId);
-    card.classList.toggle("is-stats-loading", isLoading);
+    // Quiet refreshes (e.g. heatmap version bump) keep existing numbers visible —
+    // showing a loading state on the live card makes the red border flicker.
+    card.classList.toggle("is-stats-loading", cardStatsShowLoading(placementId));
     card.classList.toggle("is-stats-waiting", false);
     card.classList.toggle("is-stats-muted", cardStatsMuted(placementId));
   }
@@ -1016,6 +1044,33 @@
     }
   }
 
+  function liveStatsFingerprint(stats) {
+    if (!stats) return "";
+    return [
+      stats.placementId,
+      stats.hasData === true ? 1 : 0,
+      stats.green ?? 0,
+      stats.red ?? 0,
+      stats.blue ?? 0,
+      stats.pnl ?? 0,
+    ].join("|");
+  }
+
+  /** Merge live card stats; never flap zeros (hasData) back to dashes. */
+  function shouldApplyPlacementStats(prev, next) {
+    if (!next?.placementId) return false;
+    if (liveStatsFingerprint(prev) === liveStatsFingerprint(next)) return false;
+    // Keep armed zeros / fills if a partial snapshot briefly reports empty.
+    if (prev?.hasData === true && next.hasData !== true) return false;
+    if (prev?.hasData === true && next.hasData === true) {
+      const prevHits = (prev.green ?? 0) + (prev.red ?? 0) + (prev.blue ?? 0);
+      const nextHits = (next.green ?? 0) + (next.red ?? 0) + (next.blue ?? 0);
+      // Don't collapse real fills back to armed-zeros on a flaky snapshot.
+      if (prevHits > 0 && nextHits === 0 && Math.abs(next.pnl ?? 0) < 1e-9) return false;
+    }
+    return true;
+  }
+
   function applyLivePlacementStats(statsList, sessionTotals, demoLastWindow, trading) {
     if (sessionTotals) {
       liveSessionTotals = normalizeSessionTotals(sessionTotals);
@@ -1024,11 +1079,15 @@
       ingestDemoLastWindow(demoLastWindow, trading);
     }
     if (Array.isArray(statsList)) {
+      let changed = false;
       for (const stats of statsList) {
         if (!stats?.placementId) continue;
+        const prev = placementStats.get(stats.placementId);
+        if (!shouldApplyPlacementStats(prev, stats)) continue;
         placementStats.set(stats.placementId, stats);
+        changed = true;
       }
-      applyCardStatsStates();
+      if (changed) applyCardStatsStates();
     }
     if (sessionTotals) applyLiveSessionTotals(sessionTotals);
     else if (headerSummaryRange === "demo") {
@@ -1457,7 +1516,7 @@
       applyCardStatsVisualState(card, placementId);
 
       let overlay = card.querySelector(".schedule-placement-loading");
-      const isLoading = statsBatchFetching && statsPendingIds.has(placementId);
+      const isLoading = cardStatsShowLoading(placementId);
       if (isLoading && !overlay) {
         card.appendChild(buildLoadingOverlay());
       } else if (!isLoading && overlay) {
@@ -1529,6 +1588,8 @@
       if (signal.aborted) return;
 
       for (const stat of stats) {
+        const prev = placementStats.get(stat.placementId);
+        if (!shouldApplyPlacementStats(prev, stat)) continue;
         placementStats.set(stat.placementId, stat);
       }
       statsPendingIds.clear();
@@ -1578,7 +1639,11 @@
       return;
     }
 
-    enqueueStatsFetch(statsPendingEnqueueIds, { force: true });
+    enqueueStatsFetch(statsPendingEnqueueIds, {
+      force: options.force === true || options.force == null,
+      quiet: options.quiet,
+      setupId: options.setupId,
+    });
     statsPendingEnqueueIds = null;
   }
 
@@ -2195,13 +2260,15 @@
       const res = await fetch("/api/schedule-placements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          setupId,
-          title,
-          day: preview.day,
-          startHour: preview.startHour,
-          durationHours: preview.durationHours,
-        }),
+        body: JSON.stringify(
+          withSeries({
+            setupId,
+            title,
+            day: preview.day,
+            startHour: preview.startHour,
+            durationHours: preview.durationHours,
+          }),
+        ),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -2281,7 +2348,7 @@
 
   async function loadPlacements(options = {}) {
     try {
-      const res = await fetch("/api/schedule-placements");
+      const res = await fetch(`/api/schedule-placements?${seriesQuery()}`);
       if (!res.ok) return;
       placements = await res.json();
       renderPlacements({
@@ -2294,7 +2361,16 @@
   }
 
   function setPlacements(data) {
-    const next = Array.isArray(data) ? data : [];
+    const series = selectedSeries();
+    const raw = Array.isArray(data) ? data : [];
+    // Keep the current market's board if an SSE payload is for another series.
+    if (raw.length > 0 && raw[0]?.series && raw[0].series !== series) {
+      return;
+    }
+    // All-series broadcasts (e.g. setup title/delete) must not mix markets onto the board.
+    const next = raw.some((p) => p?.series)
+      ? raw.filter((p) => !p.series || p.series === series)
+      : raw;
     if (placementsSignature(placements) === placementsSignature(next)) return;
     placements = next;
     renderPlacements({ reloadStats: false });

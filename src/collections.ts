@@ -11,6 +11,9 @@ export const SEED_MARKETS = [
   { series: "sol-15m", label: "Solana - 15 minutes", timeframeMinutes: 15 },
 ] as const;
 
+/** Default market used for legacy docs that predate per-series scoping. */
+export const DEFAULT_MARKET_SERIES = SEED_MARKETS[0].series;
+
 export function getWindowDurationSeconds(timeframeMinutes: number): number {
   return timeframeMinutes * 60;
 }
