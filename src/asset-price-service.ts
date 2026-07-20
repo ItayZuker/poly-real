@@ -1,4 +1,5 @@
 import { type MarketPairInfo } from "./market-pair.js";
+import { chainlinkPriceFeed } from "./chainlink-price-feed.js";
 import { fetchWithTimeout } from "./fetch-timeout.js";
 import { outcomeFromOpenClose } from "./window-outcome.js";
 import type { WindowOutcome } from "./types.js";
@@ -110,20 +111,22 @@ function resolvePriceToBeat(
   return { priceToBeat: undefined, priceToBeatSource: "polymarket-openPrice" };
 }
 
+function getRtdsLiveAssetPrice(asset: string): number | undefined {
+  return chainlinkPriceFeed.getLivePrice(asset.toLowerCase())?.value;
+}
+
 /**
- * Live window prices: both current and PTB come from Polymarket crypto-price
- * (open / close). Do not overlay Chainlink RTDS — that mixes sources and
- * makes gap disagree with Polymarket's chart.
+ * Live current price from Chainlink RTDS (same stream Polymarket charts).
+ * PTB from Polymarket open. Gap = Chainlink live − Polymarket open.
  */
 function buildPrices(
-  _asset: string,
+  asset: string,
   priceToBeat?: number,
   priceToBeatSource: PriceToBeatSource = "polymarket-openPrice",
   restClosePrice?: number,
 ): WindowAssetPrices {
-  // During an open window Polymarket's closePrice is the live print; if missing,
-  // fall back to open so gap starts at 0 instead of mixing in Chainlink.
-  const assetPrice = restClosePrice ?? priceToBeat;
+  const rtdsPrice = getRtdsLiveAssetPrice(asset);
+  const assetPrice = rtdsPrice ?? restClosePrice;
   return {
     assetPrice,
     prevCloseAsset: priceToBeat,
@@ -131,20 +134,25 @@ function buildPrices(
       assetPrice != null && priceToBeat != null
         ? assetPrice - priceToBeat
         : undefined,
-    assetPriceSource: "polymarket-rest",
+    assetPriceSource: rtdsPrice != null ? "chainlink-rtds" : "polymarket-rest",
     priceToBeatSource,
   };
 }
 
-/**
- * @deprecated Live trading/display use Polymarket open/close only.
- * Kept as a no-op so older call sites do not reintroduce Chainlink overlays.
- */
+/** Overlay latest Chainlink RTDS tick onto Polymarket PTB prices. */
 export function applyRtdsLivePrice(
-  _asset: string,
+  asset: string,
   prices: WindowAssetPrices,
 ): WindowAssetPrices {
-  return prices;
+  const live = getRtdsLiveAssetPrice(asset);
+  if (live == null) return prices;
+  return {
+    ...prices,
+    assetPrice: live,
+    assetGap:
+      prices.prevCloseAsset != null ? live - prices.prevCloseAsset : undefined,
+    assetPriceSource: "chainlink-rtds",
+  };
 }
 
 export function getPolymarketSymbol(asset: string): string {

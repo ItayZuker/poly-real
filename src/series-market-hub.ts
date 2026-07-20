@@ -1,6 +1,10 @@
 import { createPublicClient, getClobHost, getChainId } from "./clob-service.js";
 import { clobMarketFeed } from "./clob-market-feed.js";
-import { getPolymarketWindowAssetPricesForPair } from "./asset-price-service.js";
+import { chainlinkPriceFeed } from "./chainlink-price-feed.js";
+import {
+  getPolymarketWindowAssetPricesForPair,
+  applyRtdsLivePrice,
+} from "./asset-price-service.js";
 import {
   fetchCurrentUpDownMarket,
   fetchCurrentUpDownMarketWithRetry,
@@ -91,45 +95,28 @@ class SeriesFeed {
       this.state.feedLatencyMs = feedLatency;
     }
     recordAskSamples(this.state);
-  }
 
-  private applyPolymarketAssetPrices(prices: {
-    assetPrice?: number;
-    prevCloseAsset?: number;
-    assetGap?: number;
-    priceToBeatSource?: LiveWindowState["priceToBeatSource"];
-  }): void {
-    if (prices.prevCloseAsset != null) {
-      this.state.prevCloseAsset = prices.prevCloseAsset;
-      this.state.priceToBeatSource = prices.priceToBeatSource ?? "polymarket-openPrice";
-    }
-    if (prices.assetPrice != null) {
-      this.state.assetPrice = prices.assetPrice;
-      const tickMs = Date.now();
-      this.state.lastTickMs = tickMs;
-      const tickSec = tickMs / 1000;
-      if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
-        const history = this.state.priceHistory;
-        const last = history[history.length - 1];
-        if (!last || last.price !== prices.assetPrice || tickSec - last.t >= 0.4) {
-          history.push({ t: tickSec, price: prices.assetPrice });
-          if (history.length > 2000) {
-            history.splice(0, history.length - 2000);
+    const { asset } = parseMarketSeries(this.series);
+    const live = chainlinkPriceFeed.getLivePrice(asset);
+    if (live) {
+      this.state.assetPrice = live.value;
+      if (this.state.prevCloseAsset != null) {
+        this.state.assetGap = live.value - this.state.prevCloseAsset;
+        const ptbSide = getPtbSide(live.value, this.state.prevCloseAsset);
+        if (ptbSide != null) {
+          if (this.lastPtbSide != null && this.lastPtbSide !== ptbSide) {
+            this.state.ptbCrossings = (this.state.ptbCrossings ?? 0) + 1;
           }
+          this.lastPtbSide = ptbSide;
         }
       }
-    }
-    if (this.state.assetPrice != null && this.state.prevCloseAsset != null) {
-      this.state.assetGap = this.state.assetPrice - this.state.prevCloseAsset;
-      const ptbSide = getPtbSide(this.state.assetPrice, this.state.prevCloseAsset);
-      if (ptbSide != null) {
-        if (this.lastPtbSide != null && this.lastPtbSide !== ptbSide) {
-          this.state.ptbCrossings = (this.state.ptbCrossings ?? 0) + 1;
+      const tickSec = live.timestampMs / 1000;
+      if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
+        this.state.priceHistory.push({ t: tickSec, price: live.value });
+        if (this.state.priceHistory.length > 2000) {
+          this.state.priceHistory.splice(0, this.state.priceHistory.length - 2000);
         }
-        this.lastPtbSide = ptbSide;
       }
-    } else if (prices.assetGap != null) {
-      this.state.assetGap = prices.assetGap;
     }
   }
 
@@ -152,7 +139,6 @@ class SeriesFeed {
         this.lastPtbSide = null;
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
-        // Keep prevCloseAsset / priceToBeatSource until Polymarket open arrives.
       }
 
       this.state.series = this.series;
@@ -171,9 +157,27 @@ class SeriesFeed {
       const { asset, timeframe } = parseMarketSeries(this.series);
       try {
         const prices = await getPolymarketWindowAssetPricesForPair(asset, timeframe, pair);
-        this.applyPolymarketAssetPrices(prices);
+        const live = applyRtdsLivePrice(asset, prices);
+        if (live.prevCloseAsset != null) {
+          this.state.prevCloseAsset = live.prevCloseAsset;
+          this.state.priceToBeatSource = live.priceToBeatSource;
+        }
+        if (live.assetPrice != null) {
+          this.state.assetPrice = live.assetPrice;
+        }
+        if (this.state.assetPrice != null && this.state.prevCloseAsset != null) {
+          this.state.assetGap = this.state.assetPrice - this.state.prevCloseAsset;
+        } else {
+          this.state.assetGap = live.assetGap;
+        }
       } catch {
-        // Keep last Polymarket print; do not fall back to Chainlink.
+        const live = chainlinkPriceFeed.getLivePrice(asset);
+        if (live) {
+          this.state.assetPrice = live.value;
+          if (this.state.prevCloseAsset != null) {
+            this.state.assetGap = live.value - this.state.prevCloseAsset;
+          }
+        }
       }
 
       this.updateQuotesFromCache();
