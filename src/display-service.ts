@@ -173,6 +173,17 @@ export class DisplayService {
     const live = chainlinkPriceFeed.getLivePrice(asset);
     if (!live) return;
 
+    if (this.state.windowStart) {
+      chainlinkPriceFeed.tryCaptureEarlyWindowOpen(asset, this.state.windowStart);
+      if (this.state.prevCloseAsset == null) {
+        const ptb = chainlinkPriceFeed.getPriceToBeat(asset, this.state.windowStart);
+        if (ptb != null) {
+          this.state.prevCloseAsset = ptb;
+          this.state.priceToBeatSource = "chainlink-boundary";
+        }
+      }
+    }
+
     this.state.assetPrice = live.value;
     if (this.state.prevCloseAsset != null) {
       this.state.assetGap = live.value - this.state.prevCloseAsset;
@@ -247,7 +258,7 @@ export class DisplayService {
         this.lastPtbSide = null;
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
-        // Keep prevCloseAsset / priceToBeatSource until Polymarket open arrives.
+        // Keep prevCloseAsset / priceToBeatSource until Chainlink boundary (or REST fallback) arrives.
         this.prefetchedNextWindowStart = null;
         this.prefetchedYesTokenId = null;
         this.prefetchedNoTokenId = null;
@@ -269,13 +280,20 @@ export class DisplayService {
         .catch(() => {});
 
       const { asset, timeframe } = parseMarketSeries(this.series);
+      chainlinkPriceFeed.tryCaptureEarlyWindowOpen(asset, pair.windowStart);
       try {
         const prices = await getPolymarketWindowAssetPricesForPair(asset, timeframe, pair);
         const live = applyRtdsLivePrice(asset, prices);
-        // Only overwrite PTB when Polymarket returned an open; otherwise hold last value.
+        // Prefer Chainlink boundary PTB; hold last value until one is available.
         if (live.prevCloseAsset != null) {
           this.state.prevCloseAsset = live.prevCloseAsset;
           this.state.priceToBeatSource = live.priceToBeatSource;
+        } else {
+          const chainlinkPtb = chainlinkPriceFeed.getPriceToBeat(asset, pair.windowStart);
+          if (chainlinkPtb != null) {
+            this.state.prevCloseAsset = chainlinkPtb;
+            this.state.priceToBeatSource = "chainlink-boundary";
+          }
         }
         if (live.assetPrice != null) {
           this.state.assetPrice = live.assetPrice;
