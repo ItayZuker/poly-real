@@ -489,13 +489,60 @@ body {
 }
 
 .schedule-setups-header {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.schedule-setups-toolbar {
   height: var(--schedule-toolbar-height);
   padding: 8px;
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  border-bottom: 1px solid var(--border);
+}
+
+.schedule-add-setup-wrap {
+  padding: 0 8px 8px;
+  box-sizing: border-box;
+}
+
+.schedule-add-setup-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px dashed var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.schedule-add-setup-btn svg {
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
+}
+
+.schedule-add-setup-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 32%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 80%, #fff);
+  color: #fff;
+}
+
+.schedule-add-setup-btn:active:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
 }
 
 .schedule-view-toggle {
@@ -655,6 +702,7 @@ body {
 }
 
 .schedule-setup-item {
+  position: relative;
   display: flex;
   flex-direction: row;
   align-items: stretch;
@@ -667,7 +715,32 @@ body {
   color: var(--text);
   text-align: left;
   overflow: hidden;
-  transition: border-color 0.12s ease;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.schedule-setup-item.is-deleting {
+  pointer-events: none;
+  background: var(--setup-color, var(--accent));
+  border-color: var(--setup-color, var(--accent));
+}
+
+.schedule-setup-item.is-deleting > :not(.schedule-setup-loading--delete) {
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+
+.schedule-setup-loading--delete {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border-radius: inherit;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: auto;
 }
 
 .schedule-setup-drag-handle {
@@ -1071,6 +1144,26 @@ body.is-schedule-resizing {
   pointer-events: auto;
 }
 
+.schedule-placement-card.is-deleting {
+  pointer-events: none;
+  z-index: 8;
+  background: var(--setup-color, var(--accent));
+  border-color: var(--setup-color, var(--accent));
+  box-shadow: none;
+}
+
+.schedule-placement-card.is-deleting > :not(.schedule-placement-loading--delete) {
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+
+.schedule-placement-loading--delete {
+  z-index: 20;
+  background: transparent;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
 .schedule-placement-spinner {
   width: 18px;
   height: 18px;
@@ -1084,6 +1177,62 @@ body.is-schedule-resizing {
   to {
     transform: rotate(360deg);
   }
+}
+
+.schedule-delete-can {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: #f0f3f6;
+}
+
+.schedule-placement-card.is-deleting.is-light-setup .schedule-delete-can,
+.schedule-setup-item.is-deleting.is-light-setup .schedule-delete-can {
+  color: #0d1117;
+}
+
+.schedule-delete-can-svg {
+  width: 22px;
+  height: 22px;
+  overflow: visible;
+}
+
+.schedule-delete-can-lid {
+  transform-origin: 9px 7px;
+  animation: schedule-delete-can-lid 1s ease-in-out infinite;
+}
+
+.schedule-delete-can-body {
+  transform-origin: 12px 14px;
+}
+
+@keyframes schedule-delete-can-lid {
+  0%,
+  12% {
+    transform: rotate(0deg) translateY(0);
+  }
+  38%,
+  62% {
+    transform: rotate(-48deg) translate(1px, -2px);
+  }
+  88%,
+  100% {
+    transform: rotate(0deg) translateY(0);
+  }
+}
+
+.schedule-placement-card.is-compact .schedule-delete-can,
+.schedule-placement-card.is-short .schedule-delete-can {
+  width: 18px;
+  height: 18px;
+}
+
+.schedule-placement-card.is-compact .schedule-delete-can-svg,
+.schedule-placement-card.is-short .schedule-delete-can-svg {
+  width: 16px;
+  height: 16px;
 }
 
 .schedule-placement-drag-handle {
@@ -1398,6 +1547,10 @@ body.is-schedule-resizing {
   font-size: 0.9rem;
   font-weight: 500;
   line-height: 1.3;
+}
+
+.schedule-setup-item .schedule-setup-item-title {
+  font-weight: 500;
 }
 
 .schedule-setup-item-desc {
@@ -4016,7 +4169,7 @@ body.is-column-resizing * {
 }
 
 .switch input:checked + .switch-slider {
-  background: var(--up);
+  background: var(--accent);
 }
 
 .switch input:checked + .switch-slider::before {
@@ -4246,6 +4399,15 @@ body.is-column-resizing * {
   font-size: 0.85rem;
 }
 
+.modal-field input:focus,
+.modal-field textarea:focus,
+.modal-select:focus,
+.modal-field-stack input:focus,
+.modal-field-stack textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .modal-field input:disabled,
 .modal-select:disabled {
   opacity: 0.5;
@@ -4253,6 +4415,10 @@ body.is-column-resizing * {
   color: #484f58;
   background: #21262d;
   border-color: #282e36;
+}
+
+#phase-modal.is-view-only #phase-modal-save {
+  display: none !important;
 }
 
 #phase-modal.is-view-only .modal-field input:disabled,
@@ -4426,6 +4592,17 @@ body.is-column-resizing * {
   border-radius: 2px;
 }
 
+.setup-edit-color-edit-icon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 11px;
+  height: 11px;
+  color: #f0f3f6;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85));
+}
+
 .modal-optional {
   color: var(--muted);
   font-weight: 400;
@@ -4464,6 +4641,10 @@ body.is-column-resizing * {
 }
 
 .modal-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--accent);
   color: #fff;
   border: none;
@@ -4484,6 +4665,16 @@ body.is-column-resizing * {
   border: 1px solid var(--border);
   cursor: not-allowed;
   opacity: 1;
+}
+
+.setup-edit-save-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.setup-edit-save-icon[hidden] {
+  display: none;
 }
 
 #setup-edit-save:disabled {

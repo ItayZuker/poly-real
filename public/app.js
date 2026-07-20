@@ -2347,6 +2347,10 @@ function syncSetupSaveSubmitState() {
 }
 
 function openSetupSaveModal() {
+  if (window.SetupEditor?.openCreate) {
+    window.SetupEditor.openCreate();
+    return;
+  }
   const modal = $("setup-save-modal");
   const titleInput = $("setup-save-title");
   const descInput = $("setup-save-description");
@@ -2521,15 +2525,95 @@ window.applyScheduleSetupsOrder = (setups) => {
   scheduleSetupsCache = setups;
 };
 
+async function removeSetupListItem(setupId) {
+  if (!setupId) return;
+  scheduleSetupsCache = scheduleSetupsCache.filter((s) => s._id !== setupId);
+  const list = $("schedule-setups-list");
+  if (!list) return;
+  list
+    .querySelectorAll(`.schedule-setup-item[data-setup-id="${CSS.escape(setupId)}"]`)
+    .forEach((el) => el.remove());
+  if (!list.querySelector(".schedule-setup-item")) {
+    list.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "schedule-setups-empty";
+    empty.textContent = "No saved setups";
+    list.appendChild(empty);
+  }
+  window.updateSetupListPlacementCounts?.();
+}
+
+const SETUP_DELETE_CAN_SVG =
+  '<svg class="schedule-delete-can-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+  '<g class="schedule-delete-can-lid">' +
+  '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M4 7h16"/>' +
+  '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/>' +
+  "</g>" +
+  '<g class="schedule-delete-can-body">' +
+  '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M6.5 7.5l.8 12.2A1.5 1.5 0 0 0 8.8 21h6.4a1.5 1.5 0 0 0 1.5-1.3l.8-12.2"/>' +
+  '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" d="M10 11v6M14 11v6"/>' +
+  "</g>" +
+  "</svg>";
+
+function isLightHexColor(color) {
+  const raw = String(color || "").trim();
+  const hex = raw.startsWith("#") ? raw.slice(1) : raw;
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return false;
+  const r = parseInt(hex.slice(0, 2), 16) / 255;
+  const g = parseInt(hex.slice(2, 4), 16) / 255;
+  const b = parseInt(hex.slice(4, 6), 16) / 255;
+  const toLin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const luminance = 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b);
+  return luminance > 0.55;
+}
+
+function setSetupListItemDeleting(setupId, deleting) {
+  const item = document.querySelector(
+    `.schedule-setup-item[data-setup-id="${CSS.escape(String(setupId))}"]`,
+  );
+  if (!item) return null;
+  item.classList.toggle("is-deleting", deleting);
+  item.classList.toggle("is-light-setup", false);
+  item.querySelector(".schedule-setup-loading--delete")?.remove();
+  if (!deleting) return item;
+  const color =
+    getComputedStyle(item).getPropertyValue("--setup-color").trim() ||
+    getSetupColorById(setupId) ||
+    "#58a6ff";
+  item.classList.toggle("is-light-setup", isLightHexColor(color));
+  const overlay = document.createElement("div");
+  overlay.className = "schedule-setup-loading--delete";
+  overlay.setAttribute("aria-hidden", "true");
+  const can = document.createElement("span");
+  can.className = "schedule-delete-can";
+  can.innerHTML = SETUP_DELETE_CAN_SVG;
+  overlay.appendChild(can);
+  item.appendChild(overlay);
+  void item.offsetWidth;
+  return item;
+}
+
 async function deleteTradingSetup(setup) {
   closeSetupMenus();
-  const placementCount = getSetupPlacementCounts()[setup?._id] ?? 0;
-  const confirmed = window.confirm(
-    placementCount > 0
-      ? `Delete "${setup.title}"?\n\nIt has ${placementCount} placement${placementCount === 1 ? "" : "s"} on the schedule. Those schedule cards will be removed and this cannot be undone.`
-      : `Delete "${setup.title}"? This cannot be undone.`,
+  if (!setup?._id) return;
+
+  const item = document.querySelector(
+    `.schedule-setup-item[data-setup-id="${CSS.escape(String(setup._id))}"]`,
   );
-  if (!confirmed) return;
+  if (item?.classList.contains("is-deleting")) return;
+
+  const lockedCount = window.SchedulePlacements?.getLockedCountForSetup?.(setup._id) ?? 0;
+  if (lockedCount > 0) {
+    const confirmed = window.confirm(
+      `Delete "${setup.title}"?\n\nIt has ${lockedCount} locked schedule card${lockedCount === 1 ? "" : "s"}. Those will be removed and this cannot be undone.`,
+    );
+    if (!confirmed) return;
+  }
+
+  setSetupListItemDeleting(setup._id, true);
+  await new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
 
   try {
     const res = await fetch(`/api/trading-setups/${encodeURIComponent(setup._id)}`, {
@@ -2539,8 +2623,11 @@ async function deleteTradingSetup(setup) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Delete failed (${res.status})`);
     }
-    await afterTradingSetupChange();
+    // Surgical: drop list row + schedule cards only. No full list/board rebuild.
+    removeSetupListItem(setup._id);
+    window.SchedulePlacements?.removePlacementsForSetup?.(setup._id);
   } catch (err) {
+    setSetupListItemDeleting(setup._id, false);
     appendLogEntry({
       level: "error",
       source: "sim",
@@ -2665,6 +2752,9 @@ function bindSetupListMenus() {
 function bindSetupSaveModal() {
   $("graph-save-btn")?.addEventListener("click", () => {
     if ($("graph-save-btn")?.hidden) return;
+    openSetupSaveModal();
+  });
+  $("schedule-add-setup-btn")?.addEventListener("click", () => {
     openSetupSaveModal();
   });
   $("setup-save-modal-close")?.addEventListener("click", closeSetupSaveModal);

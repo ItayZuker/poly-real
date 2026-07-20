@@ -108,6 +108,27 @@ interface LiveFakBuyWatch {
   lastBookSampleCount: number;
 }
 
+/** Phase/GTD buy cancel still settling on the CLOB (avoid orphan fills in the next phase). */
+interface PendingBuyCancel {
+  resting: {
+    orderId: string;
+    side: "up" | "down";
+    sessionKey: string;
+    shares: number;
+    limitPrice: number;
+    sizeMatched: number;
+    phaseIdx?: number;
+    tokenId?: string;
+    conditionId?: string;
+    slug?: string;
+    cardId?: string;
+  };
+  reason: string;
+  attempts: number;
+  nextAttemptMs: number;
+  kind: "phase" | "override";
+}
+
 interface RestingSellOrder {
   orderId: string;
   side: "up" | "down";
@@ -575,6 +596,8 @@ export class LiveTradingService {
   private lastGtdBuyPhaseIdx = -1;
   /** Live FAK optimize watch (only while live-armed; sim is not ticked). */
   private liveFakWatch: LiveFakBuyWatch | null = null;
+  /** Resting phase GTD buys awaiting confirmed CLOB cancel (and possible race fill). */
+  private pendingBuyCancels: PendingBuyCancel[] = [];
   /** PTB-crossing abort state for live (replaces sim abort while armed). */
   private liveAbortedBuyPhases = new Set<number>();
   private livePendingPhaseAborts = new Map<number, number>();
@@ -1548,6 +1571,7 @@ export class LiveTradingService {
     this.gtdBuyRepressUntilMs = 0;
     this.lastGtdBuyPhaseIdx = -1;
     this.liveFakWatch = null;
+    this.pendingBuyCancels = [];
     this.liveAbortedBuyPhases.clear();
     this.livePendingPhaseAborts.clear();
     this.liveCompletedPhaseAbortCancellations.clear();
@@ -1557,9 +1581,13 @@ export class LiveTradingService {
     this.gtdSellBlockedWindowKey = null;
     this.gtdSellRepressUntilMs = 0;
     if (isTradingExecutor()) {
-      if (prevResting?.orderId) void cancelOpenOrder(this.userId, prevResting.orderId);
+      if (prevResting?.orderId) {
+        void this.finishBuyCancel(prevResting, "window roll", state, "phase");
+      }
+      if (prevOverride?.orderId) {
+        void this.finishBuyCancel(prevOverride, "window roll", state, "override");
+      }
       if (prevRestingSell?.orderId) void cancelOpenOrder(this.userId, prevRestingSell.orderId);
-      if (prevOverride?.orderId) void cancelOpenOrder(this.userId, prevOverride.orderId);
     }
     this.positions = { up: null, down: null };
     this.quoteLocks = emptyQuoteLocks();
@@ -1815,10 +1843,11 @@ export class LiveTradingService {
 
     // Live-armed: do not tick or log via SimulatorEngine — live owns FAK/GTD/abort.
     if (this.isLiveArmed()) {
+      await this.sweepPendingBuyCancels(state, nowMs);
       await this.manageBuyOverride(state, nowMs);
       if (this.isOverrideHoldActive(state)) {
         this.liveFakWatch = null;
-        if (this.restingBuy) await this.cancelRestingBuy("buy override hold");
+        if (this.restingBuy) await this.cancelRestingBuy("buy override hold", nowMs, state);
         if (this.restingSell) await this.cancelRestingSell("buy override hold");
         return;
       }
@@ -1888,7 +1917,7 @@ export class LiveTradingService {
       this.liveCompletedPhaseAbortCancellations.add(idx);
       if (this.liveFakWatch?.phaseIdx === idx) this.liveFakWatch = null;
       if (this.restingBuy?.phaseIdx === idx) {
-        await this.cancelRestingBuy("PTB crossing abort");
+        await this.cancelRestingBuy("PTB crossing abort", now, state);
       }
       logService.info("trading", `Phase ${idx + 1} PTB-crossing cancellation executed`);
     }
@@ -1914,7 +1943,7 @@ export class LiveTradingService {
     if (latency <= 0) {
       this.liveCompletedPhaseAbortCancellations.add(phaseIdx);
       if (this.restingBuy?.phaseIdx === phaseIdx) {
-        await this.cancelRestingBuy("PTB crossing abort");
+        await this.cancelRestingBuy("PTB crossing abort", now, state);
       }
       logService.info("trading", `Phase ${phaseIdx + 1} PTB-crossing cancellation executed`);
       return;
@@ -2058,9 +2087,15 @@ export class LiveTradingService {
     );
   }
 
-  private async cancelRestingBuy(reason: string, nowMs?: number): Promise<void> {
+  private async cancelRestingBuy(
+    reason: string,
+    nowMs?: number,
+    state?: LiveWindowState,
+  ): Promise<void> {
     const resting = this.restingBuy;
     if (!resting) return;
+    // Drop local tracking immediately so we never re-manage / leave it as "active"
+    // in the next phase — but keep working the CLOB cancel until confirmed.
     this.restingBuy = null;
     if (isRoutineGtdCancelReason(reason)) {
       this.gtdBuyRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
@@ -2071,7 +2106,7 @@ export class LiveTradingService {
       this.autoEngine.setExternalBuyPaused(false);
     }
     if (!isTradingExecutor()) return;
-    await cancelOpenOrder(this.userId, resting.orderId);
+    await this.finishBuyCancel(resting, reason, state, "phase", nowMs);
   }
 
   private async cancelRestingSell(reason: string): Promise<void> {
@@ -2083,6 +2118,184 @@ export class LiveTradingService {
     logService.info("trading", `Cancel resting GTD sell (${reason})`);
     if (!isTradingExecutor()) return;
     await cancelOpenOrder(this.userId, resting.orderId);
+  }
+
+  private async cancelOverrideRestingBuy(
+    reason: string,
+    state?: LiveWindowState,
+  ): Promise<void> {
+    const resting = this.overrideRestingBuy;
+    if (!resting) return;
+    this.overrideRestingBuy = null;
+    logService.info("trading", `Cancel buy override GTD (${reason})`);
+    if (!isTradingExecutor()) return;
+    await this.finishBuyCancel(resting, reason, state, "override");
+  }
+
+  /**
+   * Cancel on the CLOB, then re-check for a race fill. If the order is still live,
+   * queue retries so a phase-1 5¢ GTD cannot silently fill in phase 2.
+   */
+  private async finishBuyCancel(
+    resting: PendingBuyCancel["resting"],
+    reason: string,
+    state: LiveWindowState | undefined,
+    kind: "phase" | "override",
+    nowMs?: number,
+  ): Promise<void> {
+    const now = nowMs ?? Date.now();
+    if (state && (await this.harvestBuyCancelFill(resting, state, kind))) {
+      return;
+    }
+
+    const result = await cancelOpenOrder(this.userId, resting.orderId);
+
+    if (state && (await this.harvestBuyCancelFill(resting, state, kind))) {
+      return;
+    }
+
+    const snap = await fetchOpenOrder(this.userId, resting.orderId);
+    const status = snap?.status?.toLowerCase() ?? "";
+    const stillOpen = status === "live" || status === "delayed";
+    if (!result.ok || stillOpen) {
+      this.enqueueBuyCancel(resting, reason, kind, now + 400);
+      if (!result.ok) {
+        logService.warn(
+          "trading",
+          `GTD buy cancel queued for retry (${kind}, ${reason}): ${result.error ?? "still open"}`,
+        );
+      }
+    }
+  }
+
+  private enqueueBuyCancel(
+    resting: PendingBuyCancel["resting"],
+    reason: string,
+    kind: "phase" | "override",
+    nextAttemptMs: number,
+    attempts = 1,
+  ): void {
+    if (this.pendingBuyCancels.some((p) => p.resting.orderId === resting.orderId)) return;
+    this.pendingBuyCancels.push({
+      resting: { ...resting },
+      reason,
+      attempts,
+      nextAttemptMs,
+      kind,
+    });
+  }
+
+  /** If the order filled (fully or partially) while cancelling, record it. */
+  private async harvestBuyCancelFill(
+    resting: PendingBuyCancel["resting"],
+    state: LiveWindowState,
+    kind: "phase" | "override",
+  ): Promise<boolean> {
+    const snap = await fetchOpenOrder(this.userId, resting.orderId);
+    if (!snap) return false;
+
+    const matched = Math.max(0, snap.sizeMatched);
+    if (matched > resting.sizeMatched + 1e-9) {
+      const delta = matched - resting.sizeMatched;
+      const fillPrice = snap.price > 0 ? snap.price : resting.limitPrice;
+      resting.sizeMatched = matched;
+      resting.tokenId = resting.tokenId ?? snap.assetId;
+      resting.conditionId = resting.conditionId ?? snap.market;
+
+      if (kind === "override") {
+        const overrideResting: OverrideRestingBuy = {
+          orderId: resting.orderId,
+          side: resting.side,
+          sessionKey: resting.sessionKey,
+          shares: resting.shares,
+          limitPrice: resting.limitPrice,
+          sizeMatched: matched,
+          tokenId: resting.tokenId,
+          conditionId: resting.conditionId,
+          slug: resting.slug,
+          cardId: resting.cardId,
+        };
+        await this.onBuyOverrideFill(
+          state,
+          overrideResting,
+          delta,
+          fillPrice,
+          resting.tokenId,
+          resting.conditionId,
+        );
+        return true;
+      }
+
+      logService.warn(
+        "trading",
+        `GTD buy filled during cancel (${resting.side} ${delta} sh @ ~${(fillPrice * 100).toFixed(1)}¢) — recording race fill`,
+      );
+      await this.recordBuyFill(
+        state,
+        resting.side,
+        delta,
+        fillPrice,
+        delta * fillPrice,
+        resting.tokenId,
+        resting.conditionId,
+        resting.slug,
+        "auto",
+        resting.cardId,
+        resting.phaseIdx,
+      );
+      // Fully matched → nothing left to cancel.
+      const status = snap.status.toLowerCase();
+      if (status !== "live" && status !== "delayed") return true;
+      if (matched + 1e-9 >= resting.shares) return true;
+    }
+
+    const status = snap.status.toLowerCase();
+    return status !== "live" && status !== "delayed";
+  }
+
+  private async sweepPendingBuyCancels(
+    state: LiveWindowState,
+    nowMs?: number,
+  ): Promise<void> {
+    if (!isTradingExecutor() || this.pendingBuyCancels.length === 0) return;
+    const now = nowMs ?? Date.now();
+    const due = this.pendingBuyCancels.filter((p) => now >= p.nextAttemptMs);
+    if (due.length === 0) return;
+
+    const remaining: PendingBuyCancel[] = this.pendingBuyCancels.filter(
+      (p) => now < p.nextAttemptMs,
+    );
+    this.pendingBuyCancels = remaining;
+
+    for (const item of due) {
+      if (await this.harvestBuyCancelFill(item.resting, state, item.kind)) {
+        continue;
+      }
+      if (item.attempts >= 8) {
+        logService.warn(
+          "trading",
+          `Giving up GTD buy cancel after ${item.attempts} tries (${item.kind} ${item.resting.orderId.slice(0, 10)}…)`,
+        );
+        // Last-ditch cancel; fill may still be adopted via on-chain check.
+        void cancelOpenOrder(this.userId, item.resting.orderId);
+        continue;
+      }
+      const result = await cancelOpenOrder(this.userId, item.resting.orderId);
+      if (await this.harvestBuyCancelFill(item.resting, state, item.kind)) {
+        continue;
+      }
+      const snap = await fetchOpenOrder(this.userId, item.resting.orderId);
+      const status = snap?.status?.toLowerCase() ?? "";
+      if (status === "live" || status === "delayed" || !result.ok) {
+        this.enqueueBuyCancel(
+          item.resting,
+          item.reason,
+          item.kind,
+          now + Math.min(5_000, 400 * item.attempts),
+          item.attempts + 1,
+        );
+      }
+    }
   }
 
   private isBuyOverrideConfigActive(): boolean {
@@ -2107,15 +2320,6 @@ export class LiveTradingService {
       if (wantAbovePtb ? gap >= 0 : gap <= 0) return side;
     }
     return null;
-  }
-
-  private async cancelOverrideRestingBuy(reason: string): Promise<void> {
-    const resting = this.overrideRestingBuy;
-    if (!resting) return;
-    this.overrideRestingBuy = null;
-    logService.info("trading", `Cancel buy override GTD (${reason})`);
-    if (!isTradingExecutor()) return;
-    await cancelOpenOrder(this.userId, resting.orderId);
   }
 
   private async onBuyOverrideFill(
@@ -2192,7 +2396,7 @@ export class LiveTradingService {
     if (this.orderInFlight) return;
 
     if (!this.isBuyOverrideConfigActive()) {
-      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("override inactive");
+      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("override inactive", state);
       return;
     }
 
@@ -2204,7 +2408,7 @@ export class LiveTradingService {
       this.isBuyBlocked(state) ||
       this.manualBuyPending
     ) {
-      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("position exists");
+      if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("position exists", state);
       return;
     }
 
@@ -2225,6 +2429,7 @@ export class LiveTradingService {
       if (stale) {
         await this.cancelOverrideRestingBuy(
           !side ? "no PTB side" : resting.side !== side ? "PTB side change" : "override params change",
+          state,
         );
       } else {
         await this.pollOverrideRestingBuy(state);
@@ -2308,7 +2513,7 @@ export class LiveTradingService {
   ): Promise<void> {
     if (this.manualBuyPending || this.manualBuyOverrideWindowKey === sessionKey(state)) return;
     if (this.buyBlockedWindowKey === sessionKey(state)) {
-      if (this.restingBuy) await this.cancelRestingBuy("buy blocked");
+      if (this.restingBuy) await this.cancelRestingBuy("buy blocked", nowMs, state);
       return;
     }
 
@@ -2349,6 +2554,7 @@ export class LiveTradingService {
                   ? "gap filter"
                   : "stabilize filter",
           nowMs ?? nowSec * 1000,
+          state,
         );
       }
     }
@@ -2358,6 +2564,10 @@ export class LiveTradingService {
       await this.pollRestingBuy(state, setup, nowMs);
       if (this.restingBuy) return; // still open — don't place another
     }
+
+    // Block new phase GTD while a prior cancel is still settling — prevents dual
+    // live limits across a phase boundary.
+    if (this.pendingBuyCancels.some((p) => p.kind === "phase")) return;
 
     if (this.orderInFlight) return;
     if (crossingAborted) return;
@@ -2459,11 +2669,11 @@ export class LiveTradingService {
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const crossingCancellationDue = this.isLivePhaseAbortCancellationDue(phaseIdx);
     if (!crossingCancellationDue && !gapAllowsBuy(resting.side, phase, state.assetGap)) {
-      await this.cancelRestingBuy("gap filter", nowMs ?? nowSec * 1000);
+      await this.cancelRestingBuy("gap filter", nowMs ?? nowSec * 1000, state);
       return;
     }
     if (!crossingCancellationDue && !stabilizeAllowsBuyForSide(phase, state, resting.side)) {
-      await this.cancelRestingBuy("stabilize filter", nowMs ?? nowSec * 1000);
+      await this.cancelRestingBuy("stabilize filter", nowMs ?? nowSec * 1000, state);
       return;
     }
 
@@ -2504,7 +2714,7 @@ export class LiveTradingService {
         );
       }
       if (status === "live" || status === "delayed") {
-        await this.cancelRestingBuy("PTB crossing abort");
+        await this.cancelRestingBuy("PTB crossing abort", nowMs, state);
       } else {
         this.restingBuy = null;
         this.notify();

@@ -330,6 +330,19 @@
   async function clearDay(day) {
     if (busyDays.has(day)) return;
     const previous = placements.filter((placement) => placement.day === day);
+    if (previous.length === 0) return;
+
+    const lockedCount = previous.filter((p) => isPlacementLocked(p._id)).length;
+    if (lockedCount > 0) {
+      const dayLabel =
+        document.querySelector(`.schedule-day-column[data-day="${day}"] .schedule-day-title`)
+          ?.textContent || day;
+      const confirmed = window.confirm(
+        `Clear ${dayLabel}?\n\nIt has ${lockedCount} locked card${lockedCount === 1 ? "" : "s"}. Those will be removed and this cannot be undone.`,
+      );
+      if (!confirmed) return;
+    }
+
     busyDays.add(day);
     clearHeaderFillPreview();
     setDayBusy(day, true);
@@ -342,9 +355,9 @@
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `Clear day failed (${res.status})`);
       }
-      placements = await res.json();
-      discardDayPlacementState(day, previous);
-      renderPlacements({ reloadStats: false });
+      const next = await res.json();
+      // Surgical DOM sync handles framed/cache cleanup for removed day cards.
+      syncPlacementsDom(Array.isArray(next) ? next : placements.filter((p) => p.day !== day));
       window.updateSetupListPlacementCounts?.();
     } catch (err) {
       console.error(err);
@@ -766,6 +779,66 @@
     spinner.className = "schedule-placement-spinner";
     overlay.appendChild(spinner);
     return overlay;
+  }
+
+  const DELETE_CAN_SVG =
+    '<svg class="schedule-delete-can-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<g class="schedule-delete-can-lid">' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M4 7h16"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/>' +
+    "</g>" +
+    '<g class="schedule-delete-can-body">' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M6.5 7.5l.8 12.2A1.5 1.5 0 0 0 8.8 21h6.4a1.5 1.5 0 0 0 1.5-1.3l.8-12.2"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" d="M10 11v6M14 11v6"/>' +
+    "</g>" +
+    "</svg>";
+
+  function buildDeleteLoadingOverlay() {
+    const overlay = document.createElement("div");
+    overlay.className = "schedule-placement-loading schedule-placement-loading--delete";
+    overlay.setAttribute("aria-hidden", "true");
+    const can = document.createElement("span");
+    can.className = "schedule-delete-can";
+    can.innerHTML = DELETE_CAN_SVG;
+    overlay.appendChild(can);
+    return overlay;
+  }
+
+  function isLightHexColor(color) {
+    const raw = String(color || "").trim();
+    const hex = raw.startsWith("#") ? raw.slice(1) : raw;
+    if (!/^[0-9a-fA-F]{6}$/.test(hex)) return false;
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+    const toLin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    const luminance = 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b);
+    return luminance > 0.55;
+  }
+
+  function setupColorFromEl(el) {
+    if (!el) return "#58a6ff";
+    const fromVar = getComputedStyle(el).getPropertyValue("--setup-color").trim();
+    if (fromVar) return fromVar;
+    return el.dataset.setupId
+      ? window.getSetupColorById?.(el.dataset.setupId) || "#58a6ff"
+      : "#58a6ff";
+  }
+
+  function setPlacementDeleting(placementId, deleting) {
+    const card =
+      document.querySelector(
+        `.schedule-placement-card[data-placement-id="${CSS.escape(String(placementId))}"]`,
+      ) ?? null;
+    if (!card) return;
+    card.classList.toggle("is-deleting", deleting);
+    card.classList.toggle("is-light-setup", false);
+    card.querySelector(".schedule-placement-loading--delete")?.remove();
+    if (!deleting) return;
+    card.classList.toggle("is-light-setup", isLightHexColor(setupColorFromEl(card)));
+    // Force paint before the network call so the solid fill + can is visible.
+    card.appendChild(buildDeleteLoadingOverlay());
+    void card.offsetWidth;
   }
 
   function cardShowsStats(placementId) {
@@ -1713,15 +1786,118 @@
 
   function placementsSignature(list) {
     return JSON.stringify(
-      list.map((p) => ({
-        _id: p._id,
-        day: p.day,
-        startHour: p.startHour,
-        durationHours: p.durationHours,
-        setupId: p.setupId,
-        updatedAt: p.updatedAt,
-      })),
+      [...list]
+        .map((p) => ({
+          _id: p._id,
+          day: p.day,
+          startHour: Number(p.startHour),
+          durationHours: Number(p.durationHours),
+          setupId: p.setupId,
+          title: p.title ?? "",
+        }))
+        .sort((a, b) => String(a._id).localeCompare(String(b._id))),
     );
+  }
+
+  function placementContentKey(p) {
+    return `${p.day}|${Number(p.startHour)}|${Number(p.durationHours)}|${p.setupId}|${p.title ?? ""}`;
+  }
+
+  function removePlacementCardEl(placementId) {
+    document
+      .querySelectorAll(`.schedule-placement-card[data-placement-id="${CSS.escape(placementId)}"]`)
+      .forEach((el) => el.remove());
+  }
+
+  function getPlacementsForSetup(setupId) {
+    if (!setupId) return [];
+    return placements.filter((p) => p.setupId === setupId);
+  }
+
+  function getLockedCountForSetup(setupId) {
+    return getPlacementsForSetup(setupId).filter((p) => isPlacementLocked(p._id)).length;
+  }
+
+  function getLockedCountForDay(day) {
+    return placements.filter((p) => p.day === day && isPlacementLocked(p._id)).length;
+  }
+
+  function removePlacementsForSetup(setupId) {
+    if (!setupId) return false;
+    const next = placements.filter((p) => p.setupId !== setupId);
+    if (next.length === placements.length) return false;
+    return syncPlacementsDom(next);
+  }
+
+  /** Apply a new placements list without rebuilding unchanged cards. */
+  function syncPlacementsDom(next) {
+    const prev = placements;
+    const prevById = new Map(prev.map((p) => [p._id, p]));
+    const nextById = new Map(next.map((p) => [p._id, p]));
+    const affectedDays = new Set();
+    const removed = [];
+    const added = [];
+    const changed = [];
+
+    for (const p of prev) {
+      if (!nextById.has(p._id)) {
+        removed.push(p);
+        affectedDays.add(p.day);
+      }
+    }
+    for (const p of next) {
+      const old = prevById.get(p._id);
+      if (!old) {
+        added.push(p);
+        affectedDays.add(p.day);
+        continue;
+      }
+      if (placementContentKey(old) !== placementContentKey(p)) {
+        changed.push(p);
+        affectedDays.add(old.day);
+        affectedDays.add(p.day);
+      }
+    }
+
+    placements = next;
+
+    if (removed.length === 0 && added.length === 0 && changed.length === 0) {
+      return false;
+    }
+
+    for (const p of removed) {
+      framedPlacementIds.delete(p._id);
+      removePlacementFromCache(p._id);
+      removePlacementCardEl(p._id);
+    }
+
+    for (const p of changed) {
+      removePlacementCardEl(p._id);
+      const layer = getPlacementLayer(p.day);
+      if (layer) layer.appendChild(buildPlacementCard(p));
+    }
+
+    for (const p of added) {
+      const layer = getPlacementLayer(p.day);
+      if (layer) layer.appendChild(buildPlacementCard(p));
+    }
+
+    for (const day of affectedDays) {
+      refreshDayPlacementEdgeClasses(day);
+    }
+
+    // Removals only: never rewrite every card's stats DOM (that flashes the whole board).
+    if (added.length > 0 || changed.length > 0) {
+      applyCardStatsStates();
+    } else {
+      updateDayHeaderPnls();
+      updateWeekHeaderSummary();
+      updateHighlightedHeaderSummary();
+      applyPlacementFrameStates();
+      syncNowHighlights();
+    }
+    window.updateSetupListPlacementCounts?.();
+    return true;
   }
 
   function framedGroupsForDay(day) {
@@ -2098,7 +2274,15 @@
 
   async function removePlacement(id) {
     closeMenus();
-    const placement = placements.find((p) => p._id === id);
+    const card = document.querySelector(
+      `.schedule-placement-card[data-placement-id="${CSS.escape(String(id))}"]`,
+    );
+    if (card?.classList.contains("is-deleting")) return;
+    setPlacementDeleting(id, true);
+    // Let the solid fill + can paint before the delete request.
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
     try {
       const res = await fetch(`/api/schedule-placements/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -2107,23 +2291,10 @@
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `Remove failed (${res.status})`);
       }
-      placements = placements.filter((p) => p._id !== id);
-      framedPlacementIds.delete(id);
-      removePlacementFromCache(id);
-
-      document
-        .querySelectorAll(`.schedule-placement-card[data-placement-id="${CSS.escape(id)}"]`)
-        .forEach((el) => el.remove());
-      if (placement?.day) refreshDayPlacementEdgeClasses(placement.day);
-
-      updateDayHeaderPnls();
-      updateWeekHeaderSummary();
-      applyPlacementFrameStates();
-      syncNowHighlights();
-      // Counts only — do not reload/rebuild the left setups list.
-      window.updateSetupListPlacementCounts?.();
+      syncPlacementsDom(placements.filter((p) => p._id !== id));
     } catch (err) {
       console.error(err);
+      setPlacementDeleting(id, false);
     }
   }
 
@@ -2794,8 +2965,8 @@
       ? raw.filter((p) => !p.series || p.series === series)
       : raw;
     if (placementsSignature(placements) === placementsSignature(next)) return;
-    placements = next;
-    renderPlacements({ reloadStats: false });
+    // Surgical DOM sync — do not rebuild every card on delete/add/move echoes.
+    syncPlacementsDom(next);
   }
 
   function onViewChange() {
@@ -2839,6 +3010,11 @@
     setHeaderSummaryRange,
     onSelectedSeriesChanged,
     getPlacementCountsBySetup,
+    getPlacementsForSetup,
+    getLockedCountForSetup,
+    getLockedCountForDay,
+    isPlacementLocked,
+    removePlacementsForSetup,
     refreshPlacementStats: scheduleStatsRefresh,
     refreshAllPlacementStats: (options = {}) =>
       scheduleStatsRefresh({ all: true, force: options.force === true }),

@@ -855,7 +855,11 @@
     const modal = document.getElementById("phase-modal");
     const external = !!externalPhaseContext;
     const readOnly = isPhaseModalReadOnly();
-    if (saveBtn) saveBtn.hidden = external || readOnly;
+    // Save only when the market phase editor is active (not locked / not external).
+    if (saveBtn) {
+      saveBtn.hidden = external || readOnly;
+      saveBtn.setAttribute("aria-hidden", saveBtn.hidden ? "true" : "false");
+    }
     if (hint) {
       hint.hidden = !readOnly;
       if (readOnly) {
@@ -873,7 +877,9 @@
 
   function isPhaseModalReadOnly() {
     if (externalPhaseContext) return Boolean(externalPhaseContext.readOnly);
-    return window.windowState?.trading?.phasesEditable === false;
+    // Market page: Save/edit only when phases are explicitly editable
+    // (Auto Trade on and Use Schedule off).
+    return window.windowState?.trading?.phasesEditable !== true;
   }
 
   function openPhaseModal(phaseIdx) {
@@ -952,12 +958,32 @@
 
   async function savePhaseModal() {
     if (activePhaseModal == null || externalPhaseContext) return;
-    if (window.windowState?.trading?.phasesEditable === false) return;
+    if (window.windowState?.trading?.phasesEditable !== true) return;
     const setup = getSetup(window.windowState);
     readPhaseFormIntoSetup(setup, activePhaseModal);
     markLocalSetupDirty(setup);
     closePhaseModal();
     await pushSetupToServer();
+  }
+
+  function submitPhaseModal() {
+    const modal = document.getElementById("phase-modal");
+    if (!modal || modal.hidden || activePhaseModal == null) return;
+    if (isPhaseModalReadOnly()) return;
+    if (externalPhaseContext) {
+      closePhaseModal();
+      return;
+    }
+    void savePhaseModal();
+  }
+
+  function onPhaseModalKeyDown(e) {
+    if (e.key !== "Enter") return;
+    const modal = document.getElementById("phase-modal");
+    if (!modal || modal.hidden) return;
+    if (e.target?.closest?.("textarea")) return;
+    e.preventDefault();
+    submitPhaseModal();
   }
 
   function bindChartInteraction(canvas) {
@@ -1134,6 +1160,7 @@
     });
     document.getElementById("phase-modal-close").addEventListener("click", closePhaseModal);
     document.getElementById("phase-modal-save").addEventListener("click", () => void savePhaseModal());
+    document.getElementById("phase-modal").addEventListener("keydown", onPhaseModalKeyDown);
     document.getElementById("phase-modal").addEventListener("click", (e) => {
       if (e.target.id === "phase-modal") closePhaseModal();
     });

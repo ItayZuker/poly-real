@@ -657,9 +657,33 @@
       <div id="page-schedule-heatmap" class="app-page app-page-schedule" hidden>
         <aside class="panel schedule-setups-panel" aria-label="Saved trading setups">
           <div class="schedule-setups-header">
-            <div class="schedule-view-toggle" role="group" aria-label="Schedule view">
-              <button type="button" class="schedule-view-toggle-btn is-active" data-schedule-view="schedule">Schedule</button>
-              <button type="button" class="schedule-view-toggle-btn" data-schedule-view="heatmap">Heatmap</button>
+            <div class="schedule-setups-toolbar">
+              <div class="schedule-view-toggle" role="group" aria-label="Schedule view">
+                <button type="button" class="schedule-view-toggle-btn is-active" data-schedule-view="schedule">Schedule</button>
+                <button type="button" class="schedule-view-toggle-btn" data-schedule-view="heatmap">Heatmap</button>
+              </div>
+            </div>
+            <div class="schedule-add-setup-wrap">
+              <button type="button" id="schedule-add-setup-btn" class="schedule-add-setup-btn" title="Save current trading setup">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M9 3h6M10 3v6.5L5.5 18.5A2 2 0 0 0 7.3 21.5h9.4a2 2 0 0 0 1.8-3L14 9.5V3"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M8.2 14h7.6"
+                  />
+                </svg>
+                <span>Add setup</span>
+              </button>
             </div>
           </div>
           <div id="schedule-setups-list" class="schedule-setups-list">
@@ -846,6 +870,16 @@
         <div class="setup-edit-modal-heading">
           <span class="setup-edit-color-swatch" title="Border color">
             <input type="color" id="setup-edit-color" value="#58a6ff" aria-label="Border color" />
+            <svg class="setup-edit-color-edit-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M11.5 2.5l2 2L5.5 12.5H3.5v-2L11.5 2.5z"
+              />
+            </svg>
           </span>
           <h2 id="setup-edit-modal-title">Edit trading setup</h2>
         </div>
@@ -854,7 +888,13 @@
       <div class="modal-body">
         <label class="modal-field modal-field-stack">
           <span>Title</span>
-          <input type="text" id="setup-edit-title" maxlength="200" autocomplete="off" />
+          <input
+            type="text"
+            id="setup-edit-title"
+            maxlength="200"
+            autocomplete="off"
+            placeholder="New setup"
+          />
         </label>
         <label class="modal-field modal-field-stack">
           <span>Description <span class="modal-optional">(optional)</span></span>
@@ -870,7 +910,26 @@
       </div>
       <div class="modal-footer modal-footer-actions">
         <button type="button" id="setup-edit-cancel" class="modal-btn-secondary">Cancel</button>
-        <button type="button" id="setup-edit-save" class="modal-btn-primary" disabled>Save</button>
+        <button type="button" id="setup-edit-save" class="modal-btn-primary" disabled>
+          <svg class="setup-edit-save-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M9 3h6M10 3v6.5L5.5 18.5A2 2 0 0 0 7.3 21.5h9.4a2 2 0 0 0 1.8-3L14 9.5V3"
+            />
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              d="M8.2 14h7.6"
+            />
+          </svg>
+          <span id="setup-edit-save-label">Save</span>
+        </button>
       </div>
     </div>
   </div>

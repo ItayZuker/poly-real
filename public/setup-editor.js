@@ -17,12 +17,17 @@
   let dragMoved = false;
   let hoveredPhaseLine = null;
   let editingId = null;
+  let createMode = false;
+  let colorTouched = false;
   let draft = null;
   let baseline = null;
   let refreshTimer = null;
   let resizeObserver = null;
   let persisting = false;
   let phasesReadOnly = false;
+  let modalTitleEl = null;
+  let saveLabelEl = null;
+  let saveIconEl = null;
 
   function $(id) {
     return document.getElementById(id);
@@ -170,16 +175,43 @@
     };
   }
 
+  function resolvedTitle() {
+    const typed = titleInput?.value?.trim() ?? "";
+    if (typed) return typed;
+    if (createMode) return "New setup";
+    return "";
+  }
+
   function isDirty() {
     if (!draft || !baseline) return false;
+    if (createMode) return true;
     return JSON.stringify(snapshotDraft()) !== JSON.stringify(baseline);
   }
 
   function syncSaveState() {
     if (!saveBtn || !titleInput) return;
-    const dirty = isDirty() && !!titleInput.value.trim();
-    saveBtn.disabled = !dirty;
-    saveBtn.setAttribute("aria-disabled", dirty ? "false" : "true");
+    const enabled = createMode ? true : isDirty() && !!titleInput.value.trim();
+    saveBtn.disabled = !enabled;
+    saveBtn.setAttribute("aria-disabled", enabled ? "false" : "true");
+  }
+
+  function syncPrimaryButtonUi() {
+    if (saveLabelEl) saveLabelEl.textContent = createMode ? "Add" : "Save";
+    if (saveIconEl) saveIconEl.hidden = !createMode;
+    if (modalTitleEl) {
+      modalTitleEl.textContent = createMode ? "Add trading setup" : "Edit trading setup";
+    }
+  }
+
+  function seedSetupFromSimulator() {
+    const local = window.Simulator?.getLocalSetup?.();
+    if (local?.phaseSplit && Array.isArray(local.phases)) {
+      return {
+        phaseSplit: [...local.phaseSplit],
+        phases: deepClone(local.phases),
+      };
+    }
+    return defaultSetup();
   }
 
   function onDraftChange() {
@@ -232,11 +264,60 @@
     }
   }
 
+  async function persistCreateToMongo() {
+    if (!createMode || !draft || persisting) return false;
+    const title = resolvedTitle();
+    if (!title) return false;
+
+    persisting = true;
+    try {
+      const payload = snapshotDraft();
+      payload.title = title;
+      const res = await fetch("/api/trading-setups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: payload.title,
+          description: payload.description || undefined,
+          setup: payload.setup,
+        }),
+      });
+      let body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || `Save failed (${res.status})`);
+      }
+
+      if (body._id && colorTouched && payload.color && payload.color !== body.color) {
+        const colorRes = await fetch(`/api/trading-setups/${encodeURIComponent(body._id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ color: payload.color }),
+        });
+        const colorBody = await colorRes.json().catch(() => ({}));
+        if (colorRes.ok) body = colorBody;
+      }
+
+      if (window.onTradingSetupUpdated) {
+        void window.onTradingSetupUpdated(body);
+      }
+      return true;
+    } catch (err) {
+      console.error(err);
+      alert(err.message || "Failed to add setup");
+      return false;
+    } finally {
+      persisting = false;
+    }
+  }
+
   function onColorInput() {
-    if (!draft || !colorInput || !editingId) return;
+    if (!draft || !colorInput) return;
     const color = colorInput.value;
     draft.color = color;
-    if (window.applySetupColorUpdate) window.applySetupColorUpdate(editingId, color);
+    colorTouched = true;
+    if (editingId && window.applySetupColorUpdate) {
+      window.applySetupColorUpdate(editingId, color);
+    }
     syncSaveState();
   }
 
@@ -367,6 +448,8 @@
 
   function open(setup) {
     if (!modal || !titleInput || !descInput) return;
+    createMode = false;
+    colorTouched = false;
     editingId = setup._id;
     phasesReadOnly = setupPlacementCount(setup._id) > 0;
     draft = {
@@ -379,6 +462,7 @@
     descInput.value = draft.description;
     if (colorInput) colorInput.value = draft.color;
     baseline = deepClone(snapshotDraft());
+    syncPrimaryButtonUi();
     modal.hidden = false;
     saveBtn.disabled = true;
     saveBtn.setAttribute("aria-disabled", "true");
@@ -388,6 +472,36 @@
     requestAnimationFrame(() => {
       drawChart();
       syncSaveState();
+    });
+  }
+
+  function openCreate() {
+    if (!modal || !titleInput || !descInput) return;
+    createMode = true;
+    colorTouched = false;
+    editingId = null;
+    phasesReadOnly = false;
+    draft = {
+      title: "",
+      description: "",
+      color: colorInput?.value || "#58a6ff",
+      setup: seedSetupFromSimulator(),
+    };
+    titleInput.value = "";
+    descInput.value = "";
+    if (colorInput) colorInput.value = draft.color;
+    baseline = deepClone(snapshotDraft());
+    syncPrimaryButtonUi();
+    modal.hidden = false;
+    saveBtn.disabled = true;
+    saveBtn.setAttribute("aria-disabled", "true");
+    beginExternalEditing();
+    syncPhasesReadOnlyUi();
+    startRefresh();
+    requestAnimationFrame(() => {
+      drawChart();
+      syncSaveState();
+      titleInput.focus();
     });
   }
 
@@ -412,10 +526,13 @@
       modal.classList.remove("is-phases-locked");
     }
     editingId = null;
+    createMode = false;
+    colorTouched = false;
     draft = null;
     baseline = null;
     chartLayout = null;
     phasesReadOnly = false;
+    syncPrimaryButtonUi();
     const hint = $("setup-edit-phases-hint");
     if (hint) hint.hidden = true;
     hidePhaseHover();
@@ -426,9 +543,22 @@
   }
 
   async function save() {
+    if (saveBtn?.disabled || persisting) return;
+    if (createMode) {
+      const ok = await persistCreateToMongo();
+      if (ok) close();
+      return;
+    }
     if (!editingId || !isDirty() || !titleInput?.value.trim()) return;
     const ok = await persistDraftToMongo();
     if (ok) close();
+  }
+
+  function onModalKeyDown(e) {
+    if (e.key !== "Enter" || modal?.hidden) return;
+    if (e.target?.closest?.("textarea")) return;
+    e.preventDefault();
+    void save();
   }
 
   function init() {
@@ -437,6 +567,9 @@
     descInput = $("setup-edit-description");
     colorInput = $("setup-edit-color");
     saveBtn = $("setup-edit-save");
+    modalTitleEl = $("setup-edit-modal-title");
+    saveLabelEl = $("setup-edit-save-label");
+    saveIconEl = saveBtn?.querySelector?.(".setup-edit-save-icon") ?? null;
     canvas = $("setup-edit-chart");
     chartWrap = canvas?.parentElement ?? null;
     phaseHoverEl = $("setup-edit-phase-hover");
@@ -448,6 +581,7 @@
     descInput?.addEventListener("input", syncSaveState);
     colorInput?.addEventListener("input", onColorInput);
     colorInput?.addEventListener("change", onColorInput);
+    modal?.addEventListener("keydown", onModalKeyDown);
     modal?.addEventListener("click", (e) => {
       if (e.target.id === "setup-edit-modal") close();
     });
@@ -464,6 +598,7 @@
   window.SetupEditor = {
     init,
     open,
+    openCreate,
     close,
     isDirty,
     refreshChart,
