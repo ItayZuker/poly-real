@@ -3473,7 +3473,7 @@ function bindPageToggle() {
     if (window.SchedulePlacements) {
       window.SchedulePlacements.onViewChange();
       if (isSimulator) {
-        window.SchedulePlacements.setHeaderSummaryRange?.("live");
+        window.SchedulePlacements.setHeaderSummaryRange?.("market");
       } else if (isSchedule) {
         window.SchedulePlacements.setHeaderSummaryRange?.("schedule");
       }

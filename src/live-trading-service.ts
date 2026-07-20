@@ -451,9 +451,15 @@ function emptyQuoteLocks(): SimQuoteLocks {
 
 /** Quiet period after gap/stabilize cancel before placing another resting GTD buy. */
 const GTD_FILTER_REPRESS_MS = 2500;
+/** Quiet period after sell balance/allowance reject (tokens not credited yet). */
+const GTD_SELL_BALANCE_REPRESS_MS = 2500;
 
 function isRoutineGtdCancelReason(reason: string): boolean {
   return reason === "gap filter" || reason === "stabilize filter";
+}
+
+function isBalanceAllowanceError(err: string): boolean {
+  return /not enough balance|allowance/i.test(err);
 }
 
 function newCardId(): string {
@@ -558,6 +564,8 @@ export class LiveTradingService {
   private restingSell: RestingSellOrder | null = null;
   /** After a rejected GTD sell (e.g. expiration), skip further sell places this window. */
   private gtdSellBlockedWindowKey: string | null = null;
+  /** After balance/allowance reject, delay before retrying GTD sell. */
+  private gtdSellRepressUntilMs = 0;
   /** Highest-priority resting buy override (competes with phase buys). */
   private overrideRestingBuy: OverrideRestingBuy | null = null;
   /** After a rejected buy-override GTD (e.g. expiration), skip further places this window. */
@@ -1515,6 +1523,7 @@ export class LiveTradingService {
     this.gtdBuyRepressUntilMs = 0;
     this.lastGtdBuyPhaseIdx = -1;
     this.gtdSellBlockedWindowKey = null;
+    this.gtdSellRepressUntilMs = 0;
     if (isTradingExecutor()) {
       if (prevResting?.orderId) void cancelOpenOrder(this.userId, prevResting.orderId);
       if (prevRestingSell?.orderId) void cancelOpenOrder(this.userId, prevRestingSell.orderId);
@@ -1831,7 +1840,7 @@ export class LiveTradingService {
       if (marker.type === "buy") {
         // Optimize-off buys are resting GTD limits — do not mirror sim market fires.
         const phase = this.phaseAtTime(setup, state, marker.t);
-        if (!phase.buyOptimize) continue;
+        if (!phase.buyOptimize || !phase.buyEnabled) continue;
         if (!stabilizeAllowsBuyForSide(phase, state, marker.side)) {
           logService.info("trading", `FAK buy skipped (stabilize filter)`);
           continue;
@@ -2326,7 +2335,6 @@ export class LiveTradingService {
     setup: SimSetup,
     nowMs?: number,
   ): Promise<void> {
-    if (this.orderInFlight) return;
     if (this.isOverrideHoldActive(state)) {
       if (this.restingSell) await this.cancelRestingSell("buy override hold");
       return;
@@ -2336,17 +2344,31 @@ export class LiveTradingService {
       if (this.restingSell) await this.cancelRestingSell("no position");
       return;
     }
-    const pos = this.positions[side];
-    const phaseIdx = Math.max(0, Math.min(2, pos?.buyPhaseIdx ?? 0));
+    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
+    // Sell follows the clock phase, not the phase that bought.
+    const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     if (!sellEnabledForPhase(phase)) {
       if (this.restingSell) await this.cancelRestingSell("sell disabled");
       return;
     }
     if (this.restingSell) {
-      await this.pollRestingSell(state);
-      if (this.restingSell) return;
+      const wantLimit = Math.min(
+        0.99,
+        Math.max(0.01, this.positions[side]!.avgPrice + centsToPrice(phase.sellProfitCents)),
+      );
+      const stalePhase =
+        this.restingSell.phaseIdx !== phaseIdx ||
+        Math.abs(this.restingSell.limitPrice - wantLimit) > 1e-9;
+      if (stalePhase) {
+        await this.cancelRestingSell("phase sell settings change");
+      } else {
+        if (this.orderInFlight) return;
+        await this.pollRestingSell(state);
+        if (this.restingSell) return;
+      }
     }
+    if (this.orderInFlight) return;
     if (!this.positions[side]) return;
     await this.ensureRestingGtdSell(state, setup, side, nowMs);
   }
@@ -2362,18 +2384,22 @@ export class LiveTradingService {
     const pos = this.positions[side];
     if (!pos || pos.shares <= 0) return;
 
-    const phaseIdx = Math.max(0, Math.min(2, pos.buyPhaseIdx ?? 0));
+    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
+    const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     if (!sellEnabledForPhase(phase)) return;
     const limitPrice = Math.min(0.99, Math.max(0.01, pos.avgPrice + centsToPrice(phase.sellProfitCents)));
     const shares = Math.max(1, Math.floor(pos.shares));
     const key = sessionKey(state);
     if (this.gtdSellBlockedWindowKey === key) return;
+    const now = nowMs ?? Date.now();
+    if (now < this.gtdSellRepressUntilMs) return;
 
     if (
       this.restingSell &&
       this.restingSell.side === side &&
       this.restingSell.sessionKey === key &&
+      this.restingSell.phaseIdx === phaseIdx &&
       Math.abs(this.restingSell.limitPrice - limitPrice) < 1e-9 &&
       this.restingSell.shares === shares
     ) {
@@ -2384,7 +2410,6 @@ export class LiveTradingService {
       await this.cancelRestingSell("resize sell");
     }
 
-    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const windowEnd = state.windowEnd ?? nowSec + 300;
     // GTD needs a future expiration (~now+180 floor). Near window close, hold instead
     // of spamming rejected place attempts every tick.
@@ -2409,11 +2434,17 @@ export class LiveTradingService {
             "trading",
             `GTD sell skipped for rest of window (${err})`,
           );
+        } else if (isBalanceAllowanceError(err)) {
+          // Tokens often lag the buy fill; backoff instead of spamming every tick.
+          // order-service already logged the CLOB error — don't duplicate here.
+          this.gtdSellRepressUntilMs = now + GTD_SELL_BALANCE_REPRESS_MS;
         } else if (err) {
           logService.warn("trading", `GTD sell place failed: ${err}`);
         }
         return;
       }
+
+      this.gtdSellRepressUntilMs = 0;
 
       if (result.fillShares != null && result.fillPrice != null && result.fillShares > 0) {
         await this.recordSellFill(

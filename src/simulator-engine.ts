@@ -571,6 +571,29 @@ export class SimulatorEngine {
     }
   }
 
+  /** Drop every in-flight phase buy when the clock leaves a phase. */
+  private cancelBuysAtPhaseEnd(simNowMs: number): void {
+    if (this.pendingBuy) {
+      logService.info(
+        "sim",
+        `FAK pending cancelled (phase change, was phase ${this.pendingBuy.phaseIdx + 1})`,
+      );
+      this.pendingBuy = null;
+    }
+    if (this.buyWatch) {
+      logService.info(
+        "sim",
+        `FAK watch cancelled (phase change, was phase ${this.buyWatch.phaseIdx + 1})`,
+      );
+      this.buyWatch = null;
+    }
+    if (this.restingGtd) {
+      this.cancelRestingGtd("phase change", simNowMs);
+    }
+    // Re-evaluate sell target from the new phase's sell settings.
+    this.sellWatch = null;
+  }
+
   private processPendingFills(
     state: LiveWindowState,
     setup: SimSetup,
@@ -581,6 +604,16 @@ export class SimulatorEngine {
     if (this.pendingBuy && simNowMs >= this.pendingBuy.executeAtMs) {
       const pending = this.pendingBuy;
       this.pendingBuy = null;
+      const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
+      const phase = setup.phases[phaseIdx];
+      // Never fill a FAK that belongs to a prior phase, or after buy was turned off.
+      if (pending.phaseIdx !== phaseIdx || !phase?.buyEnabled || !phase.buyOptimize) {
+        logService.info(
+          "sim",
+          `FAK pending dropped at execute (phase ${pending.phaseIdx + 1} → ${phaseIdx + 1})`,
+        );
+        return;
+      }
       if (!this.position) {
         this.executeFakBuy(
           pending.side,
@@ -611,6 +644,7 @@ export class SimulatorEngine {
 
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
+    if (!phase?.buyEnabled || !phase.buyOptimize) return;
     if (!allowAbortedPending && this.isPhaseBuyAborted(phaseIdx)) return;
     if (!stabilizeAllowsBuyForSide(phase, state, side)) {
       logService.error("sim", `FAK buy skipped after latency (stabilize filter)`);
@@ -699,12 +733,20 @@ export class SimulatorEngine {
     );
   }
 
-  private startSellWatch(phase: SimSetup["phases"][number]): void {
-    if (!this.position || this.sellWatch) return;
-    if (!sellEnabledForPhase(phase)) return;
+  /** Sync sell limit to the clock phase's sell settings (not the buy phase). */
+  private syncSellWatchForPhase(phase: SimSetup["phases"][number]): void {
+    if (!this.position || this.sellsSuppressed) {
+      this.sellWatch = null;
+      return;
+    }
+    if (!sellEnabledForPhase(phase)) {
+      this.sellWatch = null;
+      return;
+    }
     const target = this.position.buyPrice + centsToPrice(phase.sellProfitCents);
+    if (this.sellWatch && Math.abs(this.sellWatch.target - target) < 1e-9) return;
     this.sellWatch = { target };
-    logService.info("sim", `Sell watch started, limit ${fmtCents(target)}`);
+    logService.info("sim", `Sell watch updated for clock phase, limit ${fmtCents(target)}`);
   }
 
   private executeSell(
@@ -839,12 +881,6 @@ export class SimulatorEngine {
     state: LiveWindowState,
     simNowMs: number,
   ): void {
-    if (!phase.buyOptimize) this.buyWatch = null;
-    // Phase boundary must not inherit gap/stabilize repress from the prior phase.
-    if (this.lastGtdPhaseIdx !== phaseIdx) {
-      this.lastGtdPhaseIdx = phaseIdx;
-      this.gtdRepressUntilMs = 0;
-    }
     if (!this.restingGtd) return;
     const restingSide = this.restingGtd.side;
     if (
@@ -966,14 +1002,11 @@ export class SimulatorEngine {
     const askCents = priceToCents(ask);
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
+    // Phase-boundary cancelBuysAtPhaseEnd already drops watches; never carry
+    // a prior phase's trigger into the current phase.
     if (w.phaseIdx !== phaseIdx) {
-      if (!phase.buyOptimize || !phase.buyEnabled) {
-        this.buyWatch = null;
-        return;
-      }
-      // An armed FAK watch stays locked to its original side/trigger across
-      // FAK phases, but belongs to the new phase for stabilization and abort.
-      w.phaseIdx = phaseIdx;
+      this.buyWatch = null;
+      return;
     }
     if (this.isPhaseBuyAborted(phaseIdx)) {
       this.buyWatch = null;
@@ -1073,11 +1106,20 @@ export class SimulatorEngine {
     const phase = setup.phases[phaseIdx];
     const quote = depthFromState(state);
 
+    // Hard boundary: kill prior-phase FAK/GTD before any fill can land.
+    if (this.lastGtdPhaseIdx !== phaseIdx) {
+      if (this.lastGtdPhaseIdx >= 0) {
+        this.cancelBuysAtPhaseEnd(simNowMs);
+      }
+      this.lastGtdPhaseIdx = phaseIdx;
+      this.gtdRepressUntilMs = 0;
+    }
+
     this.syncPhaseCrossingAbort(phase, phaseIdx, state, setup, simNowMs);
     this.processPendingFills(state, setup, quote, nowSec, simNowMs);
     this.processPendingPhaseAbort(simNowMs);
 
-    // GTD resting: cancel on phase/optimize change, fill from book, place when active.
+    // GTD resting: cancel on optimize/gap/stabilize change, fill from book, place when active.
     this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs);
     this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     if (!this.position || this.restingGtd) {
@@ -1089,9 +1131,9 @@ export class SimulatorEngine {
       this.tryStartBuyWatch(phase, quote, nowSec, state, setup, simNowMs);
       this.tickBuyWatch(quote, nowSec, state, setup, simNowMs);
     } else if (this.position && !this.sellsSuppressed) {
-      const sellPhase = setup.phases[this.position.phaseIndex];
-      if (sellEnabledForPhase(sellPhase)) {
-        if (!this.sellWatch) this.startSellWatch(sellPhase);
+      // Sell follows the clock phase's settings, not the phase that bought.
+      this.syncSellWatchForPhase(phase);
+      if (this.sellWatch) {
         this.tickSellWatch(quote, nowSec, state, setup, simNowMs);
       }
     }
