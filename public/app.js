@@ -1246,18 +1246,37 @@ function initLeftRowSplitter() {
   });
 
   const applyHeights = (trade, prev, log) => {
-    const { colRect, chrome } = getMetrics();
-    const t = Math.max(0, trade);
-    const p = Math.max(0, prev);
+    const { colRect, chrome, maxContent } = getMetrics();
+    let t = Math.max(0, trade);
+    let p = Math.max(0, prev);
     let l = Math.max(0, log);
+
+    // While the market page is hidden (display:none), geometry is 0 — do not
+    // recompute margin / redistribute or an open log will collapse on return.
+    const layoutReady = colRect.height > chrome;
+
+    if (layoutReady) {
+      const total = t + p + l;
+      if (total > maxContent && total > 0) {
+        const scale = maxContent / total;
+        t *= scale;
+        p *= scale;
+        l *= scale;
+      } else if (l > 0 && total < maxContent) {
+        // Keep the open log pinned to the column bottom (same as drag math).
+        l = maxContent - t - p;
+      }
+    }
 
     leftColumn.style.setProperty("--trade-content-height", `${t}px`);
     leftColumn.style.setProperty("--prev-content-height", `${p}px`);
     leftColumn.style.setProperty("--log-content-height", `${l}px`);
 
-    const stackHeight = chrome + t + p + l;
-    const margin = l <= 0 ? Math.max(0, colRect.height - stackHeight) : 0;
-    leftColumn.style.setProperty("--log-margin-top", `${margin}px`);
+    if (layoutReady) {
+      const stackHeight = chrome + t + p + l;
+      const margin = l <= 0 ? Math.max(0, colRect.height - stackHeight) : 0;
+      leftColumn.style.setProperty("--log-margin-top", `${margin}px`);
+    }
 
     tradeBody.classList.toggle("is-collapsed", t <= 0);
     prevBody.classList.toggle("is-collapsed", p <= 0);
@@ -1265,6 +1284,11 @@ function initLeftRowSplitter() {
     const hasPositionCards = Boolean(prevBody.querySelector(".position-card"));
     prevBody.classList.toggle("is-scrollable", p > 0 && hasPositionCards);
     logBody.classList.toggle("is-scrollable", l > 0);
+  };
+
+  const reflowHeights = () => {
+    const heights = readHeights();
+    applyHeights(heights.trade, heights.prev, heights.log);
   };
 
   const maximizeSection = (section) => {
@@ -1281,10 +1305,11 @@ function initLeftRowSplitter() {
     applyHeights(maxContent, 0, 0);
   };
 
-  leftColumnLayout = { applyHeights, maximizeSection, readHeights, getMetrics };
+  leftColumnLayout = { applyHeights, maximizeSection, readHeights, getMetrics, reflowHeights };
 
   const initDefaultHeights = () => {
     const { maxContent } = getMetrics();
+    if (maxContent < 1) return;
     const defaultLog = Math.min(220, Math.max(120, Math.round(maxContent * 0.32)));
     const trade = Math.max(80, maxContent - defaultLog);
     applyHeights(trade, 0, defaultLog);
@@ -1382,8 +1407,7 @@ function initLeftRowSplitter() {
 
   initDefaultHeights();
   window.addEventListener("resize", () => {
-    const heights = readHeights();
-    applyHeights(heights.trade, heights.prev, heights.log);
+    reflowHeights();
     syncLeftColumnRail();
     syncMarketColumnRail();
   });
@@ -3543,9 +3567,35 @@ function bindPageToggle() {
     }
     if (settingsBtn) settingsBtn.classList.toggle("is-active", isSettings);
 
-    if (isSimulator && windowState) {
-      resizeChartCanvas();
-      drawPriceChart(windowState);
+    if (isSimulator) {
+      if (windowState) {
+        resizeChartCanvas();
+        drawPriceChart(windowState);
+      }
+      // Left column was display:none on Schedule — reflow after layout so an open
+      // log fills the section again (pixel heights go stale while hidden).
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (!leftColumnLayout) return;
+          if (!leftColumnLayout.getMetrics().maxContent) return;
+          const col = document.querySelector(".left-column");
+          const inlineTrade = col?.style.getPropertyValue("--trade-content-height") ?? "";
+          const needsInit = !inlineTrade;
+          if (needsInit) {
+            const { maxContent } = leftColumnLayout.getMetrics();
+            const defaultLog = Math.min(220, Math.max(120, Math.round(maxContent * 0.32)));
+            leftColumnLayout.applyHeights(
+              Math.max(80, maxContent - defaultLog),
+              0,
+              defaultLog,
+            );
+          } else {
+            leftColumnLayout.reflowHeights();
+          }
+          syncLeftColumnRail();
+          syncMarketColumnRail();
+        });
+      });
     } else if (isSchedule) {
       void loadScheduleSetups();
       if (lastHeatmapState) renderHeatmap(lastHeatmapState);

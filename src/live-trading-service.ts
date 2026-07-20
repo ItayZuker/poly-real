@@ -93,6 +93,8 @@ interface RestingBuyOrder {
   conditionId?: string;
   slug?: string;
   cardId?: string;
+  /** Schedule card that owned this order when it was placed. */
+  placementId?: string;
 }
 
 /** Live optimize (FAK) arm/hunt state — independent of SimulatorEngine. */
@@ -122,6 +124,7 @@ interface PendingBuyCancel {
     conditionId?: string;
     slug?: string;
     cardId?: string;
+    placementId?: string;
   };
   reason: string;
   attempts: number;
@@ -411,6 +414,20 @@ function eventFingerprint(
 function eventSettledMs(event: TradingStatEvent): number {
   const at = Date.parse(event.settledAt);
   return Number.isFinite(at) ? at : NaN;
+}
+
+/** Prefer root placementId; fall back to card snapshot (older Mongo rows). */
+function eventPlacementId(event: TradingStatEvent): string | undefined {
+  return event.placementId || event.card?.placementId || undefined;
+}
+
+/** Best clock for attributing a settled trade to a schedule slot (buy time, not settle). */
+function eventAttributionMs(event: TradingStatEvent): number {
+  const buyAt = event.card?.buyAt;
+  if (buyAt != null && Number.isFinite(buyAt)) {
+    return buyAt > 1e12 ? buyAt : buyAt * 1000;
+  }
+  return eventSettledMs(event);
 }
 
 function cardSettledMs(card: TradingPositionCard): number {
@@ -719,9 +736,15 @@ export class LiveTradingService {
       }
 
       for (const event of events) {
+        // Older rows may only store placementId on the card snapshot.
+        const pid = eventPlacementId(event);
+        if (pid && !event.placementId) event.placementId = pid;
+        if (pid && event.card && !event.card.placementId) {
+          event.card = { ...event.card, placementId: pid };
+        }
         this.liveStatLedger.set(event.cardId, event);
         this.lastPersistedStatFingerprint.set(event.cardId, eventFingerprint(event));
-        if (event.placementId) this.knownPlacementIds.add(event.placementId);
+        if (pid) this.knownPlacementIds.add(pid);
         const card = positionCardFromEvent(event);
         if (card) {
           restored.push(card);
@@ -732,15 +755,98 @@ export class LiveTradingService {
       restored.sort((a, b) => (b.buyAt ?? 0) - (a.buyAt ?? 0));
       this.positionCards = [...openCards, ...restored].slice(0, 100);
       this.statsHydrated = true;
+
+      const backfilled = await this.backfillOrphanPlacementIds();
       logService.info(
         "trading",
-        `Hydrated ${events.length} live stat event(s) from Mongo (${restored.length} position card(s), ${this.knownPlacementIds.size} placement(s))`,
+        `Hydrated ${events.length} live stat event(s) from Mongo (${restored.length} position card(s), ${this.knownPlacementIds.size} placement(s)${
+          backfilled > 0 ? `, backfilled ${backfilled} placementId(s)` : ""
+        })`,
       );
       await this.syncActivatedSchedulePlacements();
       this.ensureConfirmLoop();
     } catch (err) {
       logService.warn("trading", `Failed to hydrate live stats from Mongo: ${String(err)}`);
     }
+  }
+
+  /**
+   * Map settled trades that never got a placementId (late GTD fills, wiped upserts)
+   * onto the schedule slot that was live at buy time so card stats match Live totals.
+   */
+  private async backfillOrphanPlacementIds(): Promise<number> {
+    let placements: Awaited<ReturnType<typeof listSchedulePlacements>>;
+    try {
+      placements = await listSchedulePlacements(this.userId, this.boundSeries);
+    } catch {
+      return 0;
+    }
+    if (placements.length === 0) return 0;
+
+    const findPlacementAt = (atMs: number): string | undefined => {
+      if (!Number.isFinite(atMs)) return undefined;
+      const clock = getUtcScheduleClock(new Date(atMs));
+      const match = placements.find(
+        (p) =>
+          p.day === clock.day &&
+          clock.hour >= p.startHour &&
+          clock.hour < p.startHour + p.durationHours,
+      );
+      return match?._id;
+    };
+
+    let fixed = 0;
+    for (const event of this.liveStatLedger.values()) {
+      if (eventPlacementId(event)) continue;
+      const placementId = findPlacementAt(eventAttributionMs(event));
+      if (!placementId) continue;
+
+      event.placementId = placementId;
+      if (event.card) {
+        event.card = { ...event.card, placementId };
+      }
+      this.knownPlacementIds.add(placementId);
+
+      const ramCard = this.findCard(event.cardId);
+      if (ramCard && !ramCard.placementId) ramCard.placementId = placementId;
+
+      this.lastPersistedStatFingerprint.set(event.cardId, eventFingerprint(event));
+      const snapshot: TradingStatEvent = {
+        cardId: event.cardId,
+        placementId: event.placementId,
+        status: event.status,
+        green: event.green,
+        red: event.red,
+        blue: event.blue,
+        pnl: event.pnl,
+        settledAt: event.settledAt,
+        updatedAt: event.updatedAt,
+        card: event.card,
+      };
+      this.statsPersistChain = this.statsPersistChain
+        .then(() =>
+          upsertTradingStatEvent(this.userId, {
+            cardId: snapshot.cardId,
+            placementId: snapshot.placementId,
+            status: snapshot.status,
+            green: snapshot.green,
+            red: snapshot.red,
+            blue: snapshot.blue,
+            pnl: snapshot.pnl,
+            settledAt: snapshot.settledAt,
+            card: snapshot.card,
+          }).then(() => undefined),
+        )
+        .catch((err) => {
+          this.lastPersistedStatFingerprint.delete(snapshot.cardId);
+          logService.warn(
+            "trading",
+            `Failed to persist backfilled placementId for ${snapshot.cardId}: ${String(err)}`,
+          );
+        });
+      fixed += 1;
+    }
+    return fixed;
   }
 
   /** Mark a schedule placement as live this session so cards show 0/0/0 until the first fill. */
@@ -848,7 +954,8 @@ export class LiveTradingService {
     // Fill gaps between slots that actually have fills (still not before floor).
     const eventPlacementIds = new Set<string>();
     for (const event of this.liveStatLedger.values()) {
-      if (event.placementId) eventPlacementIds.add(event.placementId);
+      const pid = eventPlacementId(event);
+      if (pid) eventPlacementIds.add(pid);
     }
     const seedKeys = keyed
       .filter(({ p, key }) => {
@@ -1101,7 +1208,7 @@ export class LiveTradingService {
 
   private placementHasRecordedStats(placementId: string): boolean {
     for (const event of this.liveStatLedger.values()) {
-      if (event.placementId !== placementId) continue;
+      if (eventPlacementId(event) !== placementId) continue;
       if (!this.eventMatchesBoundSeries(event)) continue;
       return true;
     }
@@ -1117,7 +1224,8 @@ export class LiveTradingService {
   private getPlacementStatsFromCards(): PlacementLiveStats[] {
     const ids = new Set(this.knownPlacementIds);
     for (const event of this.liveStatLedger.values()) {
-      if (event.placementId) ids.add(event.placementId);
+      const pid = eventPlacementId(event);
+      if (pid) ids.add(pid);
     }
     for (const card of this.positionCards) {
       if (card.placementId) ids.add(card.placementId);
@@ -1199,7 +1307,7 @@ export class LiveTradingService {
     }
 
     for (const event of this.liveStatLedger.values()) {
-      if (event.placementId !== placementId) continue;
+      if (eventPlacementId(event) !== placementId) continue;
       if (!this.eventMatchesBoundSeries(event)) continue;
       if (cardIdsFromRam.has(event.cardId)) continue;
       const contrib = eventStatContribution(event);
@@ -1252,7 +1360,7 @@ export class LiveTradingService {
     const before = this.positionCards.length;
     this.positionCards = this.positionCards.filter((card) => card.placementId !== placementId);
     for (const [cardId, event] of this.liveStatLedger) {
-      if (event.placementId === placementId) {
+      if (eventPlacementId(event) === placementId) {
         this.liveStatLedger.delete(cardId);
         this.lastPersistedStatFingerprint.delete(cardId);
       }
@@ -2242,6 +2350,7 @@ export class LiveTradingService {
         "auto",
         resting.cardId,
         resting.phaseIdx,
+        { placementId: resting.placementId },
       );
       // Fully matched → nothing left to cancel.
       const status = snap.status.toLowerCase();
@@ -2649,6 +2758,7 @@ export class LiveTradingService {
         tokenId: result.tokenId,
         conditionId: result.conditionId,
         slug: result.slug,
+        placementId: this.scheduleContext?.placementId,
       };
       this.notify();
     } finally {
@@ -2697,6 +2807,7 @@ export class LiveTradingService {
         "auto",
         resting.cardId,
         resting.phaseIdx,
+        { placementId: resting.placementId },
       );
       const pos = this.positions[resting.side];
       resting.cardId = pos?.cardId ?? resting.cardId;
@@ -2985,9 +3096,13 @@ export class LiveTradingService {
     source: "manual" | "auto",
     existingCardId?: string,
     buyPhaseIdx?: number,
-    opts?: { holdToSettlement?: boolean },
+    opts?: { holdToSettlement?: boolean; placementId?: string },
   ): Promise<void> {
     const holdToSettlement = Boolean(opts?.holdToSettlement);
+    const resolvedPlacementId =
+      source === "auto" && this.config.useSchedule
+        ? opts?.placementId ?? this.scheduleContext?.placementId
+        : undefined;
     const nowSec = Math.floor(Date.now() / 1000);
     const cost = usdcAmount ?? fillShares * fillPrice;
     const buyFees = await estimateLiveTakerFee(this.userId, tokenId, fillShares, fillPrice);
@@ -3004,6 +3119,9 @@ export class LiveTradingService {
       );
 
     if (existing && existing.status === "open") {
+      if (!existing.placementId && resolvedPlacementId) {
+        existing.placementId = resolvedPlacementId;
+      }
       if (!this.positions[side]) {
         this.positions[side] = {
           shares: existing.shares,
@@ -3078,17 +3196,10 @@ export class LiveTradingService {
         conditionId,
         slug,
         confirmed: false,
-        placementId:
-          source === "auto" && this.config.useSchedule
-            ? this.scheduleContext?.placementId
-            : undefined,
+        placementId: resolvedPlacementId,
       });
-      if (
-        source === "auto" &&
-        this.config.useSchedule &&
-        this.scheduleContext?.placementId
-      ) {
-        this.rememberActivatedPlacement(this.scheduleContext.placementId);
+      if (resolvedPlacementId) {
+        this.rememberActivatedPlacement(resolvedPlacementId);
       }
       if (this.positionCards.length > 100) {
         this.positionCards.length = 100;

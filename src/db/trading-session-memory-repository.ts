@@ -364,8 +364,22 @@ export async function upsertTradingStatEvent(
     updatedAt: now,
   };
   if (event.placementId) doc.placementId = event.placementId;
-  if (event.card) doc.card = event.card;
-  else if (existing?.card) doc.card = existing.card;
+  else if (existing?.placementId) doc.placementId = existing.placementId;
+  if (event.card) {
+    doc.card = event.card;
+    // Keep previously stored placement id on the card snapshot when a rewrite omits it.
+    if (!doc.card.placementId && existing?.card?.placementId) {
+      doc.card = { ...doc.card, placementId: existing.card.placementId };
+    }
+    if (!doc.placementId && doc.card.placementId) {
+      doc.placementId = doc.card.placementId;
+    }
+  } else if (existing?.card) {
+    doc.card = existing.card;
+    if (!doc.placementId && existing.card.placementId) {
+      doc.placementId = existing.card.placementId;
+    }
+  }
 
   await col.replaceOne({ _id: event.cardId, userId }, doc, { upsert: true });
 
