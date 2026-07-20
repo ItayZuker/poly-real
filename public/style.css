@@ -1039,6 +1039,26 @@ body.is-schedule-resizing {
   opacity: 0;
 }
 
+.schedule-placement-card.is-locked .schedule-placement-drag-handle {
+  cursor: default;
+  pointer-events: none;
+}
+
+.schedule-placement-card.is-locked .schedule-placement-drag-handle.is-lock-icon svg {
+  width: 11px;
+  height: 13px;
+}
+
+.schedule-placement-card.is-locked .schedule-placement-resize,
+.schedule-placement-card.is-locked .schedule-placement-resize::before {
+  pointer-events: none;
+  opacity: 0;
+}
+
+.schedule-placement-card.is-locked:not(.is-framed):hover .schedule-placement-resize::before {
+  opacity: 0;
+}
+
 .schedule-placement-loading {
   position: absolute;
   inset: 0;

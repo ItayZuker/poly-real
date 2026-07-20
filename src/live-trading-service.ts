@@ -279,6 +279,32 @@ function eventStatIdentity(event: TradingStatEvent): string | null {
   return event.card ? cardStatIdentity(event.card) : null;
 }
 
+/** Parse market window key to unix seconds (`1784536500` or `btc-5m:1784536500`). */
+function windowKeyUnixSec(windowKey: string | undefined | null): number {
+  if (windowKey == null || windowKey === "") return NaN;
+  const raw = String(windowKey).trim();
+  const colon = raw.lastIndexOf(":");
+  const tail = colon >= 0 ? raw.slice(colon + 1) : raw;
+  const n = Number(tail);
+  if (Number.isFinite(n) && n > 0) {
+    // ms timestamps are >> 1e12
+    return n > 1e12 ? n / 1000 : n;
+  }
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms / 1000 : NaN;
+}
+
+/** UTC ISO week key (YYYY-Www) — groups one weekly “run” of a schedule card. */
+function utcIsoWeekKey(unixSec: number): string {
+  const date = new Date(unixSec * 1000);
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNum = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((target.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${target.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
+}
+
 function totalTradeFees(card: Pick<TradingPositionCard, "buyFees" | "sellFees">): number {
   return (card.buyFees ?? 0) + (card.sellFees ?? 0);
 }
@@ -997,9 +1023,17 @@ export class LiveTradingService {
     return !series || series === this.boundSeries;
   }
 
-  /** Aggregate real-trade outcomes for schedule placement cards. */
+  /** Aggregate real-trade outcomes for schedule placement cards (last weekly run only). */
   getPlacementStats(placementIds: string[]): PlacementLiveStats[] {
     return placementIds.map((id) => this.statsForPlacement(id));
+  }
+
+  /** True once the card has started at least one window — stays locked until removed. */
+  isPlacementLocked(placementId: string): boolean {
+    if (!placementId) return false;
+    if (this.knownPlacementIds.has(placementId)) return true;
+    if (this.scheduleContext?.placementId === placementId) return true;
+    return false;
   }
 
   private getPlacementStatsFromCards(): PlacementLiveStats[] {
@@ -1025,6 +1059,7 @@ export class LiveTradingService {
       red: 0,
       blue: 0,
       pnl: 0,
+      locked: this.isPlacementLocked(placementId),
     };
   }
 
@@ -1037,17 +1072,43 @@ export class LiveTradingService {
       red: 0,
       blue: 0,
       pnl: 0,
+      locked: this.isPlacementLocked(placementId),
     };
   }
 
   private statsForPlacement(placementId: string): PlacementLiveStats {
-    let green = 0;
-    let red = 0;
-    let blue = 0;
-    let pnl = 0;
-    let hasData = false;
+    type RunHit = {
+      weekKey: string;
+      windowSec: number;
+      identity: string | null;
+      contrib: { green: number; red: number; blue: number; pnl: number };
+    };
+    const hits: RunHit[] = [];
     const cardIdsFromRam = new Set<string>();
     const tradeIdentities = new Set<string>();
+
+    const pushHit = (
+      windowKey: string | undefined,
+      identity: string | null,
+      contrib: { green: number; red: number; blue: number; pnl: number },
+      fallbackUnixSec?: number,
+    ): void => {
+      let windowSec = windowKeyUnixSec(windowKey);
+      if (!Number.isFinite(windowSec) && fallbackUnixSec != null && Number.isFinite(fallbackUnixSec)) {
+        windowSec = fallbackUnixSec > 1e12 ? fallbackUnixSec / 1000 : fallbackUnixSec;
+      }
+      if (!Number.isFinite(windowSec)) return;
+      if (identity) {
+        if (tradeIdentities.has(identity)) return;
+        tradeIdentities.add(identity);
+      }
+      hits.push({
+        weekKey: utcIsoWeekKey(windowSec),
+        windowSec,
+        identity,
+        contrib,
+      });
+    };
 
     for (const card of this.positionCards) {
       if (card.placementId !== placementId) continue;
@@ -1055,15 +1116,8 @@ export class LiveTradingService {
       if (card.status === "open") continue;
       const contrib = confirmedContributionFromCard(card);
       if (!contrib) continue;
-      const identity = cardStatIdentity(card);
-      if (identity && tradeIdentities.has(identity)) continue;
-      if (identity) tradeIdentities.add(identity);
       cardIdsFromRam.add(card.id);
-      hasData = true;
-      green += contrib.green;
-      red += contrib.red;
-      blue += contrib.blue;
-      pnl += contrib.pnl;
+      pushHit(card.windowKey, cardStatIdentity(card), contrib, card.soldAt ?? card.buyAt);
     }
 
     for (const event of this.liveStatLedger.values()) {
@@ -1072,24 +1126,45 @@ export class LiveTradingService {
       if (cardIdsFromRam.has(event.cardId)) continue;
       const contrib = eventStatContribution(event);
       if (!contrib) continue;
-      const identity = eventStatIdentity(event);
-      if (identity && tradeIdentities.has(identity)) continue;
-      if (identity) tradeIdentities.add(identity);
-      hasData = true;
-      green += contrib.green;
-      red += contrib.red;
-      blue += contrib.blue;
-      pnl += contrib.pnl;
+      const settledSec = eventSettledMs(event);
+      pushHit(
+        event.card?.windowKey,
+        eventStatIdentity(event),
+        contrib,
+        Number.isFinite(settledSec) ? settledSec / 1000 : undefined,
+      );
     }
 
-    if (!hasData) {
+    const locked = this.isPlacementLocked(placementId);
+
+    if (hits.length === 0) {
       const liveArmedSlot =
         this.config.startTrading && this.scheduleContext?.placementId === placementId;
-      return this.knownPlacementIds.has(placementId) || liveArmedSlot
-        ? this.zeroPlacementStats(placementId)
-        : this.emptyPlacementStats(placementId);
+      if (this.knownPlacementIds.has(placementId) || liveArmedSlot) {
+        return this.zeroPlacementStats(placementId);
+      }
+      return this.emptyPlacementStats(placementId);
     }
-    return { placementId, hasData: true, green, red, blue, pnl };
+
+    let latest = hits[0]!;
+    for (const hit of hits) {
+      if (hit.windowSec > latest.windowSec) latest = hit;
+    }
+    const lastWeek = latest.weekKey;
+
+    let green = 0;
+    let red = 0;
+    let blue = 0;
+    let pnl = 0;
+    for (const hit of hits) {
+      if (hit.weekKey !== lastWeek) continue;
+      green += hit.contrib.green;
+      red += hit.contrib.red;
+      blue += hit.contrib.blue;
+      pnl += hit.contrib.pnl;
+    }
+
+    return { placementId, hasData: true, green, red, blue, pnl, locked };
   }
 
   /** Clears trades tied to a removed schedule placement (stats drop with them). */

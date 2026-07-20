@@ -437,6 +437,8 @@ export interface PlacementLiveStats {
   red: number;
   blue: number;
   pnl: number;
+  /** True once the placement has started at least one window (locked until removed). */
+  locked: boolean;
 }
 
 export interface TradingPublicState {

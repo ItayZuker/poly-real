@@ -1049,7 +1049,12 @@ app.post("/api/schedule-placements/apply-setup", async (req, res) => {
 app.patch("/api/schedule-placements/:id", async (req, res) => {
   try {
     const userId = requireUserId(req);
-    const updated = await updateSchedulePlacement(userId, req.params.id, {
+    const placementId = String(req.params.id);
+    if (tradingFor(req).isPlacementLocked(placementId)) {
+      res.status(409).json({ error: "Placement is locked after its first window started" });
+      return;
+    }
+    const updated = await updateSchedulePlacement(userId, placementId, {
       day: req.body?.day != null ? String(req.body.day) : undefined,
       startHour: req.body?.startHour != null ? Number(req.body.startHour) : undefined,
       durationHours: req.body?.durationHours != null ? Number(req.body.durationHours) : undefined,

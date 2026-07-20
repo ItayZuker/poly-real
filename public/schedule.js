@@ -32,6 +32,8 @@
   let headerFillPreviewDay = null;
   const busyDays = new Set();
   let framedPlacementIds = new Set();
+  /** Placements that have started ≥1 window — locked until removed. */
+  let lockedPlacementIds = new Set();
   /** Pinned UTC hour rows (0–23). */
   let pinnedUtcHours = new Set();
   /** Transient UTC hour under the pointer, or null when not hovering the column. */
@@ -1051,6 +1053,7 @@
     return [
       stats.placementId,
       stats.hasData === true ? 1 : 0,
+      stats.locked === true ? 1 : 0,
       stats.green ?? 0,
       stats.red ?? 0,
       stats.blue ?? 0,
@@ -1084,9 +1087,13 @@
       let changed = false;
       for (const stats of statsList) {
         if (!stats?.placementId) continue;
+        if (stats.locked === true) lockedPlacementIds.add(stats.placementId);
         const prev = placementStats.get(stats.placementId);
         if (!shouldApplyPlacementStats(prev, stats)) continue;
-        placementStats.set(stats.placementId, stats);
+        placementStats.set(stats.placementId, {
+          ...stats,
+          locked: stats.locked === true || lockedPlacementIds.has(stats.placementId),
+        });
         changed = true;
       }
       if (changed) applyCardStatsStates();
@@ -1516,6 +1523,7 @@
       const hasData = showValues && stats?.hasData === true;
 
       applyCardStatsVisualState(card, placementId);
+      syncPlacementLockUi(card, placementId);
 
       let overlay = card.querySelector(".schedule-placement-loading");
       const isLoading = cardStatsShowLoading(placementId);
@@ -1590,9 +1598,13 @@
       if (signal.aborted) return;
 
       for (const stat of stats) {
+        if (stat?.locked === true) lockedPlacementIds.add(stat.placementId);
         const prev = placementStats.get(stat.placementId);
         if (!shouldApplyPlacementStats(prev, stat)) continue;
-        placementStats.set(stat.placementId, stat);
+        placementStats.set(stat.placementId, {
+          ...stat,
+          locked: stat.locked === true || lockedPlacementIds.has(stat.placementId),
+        });
       }
       statsPendingIds.clear();
     } catch (err) {
@@ -1617,6 +1629,7 @@
   async function scheduleStatsRefresh(options = {}) {
     if (placements.length === 0) {
       placementStats.clear();
+      lockedPlacementIds.clear();
       statsPendingIds.clear();
       statsBatchFetching = false;
       applyCardStatsStates();
@@ -1811,6 +1824,36 @@
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   }
 
+  function isPlacementLocked(placementId) {
+    if (!placementId) return false;
+    if (lockedPlacementIds.has(placementId)) return true;
+    return placementStats.get(placementId)?.locked === true;
+  }
+
+  const PLACEMENT_DRAG_HANDLE_SVG =
+    '<svg viewBox="0 0 8 14" aria-hidden="true"><circle cx="2" cy="2" r="1.2" fill="currentColor"/><circle cx="6" cy="2" r="1.2" fill="currentColor"/><circle cx="2" cy="7" r="1.2" fill="currentColor"/><circle cx="6" cy="7" r="1.2" fill="currentColor"/><circle cx="2" cy="12" r="1.2" fill="currentColor"/><circle cx="6" cy="12" r="1.2" fill="currentColor"/></svg>';
+  const PLACEMENT_LOCK_HANDLE_SVG =
+    '<svg viewBox="0 0 12 14" aria-hidden="true"><path fill="currentColor" d="M6 1.5a2.75 2.75 0 0 0-2.75 2.75V6H2.5A1.5 1.5 0 0 0 1 7.5v4A1.5 1.5 0 0 0 2.5 13h7A1.5 1.5 0 0 0 11 11.5v-4A1.5 1.5 0 0 0 9.5 6H8.75V4.25A2.75 2.75 0 0 0 6 1.5zm-1.25 2.75A1.25 1.25 0 0 1 6 3a1.25 1.25 0 0 1 1.25 1.25V6h-2.5V4.25z"/></svg>';
+
+  function syncPlacementLockUi(card, placementId) {
+    if (!card) return;
+    const locked = isPlacementLocked(placementId);
+    card.classList.toggle("is-locked", locked);
+    const handle = card.querySelector(".schedule-placement-drag-handle");
+    if (!handle) return;
+    if (locked) {
+      handle.classList.add("is-lock-icon");
+      handle.setAttribute("aria-label", "Locked after first window");
+      handle.title = "Locked — started at least one window";
+      handle.innerHTML = PLACEMENT_LOCK_HANDLE_SVG;
+    } else {
+      handle.classList.remove("is-lock-icon");
+      handle.setAttribute("aria-label", "Drag to move");
+      handle.title = "Drag to move";
+      handle.innerHTML = PLACEMENT_DRAG_HANDLE_SVG;
+    }
+  }
+
   function buildPlacementCard(placement) {
     const endHour = placement.startHour + placement.durationHours;
     const dayOthers = placements.filter((x) => x.day === placement.day && x._id !== placement._id);
@@ -1820,6 +1863,7 @@
     const card = document.createElement("div");
     const isShort = placement.durationHours < 2;
     const isCompact = placement.durationHours < 1.5;
+    const locked = isPlacementLocked(placement._id);
     card.className = "schedule-placement-card";
     if (hasPlacementAbove) card.classList.add("has-placement-above");
     if (hasPlacementBelow) card.classList.add("has-placement-below");
@@ -1827,6 +1871,7 @@
     if (isCompact) card.classList.add("is-compact");
     if (moveDragState?.placementId === placement._id) card.classList.add("is-move-source");
     if (framedPlacementIds.has(placement._id)) card.classList.add("is-framed");
+    if (locked) card.classList.add("is-locked");
     card.dataset.placementId = placement._id;
     card.dataset.setupId = placement.setupId;
     card.style.top = `${(placement.startHour / 24) * 100}%`;
@@ -1837,11 +1882,17 @@
 
     const dragHandle = document.createElement("div");
     dragHandle.className = "schedule-placement-drag-handle";
-    dragHandle.setAttribute("aria-label", "Drag to move");
-    dragHandle.title = "Drag to move";
-    dragHandle.innerHTML =
-      '<svg viewBox="0 0 8 14" aria-hidden="true"><circle cx="2" cy="2" r="1.2" fill="currentColor"/><circle cx="6" cy="2" r="1.2" fill="currentColor"/><circle cx="2" cy="7" r="1.2" fill="currentColor"/><circle cx="6" cy="7" r="1.2" fill="currentColor"/><circle cx="2" cy="12" r="1.2" fill="currentColor"/><circle cx="6" cy="12" r="1.2" fill="currentColor"/></svg>';
-    dragHandle.addEventListener("mousedown", (e) => startMoveDrag(e, placement._id));
+    if (locked) {
+      dragHandle.classList.add("is-lock-icon");
+      dragHandle.setAttribute("aria-label", "Locked after first window");
+      dragHandle.title = "Locked — started at least one window";
+      dragHandle.innerHTML = PLACEMENT_LOCK_HANDLE_SVG;
+    } else {
+      dragHandle.setAttribute("aria-label", "Drag to move");
+      dragHandle.title = "Drag to move";
+      dragHandle.innerHTML = PLACEMENT_DRAG_HANDLE_SVG;
+      dragHandle.addEventListener("mousedown", (e) => startMoveDrag(e, placement._id));
+    }
 
     const cardBody = document.createElement("div");
     cardBody.className = "schedule-placement-card-body";
@@ -1980,6 +2031,7 @@
   function removePlacementFromCache(placementId) {
     removeFromStatsPending(placementId);
     placementStats.delete(placementId);
+    lockedPlacementIds.delete(placementId);
     const cache = readStatsCache();
     if (!cache.entries?.[placementId]) return;
     delete cache.entries[placementId];
@@ -2037,6 +2089,7 @@
   function startResize(e, placementId, edge) {
     if (!isScheduleView()) return;
     if (framedPlacementIds.has(placementId)) return;
+    if (isPlacementLocked(placementId)) return;
     e.preventDefault();
     e.stopPropagation();
     const placement = placements.find((p) => p._id === placementId);
@@ -2112,6 +2165,7 @@
   function startMoveDrag(e, placementId) {
     if (!isScheduleView()) return;
     if (framedPlacementIds.has(placementId)) return;
+    if (isPlacementLocked(placementId)) return;
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
