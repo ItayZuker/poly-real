@@ -747,6 +747,11 @@ export class LiveTradingService {
         }
         const endKey = key + p.durationHours;
         if (endKey <= floorKey + 1e-9) {
+          // Keep cards that already have live outcomes — they stay locked on the board.
+          if (this.placementHasRecordedStats(p._id)) {
+            keep.push(p._id);
+            continue;
+          }
           this.knownPlacementIds.delete(p._id);
           pruned = true;
         } else {
@@ -1033,6 +1038,23 @@ export class LiveTradingService {
     if (!placementId) return false;
     if (this.knownPlacementIds.has(placementId)) return true;
     if (this.scheduleContext?.placementId === placementId) return true;
+    // Any recorded live outcome for this card locks it (incl. after activation prune).
+    if (this.placementHasRecordedStats(placementId)) return true;
+    return false;
+  }
+
+  private placementHasRecordedStats(placementId: string): boolean {
+    for (const event of this.liveStatLedger.values()) {
+      if (event.placementId !== placementId) continue;
+      if (!this.eventMatchesBoundSeries(event)) continue;
+      return true;
+    }
+    for (const card of this.positionCards) {
+      if (card.placementId !== placementId) continue;
+      if (!this.cardMatchesBoundSeries(card)) continue;
+      if (card.status === "open") continue;
+      return true;
+    }
     return false;
   }
 
@@ -1072,7 +1094,7 @@ export class LiveTradingService {
       red: 0,
       blue: 0,
       pnl: 0,
-      locked: this.isPlacementLocked(placementId),
+      locked: true,
     };
   }
 
@@ -1135,8 +1157,6 @@ export class LiveTradingService {
       );
     }
 
-    const locked = this.isPlacementLocked(placementId);
-
     if (hits.length === 0) {
       const liveArmedSlot =
         this.config.startTrading && this.scheduleContext?.placementId === placementId;
@@ -1145,6 +1165,9 @@ export class LiveTradingService {
       }
       return this.emptyPlacementStats(placementId);
     }
+
+    // Any card with recorded outcomes is locked until removed.
+    this.rememberActivatedPlacement(placementId, { quiet: true });
 
     let latest = hits[0]!;
     for (const hit of hits) {
@@ -1164,7 +1187,7 @@ export class LiveTradingService {
       pnl += hit.contrib.pnl;
     }
 
-    return { placementId, hasData: true, green, red, blue, pnl, locked };
+    return { placementId, hasData: true, green, red, blue, pnl, locked: true };
   }
 
   /** Clears trades tied to a removed schedule placement (stats drop with them). */

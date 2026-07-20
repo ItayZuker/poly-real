@@ -690,7 +690,12 @@
     for (const placement of placements) {
       if (idSet && !idSet.has(placement._id)) continue;
       const cached = cachedStatsForPlacement(placement);
-      if (cached) placementStats.set(placement._id, cached);
+      if (!cached) continue;
+      placementStats.set(placement._id, cached);
+      if (cached.locked === true || cached.hasData === true) {
+        lockedPlacementIds.add(placement._id);
+        placementStats.set(placement._id, { ...cached, locked: true });
+      }
     }
   }
 
@@ -1087,12 +1092,17 @@
       let changed = false;
       for (const stats of statsList) {
         if (!stats?.placementId) continue;
-        if (stats.locked === true) lockedPlacementIds.add(stats.placementId);
+        if (stats.locked === true || stats.hasData === true) {
+          lockedPlacementIds.add(stats.placementId);
+        }
         const prev = placementStats.get(stats.placementId);
         if (!shouldApplyPlacementStats(prev, stats)) continue;
         placementStats.set(stats.placementId, {
           ...stats,
-          locked: stats.locked === true || lockedPlacementIds.has(stats.placementId),
+          locked:
+            stats.locked === true ||
+            stats.hasData === true ||
+            lockedPlacementIds.has(stats.placementId),
         });
         changed = true;
       }
@@ -1598,12 +1608,17 @@
       if (signal.aborted) return;
 
       for (const stat of stats) {
-        if (stat?.locked === true) lockedPlacementIds.add(stat.placementId);
+        if (stat?.locked === true || stat?.hasData === true) {
+          lockedPlacementIds.add(stat.placementId);
+        }
         const prev = placementStats.get(stat.placementId);
         if (!shouldApplyPlacementStats(prev, stat)) continue;
         placementStats.set(stat.placementId, {
           ...stat,
-          locked: stat.locked === true || lockedPlacementIds.has(stat.placementId),
+          locked:
+            stat.locked === true ||
+            stat.hasData === true ||
+            lockedPlacementIds.has(stat.placementId),
         });
       }
       statsPendingIds.clear();
@@ -1827,7 +1842,8 @@
   function isPlacementLocked(placementId) {
     if (!placementId) return false;
     if (lockedPlacementIds.has(placementId)) return true;
-    return placementStats.get(placementId)?.locked === true;
+    const stats = placementStats.get(placementId);
+    return stats?.locked === true || stats?.hasData === true;
   }
 
   const PLACEMENT_DRAG_HANDLE_SVG =
