@@ -182,7 +182,7 @@
       ),
       sellProfitCents: Math.max(
         1,
-        Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
+        Math.min(100, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
       ),
     };
   }
@@ -309,6 +309,22 @@
     input.value = String(value);
     const off = value === 0;
     text.textContent = off ? "Abort on crossing off" : "Abort on crossing";
+    label.classList.toggle("is-none", off);
+    input.disabled = locked;
+  }
+
+  function syncSellProfitLabel(formLocked = false) {
+    const input = document.getElementById("phase-sell-profit");
+    const text = document.getElementById("phase-sell-profit-text");
+    const label = document.getElementById("phase-sell-profit-label");
+    if (!input || !text || !label) return;
+    const locked = formLocked === true || isPhaseModalReadOnly();
+    let value = Math.floor(Number(input.value));
+    if (!Number.isFinite(value) || value < 1) value = 1;
+    value = Math.min(100, value);
+    input.value = String(value);
+    const off = value >= 100;
+    text.textContent = off ? "Profit from buy (¢) off" : "Profit from buy (¢)";
     label.classList.toggle("is-none", off);
     input.disabled = locked;
   }
@@ -824,7 +840,10 @@
         Math.floor(Number(document.getElementById("phase-abort-on-crossing").value)) || 0,
       ),
     );
-    cfg.sellProfitCents = Number(document.getElementById("phase-sell-profit").value) || 20;
+    cfg.sellProfitCents = Math.max(
+      1,
+      Math.min(100, Math.floor(Number(document.getElementById("phase-sell-profit").value)) || 20),
+    );
     delete cfg.sellOptimize;
     setup.phases[phaseIdx] = normalizePhase(cfg);
   }
@@ -928,6 +947,7 @@
     if (buySection) buySection.classList.toggle("is-buy-disabled", !enabled);
     syncTriggerOrderTypeLabel();
     syncGapLabels(locked || !enabled);
+    syncSellProfitLabel(locked);
   }
 
   async function savePhaseModal() {
@@ -1105,6 +1125,9 @@
       syncAbortOnCrossingLabel(
         isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked,
       );
+    });
+    document.getElementById("phase-sell-profit").addEventListener("input", () => {
+      syncSellProfitLabel(isPhaseModalReadOnly());
     });
     document.getElementById("phase-gap-vs-ptb").addEventListener("change", (e) => {
       rememberGapVsPtbValue(e.currentTarget);

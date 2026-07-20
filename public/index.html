@@ -799,9 +799,13 @@
         </section>
         <section class="modal-section">
           <h3>Sell</h3>
-          <label class="modal-field">
-            <span>Profit from buy (¢)</span>
-            <input type="number" id="phase-sell-profit" min="1" max="99" step="1" value="20" />
+          <label
+            class="modal-field"
+            id="phase-sell-profit-label"
+            title="100 = off. Hold the position to settlement (no sell) for buys filled in this phase."
+          >
+            <span id="phase-sell-profit-text">Profit from buy (¢)</span>
+            <input type="number" id="phase-sell-profit" min="1" max="100" step="1" value="20" />
           </label>
         </section>
       </div>

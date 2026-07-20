@@ -10,7 +10,7 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
-import { gapAllowsBuy, priceToCents, SIDES_ORDER, stabilizeAllowsBuyForSide } from "./phase-config.js";
+import { gapAllowsBuy, priceToCents, sellEnabledForPhase, SIDES_ORDER, stabilizeAllowsBuyForSide } from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -701,6 +701,7 @@ export class SimulatorEngine {
 
   private startSellWatch(phase: SimSetup["phases"][number]): void {
     if (!this.position || this.sellWatch) return;
+    if (!sellEnabledForPhase(phase)) return;
     const target = this.position.buyPrice + centsToPrice(phase.sellProfitCents);
     this.sellWatch = { target };
     logService.info("sim", `Sell watch started, limit ${fmtCents(target)}`);
@@ -1089,8 +1090,10 @@ export class SimulatorEngine {
       this.tickBuyWatch(quote, nowSec, state, setup, simNowMs);
     } else if (this.position && !this.sellsSuppressed) {
       const sellPhase = setup.phases[this.position.phaseIndex];
-      if (!this.sellWatch) this.startSellWatch(sellPhase);
-      this.tickSellWatch(quote, nowSec, state, setup, simNowMs);
+      if (sellEnabledForPhase(sellPhase)) {
+        if (!this.sellWatch) this.startSellWatch(sellPhase);
+        this.tickSellWatch(quote, nowSec, state, setup, simNowMs);
+      }
     }
   }
 }

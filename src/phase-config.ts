@@ -83,9 +83,14 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     ),
     sellProfitCents: Math.max(
       1,
-      Math.min(99, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
+      Math.min(100, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
     ),
   };
+}
+
+/** False when profit-from-buy is 100 (hold to settlement, no sell). */
+export function sellEnabledForPhase(phase: Pick<SimPhaseConfig, "sellProfitCents">): boolean {
+  return Math.floor(Number(phase.sellProfitCents)) < 100;
 }
 
 export function normalizeTradingPhaseSetup(setup: TradingPhaseSetup): TradingPhaseSetup | null {

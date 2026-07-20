@@ -249,7 +249,10 @@ export interface SimPhaseConfig {
    * 0 = off; clamped 0–1000.
    */
   buyAbortOnCrossing: number;
-  /** Sell limit = buy + this many cents. */
+  /**
+   * Sell limit = buy + this many cents.
+   * 100 = off (hold to settlement, no sell). Clamped 1–100.
+   */
   sellProfitCents: number;
 }
 

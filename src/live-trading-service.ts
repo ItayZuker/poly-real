@@ -62,6 +62,7 @@ import {
   gapAllowsBuy,
   gtdExpirationUnix,
   phaseIndexForState,
+  sellEnabledForPhase,
   SIDES_ORDER,
   stabilizeAllowsBuyForSide,
 } from "./phase-config.js";
@@ -2183,6 +2184,13 @@ export class LiveTradingService {
       if (this.restingSell) await this.cancelRestingSell("no position");
       return;
     }
+    const pos = this.positions[side];
+    const phaseIdx = Math.max(0, Math.min(2, pos?.buyPhaseIdx ?? 0));
+    const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+    if (!sellEnabledForPhase(phase)) {
+      if (this.restingSell) await this.cancelRestingSell("sell disabled");
+      return;
+    }
     if (this.restingSell) {
       await this.pollRestingSell(state);
       if (this.restingSell) return;
@@ -2204,6 +2212,7 @@ export class LiveTradingService {
 
     const phaseIdx = Math.max(0, Math.min(2, pos.buyPhaseIdx ?? 0));
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
+    if (!sellEnabledForPhase(phase)) return;
     const limitPrice = Math.min(0.99, Math.max(0.01, pos.avgPrice + centsToPrice(phase.sellProfitCents)));
     const shares = Math.max(1, Math.floor(pos.shares));
     const key = sessionKey(state);
