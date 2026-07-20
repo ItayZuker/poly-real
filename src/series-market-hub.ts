@@ -129,7 +129,7 @@ class SeriesFeed {
         this.state.bookTickSequence = 0;
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
-        this.state.priceToBeatSource = undefined;
+        // Keep prevCloseAsset / priceToBeatSource until Polymarket open arrives.
       }
 
       this.state.series = this.series;
@@ -149,10 +149,18 @@ class SeriesFeed {
       try {
         const prices = await getPolymarketWindowAssetPricesForPair(asset, timeframe, pair);
         const live = applyRtdsLivePrice(asset, prices);
-        this.state.prevCloseAsset = live.prevCloseAsset;
-        this.state.assetPrice = live.assetPrice;
-        this.state.assetGap = live.assetGap;
-        this.state.priceToBeatSource = live.priceToBeatSource;
+        if (live.prevCloseAsset != null) {
+          this.state.prevCloseAsset = live.prevCloseAsset;
+          this.state.priceToBeatSource = live.priceToBeatSource;
+        }
+        if (live.assetPrice != null) {
+          this.state.assetPrice = live.assetPrice;
+        }
+        if (this.state.assetPrice != null && this.state.prevCloseAsset != null) {
+          this.state.assetGap = this.state.assetPrice - this.state.prevCloseAsset;
+        } else {
+          this.state.assetGap = live.assetGap;
+        }
       } catch {
         const live = chainlinkPriceFeed.getLivePrice(asset);
         if (live) {

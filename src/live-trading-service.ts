@@ -2222,9 +2222,11 @@ export class LiveTradingService {
     this.restingBuy = null;
     if (isRoutineGtdCancelReason(reason)) {
       this.gtdBuyRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
-    } else {
-      logService.info("trading", `Cancel resting GTD (${reason})`);
     }
+    logService.info(
+      "trading",
+      `Cancel resting GTD (${reason}) ${resting.side.toUpperCase()} ${resting.shares} sh @ ${(resting.limitPrice * 100).toFixed(0)}¢ phase ${((resting.phaseIdx ?? 0) + 1)}`,
+    );
     if (!this.positions.up && !this.positions.down) {
       this.autoEngine.setExternalBuyPaused(false);
     }
@@ -2250,7 +2252,10 @@ export class LiveTradingService {
     const resting = this.overrideRestingBuy;
     if (!resting) return;
     this.overrideRestingBuy = null;
-    logService.info("trading", `Cancel buy override GTD (${reason})`);
+    logService.info(
+      "trading",
+      `Cancel buy override GTD (${reason}) ${resting.side.toUpperCase()} ${resting.shares} sh @ ${(resting.limitPrice * 100).toFixed(0)}¢`,
+    );
     if (!isTradingExecutor()) return;
     await this.finishBuyCancel(resting, reason, state, "override");
   }
@@ -2271,7 +2276,8 @@ export class LiveTradingService {
       return;
     }
 
-    const result = await cancelOpenOrder(this.userId, resting.orderId);
+    // Reason already logged by cancelRestingBuy / cancelOverrideRestingBuy.
+    const result = await cancelOpenOrder(this.userId, resting.orderId, { quiet: true });
 
     if (state && (await this.harvestBuyCancelFill(resting, state, kind))) {
       return;
@@ -2401,16 +2407,22 @@ export class LiveTradingService {
           `Giving up GTD buy cancel after ${item.attempts} tries (${item.kind} ${item.resting.orderId.slice(0, 10)}…)`,
         );
         // Last-ditch cancel; fill may still be adopted via on-chain check.
-        void cancelOpenOrder(this.userId, item.resting.orderId);
+        void cancelOpenOrder(this.userId, item.resting.orderId, { quiet: true });
         continue;
       }
-      const result = await cancelOpenOrder(this.userId, item.resting.orderId);
+      const result = await cancelOpenOrder(this.userId, item.resting.orderId, { quiet: true });
       if (await this.harvestBuyCancelFill(item.resting, state, item.kind)) {
         continue;
       }
       const snap = await fetchOpenOrder(this.userId, item.resting.orderId);
       const status = snap?.status?.toLowerCase() ?? "";
       if (status === "live" || status === "delayed" || !result.ok) {
+        if (item.attempts === 1 || item.attempts % 3 === 0) {
+          logService.warn(
+            "trading",
+            `GTD buy cancel retry ${item.attempts} (${item.kind} ${item.resting.orderId.slice(0, 10)}… still ${status || "unknown"})`,
+          );
+        }
         this.enqueueBuyCancel(
           item.resting,
           item.reason,
@@ -2552,7 +2564,13 @@ export class LiveTradingService {
         resting.shares !== shares;
       if (stale) {
         await this.cancelOverrideRestingBuy(
-          !side ? "no PTB side" : resting.side !== side ? "PTB side change" : "override params change",
+          !side
+            ? "no PTB side"
+            : resting.side !== side
+              ? "PTB side change"
+              : resting.sessionKey !== key
+                ? "window roll"
+                : "override params change",
           state,
         );
       } else {
@@ -2565,6 +2583,7 @@ export class LiveTradingService {
     if (!side) return;
     if (this.overrideRestingBuy) return;
     if (this.overrideGtdBlockedWindowKey === key) return;
+    if (this.pendingBuyCancels.some((p) => p.kind === "override")) return;
     const windowEnd = state.windowEnd ?? nowSec + 300;
 
     this.orderInFlight = true;
@@ -2576,6 +2595,7 @@ export class LiveTradingService {
         price: limitPrice,
         expirationSec: gtdExpirationUnix(windowEnd, nowSec),
         state,
+        logTag: "override",
       });
       if (!result.success || !result.orderId) {
         const err = result.error ?? "";
@@ -2639,7 +2659,8 @@ export class LiveTradingService {
       return;
     }
 
-    const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
+    const now = nowMs ?? state.lastTickMs ?? Date.now();
+    const nowSec = Math.floor(now / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const key = sessionKey(state);
@@ -2675,7 +2696,7 @@ export class LiveTradingService {
                 : !restingGapOk
                   ? "gap filter"
                   : "stabilize filter",
-          nowMs ?? nowSec * 1000,
+          now,
           state,
         );
       }
@@ -2702,7 +2723,7 @@ export class LiveTradingService {
     if (this.isBuyBlocked(state)) return;
     if (this.restingBuy) return;
     if (this.gtdBuyBlockedWindowKey === key) return;
-    if ((nowMs ?? Date.now()) < this.gtdBuyRepressUntilMs) return;
+    if (now < this.gtdBuyRepressUntilMs) return;
 
     let chosenSide: "up" | "down" | null = null;
     for (const side of SIDES_ORDER) {
@@ -2728,6 +2749,7 @@ export class LiveTradingService {
         price: limitPrice,
         expirationSec: gtdExpirationUnix(windowEnd, nowSec),
         state,
+        logTag: `phase ${phaseIdx + 1}`,
       });
       if (!result.success || !result.orderId) {
         this.autoEngine.setExternalBuyPaused(false);

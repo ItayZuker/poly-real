@@ -34,6 +34,8 @@ export interface PlaceLimitOrderInput {
   /** Unix seconds expiration for GTD. */
   expirationSec: number;
   state?: LiveWindowState;
+  /** Optional tag appended to success logs (e.g. "phase 2", "override"). */
+  logTag?: string;
 }
 
 export interface PlaceOrderResult {
@@ -570,11 +572,12 @@ async function placeLimitGtdOrder(
     const fill = parseFillFromResponse(resp, leg, price, size, size * price);
     const immediateFill = fill.fillShares > 0 && (status === "matched" || Boolean(resp?.takingAmount));
 
+    const tag = input.logTag ? ` [${input.logTag}]` : "";
     logService.success(
       "trading",
       immediateFill
-        ? `GTD ${leg.toUpperCase()} ${input.side.toUpperCase()} filled: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢`
-        : `GTD ${leg.toUpperCase()} ${input.side.toUpperCase()} resting: ${size} sh @ ${(price * 100).toFixed(0)}¢ (exp ${expiration})`,
+        ? `GTD ${leg.toUpperCase()} ${input.side.toUpperCase()} filled: ${fill.fillShares} sh @ ~${(fill.fillPrice * 100).toFixed(1)}¢${tag}`
+        : `GTD ${leg.toUpperCase()} ${input.side.toUpperCase()} resting: ${size} sh @ ${(price * 100).toFixed(0)}¢ (exp ${expiration})${tag}`,
     );
 
     return {
@@ -601,17 +604,22 @@ async function placeLimitGtdOrder(
 export async function cancelOpenOrder(
   userId: string,
   orderId: string,
+  opts?: { quiet?: boolean },
 ): Promise<{ ok: boolean; error?: string }> {
   if (!orderId) return { ok: false, error: "Missing order id" };
   const client = getTradingClient(userId);
   if (!client) return { ok: false, error: "Trading client not initialized" };
   try {
     await client.cancelOrder({ orderID: orderId });
-    logService.info("trading", `Cancelled order ${orderId.slice(0, 10)}…`);
+    if (!opts?.quiet) {
+      logService.info("trading", `Cancelled order ${orderId.slice(0, 10)}…`);
+    }
     return { ok: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logService.warn("trading", `Cancel ${orderId.slice(0, 10)}… failed: ${message}`);
+    if (!opts?.quiet) {
+      logService.warn("trading", `Cancel ${orderId.slice(0, 10)}… failed: ${message}`);
+    }
     return { ok: false, error: message };
   }
 }

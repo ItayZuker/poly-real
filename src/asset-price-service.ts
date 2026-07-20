@@ -1,4 +1,4 @@
-import { getUpDownDuration, type MarketPairInfo } from "./market-pair.js";
+import { type MarketPairInfo } from "./market-pair.js";
 import { chainlinkPriceFeed } from "./chainlink-price-feed.js";
 import { fetchWithTimeout } from "./fetch-timeout.js";
 import { outcomeFromOpenClose } from "./window-outcome.js";
@@ -6,7 +6,6 @@ import type { WindowOutcome } from "./types.js";
 
 const CRYPTO_PRICE_API = "https://polymarket.com/api/crypto/crypto-price";
 const REST_POLL_CACHE_MS = 1_200;
-const OPEN_MATCH_EPSILON = 0.05;
 const SETTLEMENT_MAX_WAIT_MS = 20_000;
 const SETTLEMENT_RETRY_MS = 500;
 
@@ -38,10 +37,8 @@ export interface MarketWindowPriceContext {
 }
 
 export type AssetPriceSource = "chainlink-rtds" | "polymarket-rest";
-export type PriceToBeatSource =
-  | "chainlink-boundary"
-  | "polymarket-openPrice"
-  | "polymarket-priorClose";
+/** PTB always comes from Polymarket's window open when available. */
+export type PriceToBeatSource = "polymarket-openPrice";
 
 export interface WindowAssetPrices {
   assetPrice?: number;
@@ -82,10 +79,6 @@ function priceCacheKey(asset: string, timeframe: string, eventStartTimeIso: stri
   return `${asset.toLowerCase()}:${timeframe}:${eventStartTimeIso}`;
 }
 
-function toPolymarketIso(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
-}
-
 export function normalizePolymarketIso(iso: string): string {
   return iso.replace(/\.\d{3}Z$/, "Z");
 }
@@ -108,58 +101,17 @@ function getRtdsLiveAssetPrice(asset: string): number | undefined {
   return chainlinkPriceFeed.getLivePrice(asset.toLowerCase())?.value;
 }
 
-function pricesMatch(a: number, b: number): boolean {
-  return Math.abs(a - b) <= OPEN_MATCH_EPSILON;
-}
-
-function getChainlinkPriceToBeat(
-  asset: string,
-  timeframe: string,
-  window: MarketWindowPriceContext,
-): number | undefined {
-  if (window.windowStart == null) {
-    return undefined;
-  }
-
-  const duration = getUpDownDuration(timeframe);
-  const prevWindowStart = window.windowStart - duration;
-  chainlinkPriceFeed.tryCaptureEarlyWindowOpen(asset, window.windowStart);
-  return chainlinkPriceFeed.getPriceToBeat(asset, window.windowStart, prevWindowStart);
-}
-
 /**
- * Prefer Polymarket's official open as PTB so the live graph gap matches
- * settlement. Chainlink boundary is only a fallback before open is known.
+ * PTB is Polymarket's official window open only.
+ * If open is not available yet, return undefined — callers keep the last known PTB.
  */
 function resolvePriceToBeat(
-  chainlinkPtb: number | undefined,
   rest: WindowRestCache | undefined,
-  priorClose: number | undefined,
 ): { priceToBeat?: number; priceToBeatSource: PriceToBeatSource } {
   const apiOpen = rest?.openPrice;
   if (apiOpen != null) {
-    const openLooksStale =
-      rest?.incomplete !== false &&
-      priorClose != null &&
-      !pricesMatch(apiOpen, priorClose);
-
-    if (openLooksStale) {
-      if (priorClose != null) {
-        return { priceToBeat: priorClose, priceToBeatSource: "polymarket-priorClose" };
-      }
-    } else {
-      return { priceToBeat: apiOpen, priceToBeatSource: "polymarket-openPrice" };
-    }
+    return { priceToBeat: apiOpen, priceToBeatSource: "polymarket-openPrice" };
   }
-
-  if (priorClose != null) {
-    return { priceToBeat: priorClose, priceToBeatSource: "polymarket-priorClose" };
-  }
-
-  if (chainlinkPtb != null) {
-    return { priceToBeat: chainlinkPtb, priceToBeatSource: "chainlink-boundary" };
-  }
-
   return { priceToBeat: undefined, priceToBeatSource: "polymarket-openPrice" };
 }
 
@@ -304,68 +256,13 @@ async function fetchWindowRestPrices(
   }
 }
 
-interface PriorCloseCache {
-  closePrice: number;
-  fetchedAtMs: number;
-}
-
-const priorCloseCache = new Map<string, PriorCloseCache>();
-
-function priorCloseCacheKey(asset: string, timeframe: string, windowStartSec: number): string {
-  return `${asset.toLowerCase()}:${timeframe}:prior:${windowStartSec}`;
-}
-
-async function fetchPriorWindowClosePrice(
-  asset: string,
-  timeframe: string,
-  window: MarketWindowPriceContext,
-): Promise<number | undefined> {
-  if (window.windowStart == null) {
-    return undefined;
-  }
-
-  const cacheKey = priorCloseCacheKey(asset, timeframe, window.windowStart);
-  const cached = priorCloseCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAtMs < REST_POLL_CACHE_MS) {
-    return cached.closePrice;
-  }
-
-  try {
-    const data = await fetchPolymarketCryptoPriceResponse(
-      asset,
-      timeframe,
-      toPolymarketIso(window.windowStart - getUpDownDuration(timeframe)),
-      window.eventStartTimeIso,
-    );
-    const closePrice = parsePrice(data.closePrice);
-    if (closePrice == null) {
-      return undefined;
-    }
-
-    priorCloseCache.set(cacheKey, { closePrice, fetchedAtMs: Date.now() });
-    return closePrice;
-  } catch {
-    return undefined;
-  }
-}
-
 async function loadWindowAssetPrices(
   asset: string,
   timeframe: string,
   window: MarketWindowPriceContext,
 ): Promise<WindowAssetPrices> {
-  const chainlinkPtb = getChainlinkPriceToBeat(asset, timeframe, window);
-  const [rest, priorClose] = await Promise.all([
-    fetchWindowRestPrices(asset, timeframe, window),
-    fetchPriorWindowClosePrice(asset, timeframe, window),
-  ]);
-
-  const { priceToBeat, priceToBeatSource } = resolvePriceToBeat(
-    chainlinkPtb,
-    rest,
-    priorClose,
-  );
-
+  const rest = await fetchWindowRestPrices(asset, timeframe, window);
+  const { priceToBeat, priceToBeatSource } = resolvePriceToBeat(rest);
   return buildPrices(asset, priceToBeat, priceToBeatSource, rest?.closePrice);
 }
 

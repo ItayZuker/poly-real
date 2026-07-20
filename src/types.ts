@@ -180,11 +180,8 @@ export interface LiveWindowState {
   prevCloseAsset?: number;
   assetPrice?: number;
   assetGap?: number;
-  /** Where prevCloseAsset (PTB) came from — Polymarket open preferred for settlement alignment. */
-  priceToBeatSource?:
-    | "chainlink-boundary"
-    | "polymarket-openPrice"
-    | "polymarket-priorClose";
+  /** Where prevCloseAsset (PTB) came from — Polymarket window open only. */
+  priceToBeatSource?: "polymarket-openPrice";
   yesBid?: number;
   yesAsk?: number;
   noBid?: number;

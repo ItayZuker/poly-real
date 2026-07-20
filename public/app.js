@@ -1869,14 +1869,7 @@ function drawPriceChart(state, options = {}) {
     ctx.fillStyle = "#d29922";
     ctx.textAlign = "left";
     ctx.textBaseline = "bottom";
-    const ptbLabel =
-      state.priceToBeatSource === "chainlink-boundary"
-        ? "PTB (Chainlink)"
-        : state.priceToBeatSource === "polymarket-priorClose"
-          ? "PTB (prior)"
-          : state.priceToBeatSource === "polymarket-openPrice"
-            ? "PTB (Polymarket)"
-            : "PTB";
+    const ptbLabel = "PTB";
     ctx.fillText(ptbLabel, padding.left + 4, ptbY - 2);
   }
 
@@ -1917,23 +1910,12 @@ function updateGraphPanel(state) {
 
   const ptbSourceEl = $("graph-ptb-source");
   if (ptbSourceEl) {
-    const src = state.priceToBeatSource;
-    if (src === "polymarket-openPrice") {
+    if (state.prevCloseAsset != null) {
       ptbSourceEl.textContent = "Polymarket";
-      ptbSourceEl.title = "Official Polymarket window open — same reference used for settlement";
+      ptbSourceEl.title =
+        "Polymarket window open — held until the next open update arrives";
       ptbSourceEl.hidden = false;
       ptbSourceEl.classList.toggle("is-provisional", false);
-    } else if (src === "polymarket-priorClose") {
-      ptbSourceEl.textContent = "prior close";
-      ptbSourceEl.title = "Previous window Polymarket close (open not ready yet)";
-      ptbSourceEl.hidden = false;
-      ptbSourceEl.classList.toggle("is-provisional", true);
-    } else if (src === "chainlink-boundary") {
-      ptbSourceEl.textContent = "Chainlink";
-      ptbSourceEl.title =
-        "Provisional Chainlink open — may differ from Polymarket settlement until open is available";
-      ptbSourceEl.hidden = false;
-      ptbSourceEl.classList.toggle("is-provisional", true);
     } else {
       ptbSourceEl.textContent = "";
       ptbSourceEl.title = "";

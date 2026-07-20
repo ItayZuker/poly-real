@@ -250,7 +250,7 @@ export class DisplayService {
         this.lastPtbSide = null;
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
-        this.state.priceToBeatSource = undefined;
+        // Keep prevCloseAsset / priceToBeatSource until Polymarket open arrives.
         this.prefetchedNextWindowStart = null;
         this.prefetchedYesTokenId = null;
         this.prefetchedNoTokenId = null;
@@ -276,19 +276,25 @@ export class DisplayService {
       try {
         const prices = await getPolymarketWindowAssetPricesForPair(asset, timeframe, pair);
         const live = applyRtdsLivePrice(asset, prices);
-        this.state.prevCloseAsset = live.prevCloseAsset;
-        this.state.assetPrice = live.assetPrice;
-        this.state.assetGap = live.assetGap;
-        this.state.priceToBeatSource = live.priceToBeatSource;
+        // Only overwrite PTB when Polymarket returned an open; otherwise hold last value.
+        if (live.prevCloseAsset != null) {
+          this.state.prevCloseAsset = live.prevCloseAsset;
+          this.state.priceToBeatSource = live.priceToBeatSource;
+        }
+        if (live.assetPrice != null) {
+          this.state.assetPrice = live.assetPrice;
+        }
+        if (this.state.assetPrice != null && this.state.prevCloseAsset != null) {
+          this.state.assetGap = this.state.assetPrice - this.state.prevCloseAsset;
+        } else {
+          this.state.assetGap = live.assetGap;
+        }
       } catch {
         const live = chainlinkPriceFeed.getLivePrice(asset);
         if (live) {
           this.state.assetPrice = live.value;
           if (this.state.prevCloseAsset != null) {
             this.state.assetGap = live.value - this.state.prevCloseAsset;
-          }
-          if (!this.state.priceToBeatSource && this.state.prevCloseAsset != null) {
-            this.state.priceToBeatSource = "chainlink-boundary";
           }
         }
       }
