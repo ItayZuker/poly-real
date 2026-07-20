@@ -3009,6 +3009,7 @@
     syncHeaderSummaryControls,
     setHeaderSummaryRange,
     onSelectedSeriesChanged,
+    closeMenus,
     getPlacementCountsBySetup,
     getPlacementsForSetup,
     getLockedCountForSetup,

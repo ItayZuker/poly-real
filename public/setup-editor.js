@@ -249,6 +249,7 @@
       descInput.value = draft.description;
       if (colorInput) colorInput.value = draft.color;
       baseline = deepClone(snapshotDraft());
+      syncColorEditIconContrast();
       syncSaveState();
 
       if (window.onTradingSetupUpdated) {
@@ -310,11 +311,31 @@
     }
   }
 
+  function isLightHexColor(color) {
+    const raw = String(color || "").trim();
+    const hex = raw.startsWith("#") ? raw.slice(1) : raw;
+    if (!/^[0-9a-fA-F]{6}$/.test(hex)) return false;
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+    const toLin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    const luminance = 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b);
+    return luminance > 0.55;
+  }
+
+  function syncColorEditIconContrast() {
+    const swatch = colorInput?.closest?.(".setup-edit-color-swatch");
+    if (!swatch) return;
+    const color = colorInput?.value || draft?.color || "#58a6ff";
+    swatch.classList.toggle("is-light-setup", isLightHexColor(color));
+  }
+
   function onColorInput() {
     if (!draft || !colorInput) return;
     const color = colorInput.value;
     draft.color = color;
     colorTouched = true;
+    syncColorEditIconContrast();
     if (editingId && window.applySetupColorUpdate) {
       window.applySetupColorUpdate(editingId, color);
     }
@@ -463,6 +484,7 @@
     if (colorInput) colorInput.value = draft.color;
     baseline = deepClone(snapshotDraft());
     syncPrimaryButtonUi();
+    syncColorEditIconContrast();
     modal.hidden = false;
     saveBtn.disabled = true;
     saveBtn.setAttribute("aria-disabled", "true");
@@ -492,6 +514,7 @@
     if (colorInput) colorInput.value = draft.color;
     baseline = deepClone(snapshotDraft());
     syncPrimaryButtonUi();
+    syncColorEditIconContrast();
     modal.hidden = false;
     saveBtn.disabled = true;
     saveBtn.setAttribute("aria-disabled", "true");
@@ -513,6 +536,8 @@
         window.applySetupColorUpdate(editingId, baseline.color);
       }
     }
+    // Abort any stacked phase popup without applying form edits.
+    if (window.Simulator?.discardPhaseModal) window.Simulator.discardPhaseModal();
     if (window.Simulator?.endExternalPhaseEdit) window.Simulator.endExternalPhaseEdit();
     const phaseModal = document.getElementById("phase-modal");
     if (phaseModal) {
@@ -554,13 +579,6 @@
     if (ok) close();
   }
 
-  function onModalKeyDown(e) {
-    if (e.key !== "Enter" || modal?.hidden) return;
-    if (e.target?.closest?.("textarea")) return;
-    e.preventDefault();
-    void save();
-  }
-
   function init() {
     modal = $("setup-edit-modal");
     titleInput = $("setup-edit-title");
@@ -581,7 +599,6 @@
     descInput?.addEventListener("input", syncSaveState);
     colorInput?.addEventListener("input", onColorInput);
     colorInput?.addEventListener("change", onColorInput);
-    modal?.addEventListener("keydown", onModalKeyDown);
     modal?.addEventListener("click", (e) => {
       if (e.target.id === "setup-edit-modal") close();
     });

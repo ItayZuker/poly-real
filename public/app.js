@@ -357,6 +357,10 @@ function bindSettingsInfoTips() {
   });
 
   document.addEventListener("keydown", (event) => {
+    // Modal Esc is handled by bindModalKeyboardShortcuts (closes settings tips when idle).
+    if (event.key === "Escape" && document.querySelector(".modal-overlay:not([hidden])")) {
+      return;
+    }
     if (event.key === "Escape") closeSettingsInfoPanels();
   });
 }
@@ -375,9 +379,111 @@ function bindSettingsFunderReveal() {
   });
 }
 
+function isVisibleModalAction(btn) {
+  if (!btn || btn.disabled || btn.hidden) return false;
+  if (btn.getAttribute("aria-hidden") === "true") return false;
+  return btn.getClientRects().length > 0;
+}
+
+/**
+ * Enter → primary Save/Add. Esc → Cancel/abort topmost popup (or floating menu).
+ */
+function bindModalKeyboardShortcuts() {
+  if (document.documentElement.dataset.modalKeysBound === "1") return;
+  document.documentElement.dataset.modalKeysBound = "1";
+
+  document.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.defaultPrevented) return;
+
+    if (e.key === "Escape") {
+      const openMenus = document.querySelector(
+        ".schedule-setup-menu-floating, .schedule-placement-menu-floating, .schedule-setup-menu, .schedule-placement-menu",
+      );
+      if (openMenus) {
+        e.preventDefault();
+        closeSetupMenus();
+        window.SchedulePlacements?.closeMenus?.();
+        return;
+      }
+
+      const openOverlays = [...document.querySelectorAll(".modal-overlay")].filter(
+        (el) => !el.hidden,
+      );
+      if (openOverlays.length) {
+        e.preventDefault();
+        const top =
+          openOverlays.find((el) => el.classList.contains("modal-overlay-stacked")) ||
+          openOverlays[openOverlays.length - 1];
+        if (top.id === "phase-modal") {
+          window.Simulator?.discardPhaseModal?.();
+          return;
+        }
+        if (top.id === "setup-edit-modal") {
+          // Cancel discards unsaved setup edits (same as Cancel button).
+          $("setup-edit-cancel")?.click();
+          return;
+        }
+        if (top.id === "setup-save-modal") {
+          closeSetupSaveModal();
+          return;
+        }
+        const cancelBtn = top.querySelector(".modal-btn-secondary");
+        const closeBtn = top.querySelector(".modal-close");
+        (cancelBtn || closeBtn)?.click();
+        return;
+      }
+
+      closeSettingsInfoPanels();
+      return;
+    }
+
+    if (e.key !== "Enter") return;
+    if (e.target?.closest?.("textarea")) return;
+
+    const overlay = e.target?.closest?.(".modal-overlay");
+    if (!overlay || overlay.hidden) return;
+
+    const primary = overlay.querySelector(".modal-btn-primary");
+    if (isVisibleModalAction(primary)) {
+      e.preventDefault();
+      primary.click();
+      return;
+    }
+
+    // Phase modal from setup editor: Save is hidden; Close applies edits.
+    const closeBtn = overlay.querySelector(".modal-close, .modal-btn-secondary");
+    if (overlay.id === "phase-modal" && closeBtn) {
+      e.preventDefault();
+      closeBtn.click();
+    }
+  });
+}
+
+function bindSettingsEnterToSave() {
+  const bindings = [
+    { fields: ["settings-user-name", "settings-user-email"], buttonId: "settings-user-save" },
+    { fields: ["settings-funder-input"], buttonId: "settings-funder-save" },
+    { fields: ["settings-key-input"], buttonId: "settings-key-save" },
+  ];
+  for (const { fields, buttonId } of bindings) {
+    for (const fieldId of fields) {
+      const input = $(fieldId);
+      if (!input || input.dataset.enterSaveBound === "1") continue;
+      input.dataset.enterSaveBound = "1";
+      input.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" || e.isComposing) return;
+        e.preventDefault();
+        const btn = $(buttonId);
+        if (btn && !btn.disabled) btn.click();
+      });
+    }
+  }
+}
+
 function bindSettingsEditors() {
   bindSettingsInfoTips();
   bindSettingsFunderReveal();
+  bindSettingsEnterToSave();
 
   const userSave = $("settings-user-save");
   const funderInput = $("settings-funder-input");
@@ -2554,9 +2660,56 @@ async function removeSetupListItem(setupId) {
   scheduleSetupsCache = scheduleSetupsCache.filter((s) => s._id !== setupId);
   const list = $("schedule-setups-list");
   if (!list) return;
-  list
-    .querySelectorAll(`.schedule-setup-item[data-setup-id="${CSS.escape(setupId)}"]`)
-    .forEach((el) => el.remove());
+
+  const item = list.querySelector(
+    `.schedule-setup-item[data-setup-id="${CSS.escape(String(setupId))}"]`,
+  );
+  if (!item) {
+    if (!list.querySelector(".schedule-setup-item")) {
+      list.innerHTML = "";
+      const empty = document.createElement("div");
+      empty.className = "schedule-setups-empty";
+      empty.textContent = "No saved setups";
+      list.appendChild(empty);
+    }
+    window.updateSetupListPlacementCounts?.();
+    return;
+  }
+
+  const gapRaw = getComputedStyle(list).getPropertyValue("--setup-list-gap").trim();
+  const gapPx = Number.parseFloat(gapRaw) || 6;
+  const height = item.getBoundingClientRect().height;
+
+  item.classList.add("is-removing");
+  item.style.boxSizing = "border-box";
+  item.style.height = `${Math.max(0, height)}px`;
+  item.style.marginBottom = "0px";
+  void item.offsetHeight;
+
+  item.style.height = "0px";
+  item.style.opacity = "0";
+  item.style.marginBottom = `-${gapPx}px`;
+  item.style.borderColor = "transparent";
+
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      item.removeEventListener("transitionend", onEnd);
+      window.clearTimeout(fallback);
+      item.remove();
+      resolve();
+    };
+    const onEnd = (e) => {
+      if (e.target !== item) return;
+      if (e.propertyName !== "height") return;
+      finish();
+    };
+    item.addEventListener("transitionend", onEnd);
+    const fallback = window.setTimeout(finish, 280);
+  });
+
   if (!list.querySelector(".schedule-setup-item")) {
     list.innerHTML = "";
     const empty = document.createElement("div");
@@ -2647,8 +2800,8 @@ async function deleteTradingSetup(setup) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Delete failed (${res.status})`);
     }
-    // Surgical: drop list row + schedule cards only. No full list/board rebuild.
-    removeSetupListItem(setup._id);
+    // Surgical: animate list row closed, then drop schedule cards. No full rebuild.
+    await removeSetupListItem(setup._id);
     window.SchedulePlacements?.removePlacementsForSetup?.(setup._id);
   } catch (err) {
     setSetupListItemDeleting(setup._id, false);
@@ -3597,14 +3750,10 @@ function bindPageToggle() {
         });
       });
     } else if (isSchedule) {
-      void loadScheduleSetups();
+      // Setups + placement cards stay mounted across page toggles; they load once
+      // at boot and refresh only on create/edit/delete (see afterTradingSetupChange).
       if (lastHeatmapState) renderHeatmap(lastHeatmapState);
       else void loadHeatmap();
-      // Ensure cards are present after the page becomes visible (boot may have
-      // loaded placements while this page was still hidden).
-      if (window.SchedulePlacements) {
-        void window.SchedulePlacements.loadPlacements({ reloadStats: false });
-      }
     } else if (isSettings) {
       void loadSettingsUser();
       void loadWalletAccount();
@@ -3675,6 +3824,7 @@ async function init() {
   bindQuoteBoxes();
   bindScheduleViewToggle();
   bindSetupSaveModal();
+  bindModalKeyboardShortcuts();
   bindSetupListMenus();
   void loadHeatmap();
   await loadScheduleSetups();

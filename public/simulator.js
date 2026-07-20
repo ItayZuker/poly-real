@@ -920,8 +920,16 @@
     modal.hidden = false;
   }
 
-  function closePhaseModal() {
-    if (externalPhaseContext && !externalPhaseContext.readOnly && activePhaseModal != null) {
+  function closePhaseModal(options = {}) {
+    // Default apply=true matches X / overlay click (setup-editor phase apply-on-close).
+    // Escape passes apply:false to abort without writing the form back.
+    const apply = options.apply !== false;
+    if (
+      apply &&
+      externalPhaseContext &&
+      !externalPhaseContext.readOnly &&
+      activePhaseModal != null
+    ) {
       readPhaseFormIntoSetup(externalPhaseContext.setup, activePhaseModal);
       const onChange = externalPhaseContext.onChange;
       if (onChange) onChange();
@@ -975,15 +983,6 @@
       return;
     }
     void savePhaseModal();
-  }
-
-  function onPhaseModalKeyDown(e) {
-    if (e.key !== "Enter") return;
-    const modal = document.getElementById("phase-modal");
-    if (!modal || modal.hidden) return;
-    if (e.target?.closest?.("textarea")) return;
-    e.preventDefault();
-    submitPhaseModal();
   }
 
   function bindChartInteraction(canvas) {
@@ -1160,7 +1159,6 @@
     });
     document.getElementById("phase-modal-close").addEventListener("click", closePhaseModal);
     document.getElementById("phase-modal-save").addEventListener("click", () => void savePhaseModal());
-    document.getElementById("phase-modal").addEventListener("keydown", onPhaseModalKeyDown);
     document.getElementById("phase-modal").addEventListener("click", (e) => {
       if (e.target.id === "phase-modal") closePhaseModal();
     });
@@ -1211,6 +1209,10 @@
     },
     openPhaseModalExternal(phaseIdx) {
       openPhaseModal(phaseIdx);
+    },
+    /** Abort phase popup without applying form edits (Escape). */
+    discardPhaseModal() {
+      closePhaseModal({ apply: false });
     },
     isExternalPhaseReadOnly() {
       return Boolean(externalPhaseContext?.readOnly);
