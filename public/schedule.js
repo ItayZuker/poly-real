@@ -986,11 +986,9 @@
   const SUMMARY_RANGE_STORAGE_KEY = "poly-real:header-stats-range";
   const DEMO_HITS_STORAGE_KEY = "poly-real:demo-hits";
 
-  let headerSummaryRange = "week";
+  let headerSummaryRange = "schedule";
   let headerSummaryFetchTimer = null;
   let headerSummaryRequestId = 0;
-  /** Last successful Week totals from session-memory. */
-  let headerMemoryTotals = { week: null };
   /** All-time Market totals per series from session-memory. */
   let headerMarketTotals = {};
   /** Full Live-range totals (every real outcome since reset), not just schedule cards. */
@@ -1141,7 +1139,7 @@
       renderHeaderSummaryTotals(liveRangeTotals());
     } else if (headerSummaryRange === "schedule") {
       renderHeaderSummaryTotals(scheduleTotals());
-    } else if (headerSummaryRange === "week" || headerSummaryRange === "market") {
+    } else if (headerSummaryRange === "market") {
       scheduleHeaderSummaryRefresh();
     }
   }
@@ -1219,15 +1217,11 @@
       const savedRange = localStorage.getItem(SUMMARY_RANGE_STORAGE_KEY);
       if (savedRange === "demo" || savedRange === "all") {
         headerSummaryRange = savedRange === "all" ? "market" : "live";
-      } else if (
-        savedRange === "live" ||
-        savedRange === "market" ||
-        savedRange === "schedule" ||
-        savedRange === "week"
-      ) {
+      } else if (savedRange === "live" || savedRange === "market" || savedRange === "schedule") {
         headerSummaryRange = savedRange;
-      } else if (savedRange === "timeframe") {
-        headerSummaryRange = "week";
+      } else if (savedRange === "week" || savedRange === "timeframe") {
+        // Legacy ranges removed from the dropdown — closest match is Schedule.
+        headerSummaryRange = "schedule";
       }
     } catch {
       // ignore
@@ -1289,45 +1283,12 @@
       return totals;
     }
 
-    if (mode === "market") {
-      const series = selectedSeries();
-      const cached = headerMarketTotals[series];
-      if (cached) renderHeaderSummaryTotals(cached);
-
-      const params = new URLSearchParams({ mode: "market", series });
-      try {
-        const res = await fetch(`/api/trading/session-memory?${params}`);
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || `Session memory failed (${res.status})`);
-        }
-        const data = await res.json();
-        if (requestId !== headerSummaryRequestId) return data;
-        const totals = normalizeSessionTotals({
-          hasData: data.hasData === true,
-          green: data.green ?? 0,
-          red: data.red ?? 0,
-          blue: data.blue ?? 0,
-          pnl: data.pnl ?? 0,
-        });
-        headerMarketTotals[series] = totals;
-        renderHeaderSummaryTotals(totals);
-        return totals;
-      } catch (err) {
-        console.warn("Header summary fetch failed:", err);
-        if (requestId === headerSummaryRequestId) {
-          renderHeaderSummaryTotals(cached ?? emptyTotals());
-        }
-        return null;
-      }
-    }
-
-    // Show last Week snapshot immediately so range switches feel responsive.
-    const cached = headerMemoryTotals.week;
+    // Market (default / unknown → treat as market all-time for selected series).
+    const series = selectedSeries();
+    const cached = headerMarketTotals[series];
     if (cached) renderHeaderSummaryTotals(cached);
 
-    const params = new URLSearchParams({ mode: "week" });
-
+    const params = new URLSearchParams({ mode: "market", series });
     try {
       const res = await fetch(`/api/trading/session-memory?${params}`);
       if (!res.ok) {
@@ -1343,21 +1304,20 @@
         blue: data.blue ?? 0,
         pnl: data.pnl ?? 0,
       });
-      headerMemoryTotals.week = totals;
+      headerMarketTotals[series] = totals;
       renderHeaderSummaryTotals(totals);
-      return data;
+      return totals;
     } catch (err) {
       console.warn("Header summary fetch failed:", err);
       if (requestId === headerSummaryRequestId) {
-        const fallback = headerMemoryTotals.week ?? emptyTotals();
-        renderHeaderSummaryTotals(fallback);
+        renderHeaderSummaryTotals(cached ?? emptyTotals());
       }
       return null;
     }
   }
 
   function scheduleHeaderSummaryRefresh() {
-    if (headerSummaryRange !== "week" && headerSummaryRange !== "market") return;
+    if (headerSummaryRange !== "market") return;
     if (headerSummaryFetchTimer != null) return;
     headerSummaryFetchTimer = window.setTimeout(() => {
       headerSummaryFetchTimer = null;
@@ -1374,12 +1334,7 @@
       renderHeaderSummaryTotals(scheduleTotals());
       return;
     }
-    if (headerSummaryRange === "market") {
-      const cached = headerMarketTotals[selectedSeries()];
-      if (cached) renderHeaderSummaryTotals(cached);
-      return;
-    }
-    const cached = headerMemoryTotals.week;
+    const cached = headerMarketTotals[selectedSeries()];
     if (cached) renderHeaderSummaryTotals(cached);
   }
 
@@ -1413,7 +1368,7 @@
     const select = document.getElementById("schedule-summary-range");
     if (!select) return;
 
-    const allowed = new Set(["live", "market", "schedule", "week"]);
+    const allowed = new Set(["live", "market", "schedule"]);
     const next = allowed.has(range) ? range : headerSummaryRange;
 
     if (next === headerSummaryRange && select.value === next) return;
@@ -1481,7 +1436,9 @@
     if (select && select.dataset.bound !== "1") {
       select.dataset.bound = "1";
       select.addEventListener("change", () => {
-        headerSummaryRange = select.value;
+        const allowed = new Set(["live", "market", "schedule"]);
+        headerSummaryRange = allowed.has(select.value) ? select.value : "schedule";
+        select.value = headerSummaryRange;
         saveHeaderSummaryPrefs();
         if (headerSummaryFetchTimer != null) {
           window.clearTimeout(headerSummaryFetchTimer);
