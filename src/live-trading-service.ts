@@ -133,6 +133,27 @@ interface PendingBuyCancel {
   kind: "phase" | "override";
 }
 
+/**
+ * Unverified buy awaiting CLOB / positions confirmation.
+ * Blocks further buys until resolved as filled or clearly unfilled.
+ */
+interface PendingBuyConfirm {
+  sessionKey: string;
+  side: "up" | "down";
+  source: "manual" | "auto";
+  reason: string;
+  startedAtMs: number;
+  nextCheckAtMs: number;
+  orderId?: string;
+  tokenId?: string;
+  conditionId?: string;
+  slug?: string;
+  buyPhaseIdx?: number;
+  /** Optional size hint when confirming from a resting GTD. */
+  sharesHint?: number;
+  limitPriceHint?: number;
+}
+
 interface RestingSellOrder {
   orderId: string;
   side: "up" | "down";
@@ -505,6 +526,8 @@ function emptyQuoteLocks(): SimQuoteLocks {
 const GTD_FILTER_REPRESS_MS = 2500;
 /** Quiet period after sell balance/allowance reject (tokens not credited yet). */
 const GTD_SELL_BALANCE_REPRESS_MS = 2500;
+/** While a buy is pending confirmation, poll CLOB/positions on this cadence. */
+const PENDING_BUY_CONFIRM_POLL_MS = 2500;
 /** Max position cards kept in RAM and sent to the UI scroll. */
 const MAX_POSITION_CARDS = 50;
 
@@ -641,10 +664,10 @@ export class LiveTradingService {
   private overrideHoldWindowKey: string | null = null;
   /** Serialize CLOB + Chainlink tick handlers for this user. */
   private tickQueue: Promise<void> = Promise.resolve();
-  /** Do not hit Polymarket positions API before this time (rate-limit / throttle). */
-  private onChainCheckNotBeforeMs = 0;
-  /** Exponential backoff after Data API 429s (ms). */
-  private onChainBackoffMs = 0;
+  /** Unverified buy — poll until filled or clearly unfilled; blocks new buys. */
+  private pendingBuyConfirm: PendingBuyConfirm | null = null;
+  /** Exponential backoff after Data API / CLOB 429s while resolving pending buys (ms). */
+  private pendingBuyConfirmBackoffMs = 0;
   private scheduleContext: ActiveScheduleContext | null = null;
   private scheduleContextFetchedAt = 0;
   private activePhaseSetup: TradingPhaseSetup | null = null;
@@ -1716,8 +1739,8 @@ export class LiveTradingService {
     this.manualBuyPending = false;
     this.manualBuyOverrideWindowKey = null;
     this.buyBlockedWindowKey = null;
-    this.onChainCheckNotBeforeMs = 0;
-    this.onChainBackoffMs = 0;
+    this.pendingBuyConfirm = null;
+    this.pendingBuyConfirmBackoffMs = 0;
     this.sessionKey = sessionKey(state);
     if (prevKey) {
       void this.settleOpenCardsForWindow(prevKey).then((hadHits) => {
@@ -1766,6 +1789,7 @@ export class LiveTradingService {
     if (this.manualBuyPending) return true;
     if (this.manualBuyOverrideWindowKey === key) return true;
     if (this.buyBlockedWindowKey === key) return true;
+    if (this.pendingBuyConfirm) return true;
     // Block while a prior GTD cancel may still race-fill on the CLOB.
     if (this.pendingBuyCancels.length > 0) return true;
     return false;
@@ -1778,44 +1802,191 @@ export class LiveTradingService {
     logService.warn("trading", `Further buys blocked for window (${reason})`);
   }
 
-  /**
-   * If Polymarket already holds UP/DOWN shares for this market, adopt them locally
-   * and suppress more buys. Prevents duplicate FOK/FAK submissions after a fill
-   * that the app failed to record.
-   */
-  private async adoptOnChainPositionIfAny(
+  private beginPendingBuyConfirm(
     state: LiveWindowState,
-    options?: { force?: boolean },
-  ): Promise<boolean> {
-    if (this.positions.up || this.positions.down) return true;
-    if (!isTradingExecutor()) return false;
+    opts: {
+      side: "up" | "down";
+      source: "manual" | "auto";
+      reason: string;
+      orderId?: string;
+      tokenId?: string;
+      conditionId?: string;
+      slug?: string;
+      buyPhaseIdx?: number;
+      sharesHint?: number;
+      limitPriceHint?: number;
+    },
+  ): void {
+    if (this.pendingBuyConfirm) return;
+    if (this.positions.up || this.positions.down) return;
     const nowMs = Date.now();
-    if (!options?.force && nowMs < this.onChainCheckNotBeforeMs) return false;
-    // Throttle routine empty checks even when the API is healthy.
-    if (!options?.force) {
-      this.onChainCheckNotBeforeMs = nowMs + Math.max(5_000, this.onChainBackoffMs);
+    this.pendingBuyConfirm = {
+      sessionKey: sessionKey(state),
+      side: opts.side,
+      source: opts.source,
+      reason: opts.reason,
+      startedAtMs: nowMs,
+      // Immediate first check on the next tick / resolve call.
+      nextCheckAtMs: nowMs,
+      orderId: opts.orderId,
+      tokenId: opts.tokenId,
+      conditionId: opts.conditionId,
+      slug: opts.slug,
+      buyPhaseIdx: opts.buyPhaseIdx,
+      sharesHint: opts.sharesHint,
+      limitPriceHint: opts.limitPriceHint,
+    };
+    this.liveFakWatch = null;
+    if (!this.isLiveArmed()) this.autoEngine.setExternalBuyPaused(true);
+    logService.warn(
+      "trading",
+      `Buy pending confirmation (${opts.reason}) — blocking further buys until resolved`,
+    );
+  }
+
+  private clearPendingBuyConfirm(resolution: string): void {
+    if (!this.pendingBuyConfirm) return;
+    this.pendingBuyConfirm = null;
+    this.pendingBuyConfirmBackoffMs = 0;
+    if (!this.isLiveArmed() && !this.positions.up && !this.positions.down) {
+      this.autoEngine.setExternalBuyPaused(false);
     }
+    logService.info("trading", `Pending buy cleared (${resolution})`);
+  }
+
+  private schedulePendingBuyConfirmRetry(delayMs: number): void {
+    if (!this.pendingBuyConfirm) return;
+    this.pendingBuyConfirm.nextCheckAtMs = Date.now() + delayMs;
+  }
+
+  private notePendingBuyConfirmRateLimit(): void {
+    this.pendingBuyConfirmBackoffMs = Math.min(
+      120_000,
+      Math.max(15_000, this.pendingBuyConfirmBackoffMs * 2 || 15_000),
+    );
+    this.schedulePendingBuyConfirmRetry(this.pendingBuyConfirmBackoffMs);
+    logService.warn(
+      "trading",
+      `Pending buy confirm rate-limited; backing off ${Math.round(this.pendingBuyConfirmBackoffMs / 1000)}s`,
+    );
+  }
+
+  private isClearlyUnfilledOrderStatus(status: string): boolean {
+    const s = status.toLowerCase();
+    return (
+      s === "cancelled" ||
+      s === "canceled" ||
+      s === "unmatched" ||
+      s === "expired"
+    );
+  }
+
+  /**
+   * Poll CLOB order + positions only while a buy is pending confirmation.
+   * No preempt / every-tick position scans.
+   */
+  private async resolvePendingBuyConfirm(
+    state: LiveWindowState,
+    nowMs?: number,
+  ): Promise<void> {
+    const pending = this.pendingBuyConfirm;
+    if (!pending) return;
+    if (!isTradingExecutor()) return;
+
+    if (this.positions.up || this.positions.down) {
+      this.clearPendingBuyConfirm("local position already recorded");
+      return;
+    }
+
+    const now = nowMs ?? Date.now();
+    if (now < pending.nextCheckAtMs) return;
+
+    // Mark next healthy poll time up front so overlapping ticks don't stampede.
+    pending.nextCheckAtMs = now + PENDING_BUY_CONFIRM_POLL_MS;
+
     try {
+      if (pending.orderId) {
+        const snap = await fetchOpenOrder(this.userId, pending.orderId);
+        if (snap) {
+          const matched = Math.max(0, snap.sizeMatched);
+          const status = snap.status.toLowerCase();
+          if (matched > 0 || status === "matched") {
+            const fillShares =
+              matched > 0 ? matched : Math.max(1, pending.sharesHint ?? 0);
+            const fillPrice =
+              snap.price > 0
+                ? snap.price
+                : pending.limitPriceHint && pending.limitPriceHint > 0
+                  ? pending.limitPriceHint
+                  : 0;
+            if (isValidShareSize(fillShares) && isValidSharePrice(fillPrice)) {
+              const tokenId = pending.tokenId ?? snap.assetId;
+              const conditionId = pending.conditionId ?? snap.market;
+              logService.warn(
+                "trading",
+                `Pending buy confirmed via order: ${pending.side.toUpperCase()} ${fillShares} sh @ ${(fillPrice * 100).toFixed(1)}¢`,
+              );
+              await this.recordBuyFill(
+                state,
+                pending.side,
+                fillShares,
+                fillPrice,
+                fillShares * fillPrice,
+                tokenId,
+                conditionId,
+                pending.slug,
+                pending.source,
+                undefined,
+                pending.buyPhaseIdx,
+              );
+              if (!this.isLiveArmed()) {
+                const nowSec = Math.floor(Date.now() / 1000);
+                this.autoEngine.adoptExternalBuy(
+                  state,
+                  pending.side,
+                  fillShares,
+                  fillPrice,
+                  pending.buyPhaseIdx ?? 0,
+                  nowSec,
+                );
+                this.autoEngine.suppressBuysForWindow();
+              }
+              this.clearPendingBuyConfirm("order filled");
+              return;
+            }
+          }
+          if (this.isClearlyUnfilledOrderStatus(status) && matched <= 0) {
+            // Still verify positions once — race fill can land after cancel.
+            // Fall through to positions check below.
+          } else if (status === "live" || status === "delayed") {
+            this.schedulePendingBuyConfirmRetry(PENDING_BUY_CONFIRM_POLL_MS);
+            return;
+          }
+        }
+      }
+
       const pair = await fetchCurrentUpDownMarket(state.series);
+      const conditionId = pending.conditionId ?? pair.conditionId;
       const rows = await fetchUserPositions(this.userId, {
-        conditionId: pair.conditionId,
+        conditionId,
         sizeThreshold: 0,
       });
-      this.onChainBackoffMs = 0;
+      this.pendingBuyConfirmBackoffMs = 0;
+
       for (const side of SIDES_ORDER) {
-        const tokenId = side === "up" ? pair.yesTokenId : pair.noTokenId;
-        const match = findPosition(rows, {
-          asset: tokenId,
-          conditionId: pair.conditionId,
+        const sideToken = side === "up" ? pair.yesTokenId : pair.noTokenId;
+        const sideMatch = findPosition(rows, {
+          asset: sideToken,
+          conditionId,
         });
-        if (!match) continue;
-        const shares = Number(match.size);
-        const price = Number(match.avgPrice);
+        if (!sideMatch) continue;
+        const shares = Number(sideMatch.size);
+        const price = Number(sideMatch.avgPrice);
         if (!isValidShareSize(shares) || !isValidSharePrice(price)) continue;
-        const cost = Number(match.initialValue ?? shares * price);
+        const cost = Number(sideMatch.initialValue ?? shares * price);
         logService.warn(
           "trading",
-          `Adopting on-chain ${side.toUpperCase()} position: ${shares} sh @ ${(price * 100).toFixed(1)}¢ — blocking duplicate buys`,
+          `Pending buy confirmed on-chain: ${side.toUpperCase()} ${shares} sh @ ${(price * 100).toFixed(1)}¢`,
         );
         await this.recordBuyFill(
           state,
@@ -1823,39 +1994,62 @@ export class LiveTradingService {
           shares,
           price,
           cost,
-          tokenId,
-          pair.conditionId,
-          match.slug ?? pair.slug,
-          "auto",
+          sideToken,
+          conditionId,
+          sideMatch.slug ?? pending.slug ?? pair.slug,
+          pending.source,
+          undefined,
+          pending.buyPhaseIdx,
         );
-        const nowSec = Math.floor(Date.now() / 1000);
-        const setup = this.resolveAutoSimSetup(state);
-        const phaseIdx = setup
-          ? phaseIndexForState(state, setup.phaseSplit, nowSec)
-          : 0;
-        this.blockFurtherBuys(state, "on-chain position detected");
         if (!this.isLiveArmed()) {
-          this.autoEngine.adoptExternalBuy(state, side, shares, price, phaseIdx, nowSec);
+          const nowSec = Math.floor(Date.now() / 1000);
+          this.autoEngine.adoptExternalBuy(
+            state,
+            side,
+            shares,
+            price,
+            pending.buyPhaseIdx ?? 0,
+            nowSec,
+          );
           this.autoEngine.suppressBuysForWindow();
         }
-        this.liveFakWatch = null;
-        return true;
+        this.clearPendingBuyConfirm("on-chain position found");
+        return;
       }
+
+      // Successful empty positions read: if order is clearly dead (or no order id
+      // after at least one successful empty scan), release the buy lock.
+      if (pending.orderId) {
+        const snap = await fetchOpenOrder(this.userId, pending.orderId);
+        const status = snap?.status?.toLowerCase() ?? "";
+        const matched = Math.max(0, snap?.sizeMatched ?? 0);
+        if (snap && this.isClearlyUnfilledOrderStatus(status) && matched <= 0) {
+          this.clearPendingBuyConfirm("order unfilled, no on-chain position");
+          return;
+        }
+        if (!snap && now - pending.startedAtMs >= 15_000) {
+          // Order vanished from open book and positions empty — treat as no fill.
+          this.clearPendingBuyConfirm("order gone, no on-chain position");
+          return;
+        }
+      } else if (now - pending.startedAtMs >= 15_000) {
+        // Ambiguous post with no order id: after a successful empty positions
+        // read and a short settle window, allow buys again.
+        this.clearPendingBuyConfirm("no on-chain position after settle window");
+        return;
+      }
+
+      this.schedulePendingBuyConfirmRetry(PENDING_BUY_CONFIRM_POLL_MS);
     } catch (err) {
       const message = String(err);
       const isRateLimited = /\b429\b/.test(message) || /rate.?limit/i.test(message);
       if (isRateLimited) {
-        this.onChainBackoffMs = Math.min(120_000, Math.max(15_000, this.onChainBackoffMs * 2 || 15_000));
-        this.onChainCheckNotBeforeMs = Date.now() + this.onChainBackoffMs;
-        logService.warn(
-          "trading",
-          `On-chain position check rate-limited; backing off ${Math.round(this.onChainBackoffMs / 1000)}s`,
-        );
+        this.notePendingBuyConfirmRateLimit();
       } else {
-        logService.warn("trading", `On-chain position check failed: ${message}`);
+        logService.warn("trading", `Pending buy confirm failed: ${message}`);
+        this.schedulePendingBuyConfirmRetry(PENDING_BUY_CONFIRM_POLL_MS);
       }
     }
-    return false;
   }
 
   async refreshScheduleContext(force = false): Promise<void> {
@@ -1959,6 +2153,7 @@ export class LiveTradingService {
     this.ensureWindow(state);
     const windowRolled = prevSessionKey != null && prevSessionKey !== this.sessionKey;
     await this.refreshScheduleContext(windowRolled);
+    await this.resolvePendingBuyConfirm(state, nowMs);
 
     if (!this.config.autoTrade) {
       if (this.overrideRestingBuy) await this.cancelOverrideRestingBuy("autoTrade off");
@@ -2201,11 +2396,6 @@ export class LiveTradingService {
     w.prevAskCents = askCents;
     if (!shouldFire) return;
 
-    if (await this.adoptOnChainPositionIfAny(state, { force: true })) {
-      this.liveFakWatch = null;
-      return;
-    }
-
     logService.info(
       "trading",
       `FAK buy firing: ${w.side} up to ${w.shares} sh @ ≤${w.triggerCents}¢`,
@@ -2221,7 +2411,7 @@ export class LiveTradingService {
       centsToPrice(w.triggerCents),
       phaseIdx,
     );
-    // Keep the watch only for clearly-unfilled retries; block/adopt clears via isBuyBlocked.
+    // Keep the watch only for clearly-unfilled retries; pending/block clears via isBuyBlocked.
     if (result.ok || this.isBuyBlocked(state) || this.positions.up || this.positions.down) {
       this.liveFakWatch = null;
     }
@@ -2423,13 +2613,21 @@ export class LiveTradingService {
           "trading",
           `Giving up GTD buy cancel after ${item.attempts} tries (${item.kind} ${item.resting.orderId.slice(0, 10)}…)`,
         );
-        // Last-ditch cancel; fill may still be adopted via on-chain check.
+        // Last-ditch cancel; confirm any race fill via pending buy poll.
         void cancelOpenOrder(this.userId, item.resting.orderId, { quiet: true });
         if (!this.positions.up && !this.positions.down) {
-          const adopted = await this.adoptOnChainPositionIfAny(state, { force: true });
-          if (!adopted) {
-            this.blockFurtherBuys(state, "GTD cancel abandoned — possible orphan fill");
-          }
+          this.beginPendingBuyConfirm(state, {
+            side: item.resting.side,
+            source: "auto",
+            reason: `GTD cancel abandoned (${item.kind} ${item.resting.orderId.slice(0, 10)}…)`,
+            orderId: item.resting.orderId,
+            tokenId: item.resting.tokenId,
+            conditionId: item.resting.conditionId,
+            slug: item.resting.slug,
+            buyPhaseIdx: item.resting.phaseIdx,
+            sharesHint: item.resting.shares,
+            limitPriceHint: item.resting.limitPrice,
+          });
         }
         continue;
       }
@@ -2733,8 +2931,6 @@ export class LiveTradingService {
 
     if (this.orderInFlight) return;
     if (crossingAborted) return;
-
-    if (await this.adoptOnChainPositionIfAny(state, { force: true })) return;
 
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;
@@ -3298,7 +3494,9 @@ export class LiveTradingService {
   }
 
   canManualTrade(side: "up" | "down", leg: "buy" | "sell"): boolean {
-    if (leg === "buy") return !this.positions.up && !this.positions.down;
+    if (leg === "buy") {
+      return !this.positions.up && !this.positions.down && !this.pendingBuyConfirm;
+    }
     return Boolean(this.positions[side]);
   }
 
@@ -3312,11 +3510,13 @@ export class LiveTradingService {
       return { ok: false, error: "Allow trade to place orders" };
     }
     if (leg === "buy") {
-      if (await this.adoptOnChainPositionIfAny(state)) {
-        return { ok: false, error: "Already holding position" };
-      }
       if (this.isBuyBlocked(state)) {
-        return { ok: false, error: "Buy blocked until window rolls (prior order unresolved)" };
+        return {
+          ok: false,
+          error: this.pendingBuyConfirm
+            ? "Buy pending confirmation"
+            : "Buy blocked until window rolls (prior order unresolved)",
+        };
       }
     }
     if (!this.canManualTrade(side, leg)) {
@@ -3737,12 +3937,8 @@ export class LiveTradingService {
       if (this.isBuyBlocked(state) && source === "auto") {
         return { ok: false, error: "Buy blocked for this window" };
       }
-      if (await this.adoptOnChainPositionIfAny(state)) {
-        const pos = this.positions.up ?? this.positions.down;
-        if (pos) {
-          return { ok: true, fillShares: pos.shares, fillPrice: pos.avgPrice };
-        }
-        return { ok: false, error: "Already holding on-chain position" };
+      if (this.pendingBuyConfirm) {
+        return { ok: false, error: "Buy pending confirmation" };
       }
     }
     this.orderInFlight = true;
@@ -3758,19 +3954,22 @@ export class LiveTradingService {
         state,
       });
       if (!result.success || result.fillPrice == null || result.fillShares == null) {
-        if (leg === "buy") {
-          const adopted = await this.adoptOnChainPositionIfAny(state, { force: true });
-          if (adopted) {
-            const pos = this.positions[side] ?? this.positions.up ?? this.positions.down;
-            if (pos) {
-              return { ok: true, fillShares: pos.shares, fillPrice: pos.avgPrice };
-            }
-          }
-          if (result.orderId || result.ambiguous) {
-            const reason = result.ambiguous
-              ? (result.error ?? "ambiguous buy response")
-              : `unverified buy (order ${result.orderId!.slice(0, 10)}…)`;
-            this.blockFurtherBuys(state, reason);
+        if (leg === "buy" && result.ambiguous) {
+          const reason = result.error ?? "ambiguous buy response";
+          this.beginPendingBuyConfirm(state, {
+            side,
+            source,
+            reason,
+            orderId: result.orderId,
+            tokenId: result.tokenId,
+            conditionId: result.conditionId,
+            slug: result.slug,
+            buyPhaseIdx,
+          });
+          await this.resolvePendingBuyConfirm(state);
+          const pos = this.positions[side] ?? this.positions.up ?? this.positions.down;
+          if (pos) {
+            return { ok: true, fillShares: pos.shares, fillPrice: pos.avgPrice };
           }
         }
         return { ok: false, error: result.error ?? "Order failed" };
