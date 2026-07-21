@@ -10,7 +10,7 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
-import { gapAllowsBuy, priceToCents, sellEnabledForPhase, SIDES_ORDER, stabilizeAllowsBuyForSide } from "./phase-config.js";
+import { describeGapFilterCancelReason, gapAllowsBuy, priceToCents, sellEnabledForPhase, SIDES_ORDER, stabilizeAllowsBuyForSide } from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -104,7 +104,7 @@ function sessionKeyFor(state: LiveWindowState): string {
 const GTD_FILTER_REPRESS_MS = 2500;
 
 function isRoutineGtdCancelReason(reason: string): boolean {
-  return reason === "gap filter" || reason === "stabilize filter";
+  return reason === "stabilize filter" || reason.startsWith("gap filter");
 }
 
 function depthFromState(state: LiveWindowState): DepthQuote {
@@ -898,7 +898,7 @@ export class SimulatorEngine {
             : !phase.buyEnabled
               ? "buy disabled"
               : !gapAllowsBuy(restingSide, phase, state.assetGap)
-                ? "gap filter"
+                ? describeGapFilterCancelReason(restingSide, phase, state.assetGap)
                 : "stabilize filter",
         simNowMs,
       );

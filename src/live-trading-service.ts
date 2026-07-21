@@ -62,6 +62,7 @@ import { isTradingExecutor } from "./trading-executor.js";
 import { seriesMarketHub } from "./series-market-hub.js";
 import {
   centsToPrice,
+  describeGapFilterCancelReason,
   gapAllowsBuy,
   gtdExpirationUnix,
   phaseIndexForState,
@@ -532,7 +533,7 @@ const PENDING_BUY_CONFIRM_POLL_MS = 2500;
 const MAX_POSITION_CARDS = 50;
 
 function isRoutineGtdCancelReason(reason: string): boolean {
-  return reason === "gap filter" || reason === "stabilize filter";
+  return reason === "stabilize filter" || reason.startsWith("gap filter");
 }
 
 function isBalanceAllowanceError(err: string): boolean {
@@ -2915,7 +2916,7 @@ export class LiveTradingService {
               : !phase.buyEnabled
                 ? "buy disabled"
                 : !restingGapOk
-                  ? "gap filter"
+                  ? describeGapFilterCancelReason(r.side, phase, state.assetGap)
                   : "stabilize filter",
           now,
           state,
@@ -3027,7 +3028,11 @@ export class LiveTradingService {
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const crossingCancellationDue = this.isLivePhaseAbortCancellationDue(phaseIdx);
     if (!crossingCancellationDue && !gapAllowsBuy(resting.side, phase, state.assetGap)) {
-      await this.cancelRestingBuy("gap filter", nowMs ?? nowSec * 1000, state);
+      await this.cancelRestingBuy(
+        describeGapFilterCancelReason(resting.side, phase, state.assetGap),
+        nowMs ?? nowSec * 1000,
+        state,
+      );
       return;
     }
     if (!crossingCancellationDue && !stabilizeAllowsBuyForSide(phase, state, resting.side)) {

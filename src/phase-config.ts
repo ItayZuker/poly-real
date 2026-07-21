@@ -132,6 +132,32 @@ export function gapAllowsBuy(
   return assetGap <= 0;
 }
 
+/** Human-readable cancel reason when a resting GTD fails the gap filter. */
+export function describeGapFilterCancelReason(
+  side: "up" | "down",
+  phase: SimPhaseConfig,
+  assetGap: number | null | undefined,
+): string {
+  const sideLabel = side.toUpperCase();
+  if (assetGap == null || !Number.isFinite(assetGap)) {
+    return `gap filter: no gap (${sideLabel})`;
+  }
+
+  const gapLabel = assetGap >= 0 ? `+${assetGap.toFixed(2)}` : assetGap.toFixed(2);
+  const abs = Math.abs(assetGap);
+  if (phase.minGap > 0 && abs + 1e-9 < phase.minGap) {
+    return `gap filter: |gap| ${abs.toFixed(2)} < min ${phase.minGap}`;
+  }
+  if (phase.maxGap > 0 && abs - 1e-9 > phase.maxGap) {
+    return `gap filter: |gap| ${abs.toFixed(2)} > max ${phase.maxGap}`;
+  }
+  if (phase.gapVsPtb === "none") {
+    return `gap filter: none (${sideLabel}, gap ${gapLabel})`;
+  }
+
+  return `gap filter: PTB side flip (${sideLabel}, gap ${gapLabel})`;
+}
+
 /** Append best-ask ¢ samples from the current book snapshot (one sample per side per book tick). */
 export function recordAskSamples(state: LiveWindowState): void {
   state.bookTickSequence = Math.max(0, Math.floor(state.bookTickSequence ?? 0)) + 1;
