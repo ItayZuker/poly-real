@@ -586,7 +586,6 @@ function normalizeTradingConfig(raw: Partial<TradingConfig> | null | undefined):
   };
   if (!next.autoTrade) {
     next.useSchedule = false;
-    next.startTrading = false;
   }
   return next;
 }
@@ -1132,7 +1131,6 @@ export class LiveTradingService {
     }
     if (!this.config.autoTrade) {
       this.config.useSchedule = false;
-      this.config.startTrading = false;
     }
     this.persistConfig();
     const isLive =
@@ -1161,7 +1159,7 @@ export class LiveTradingService {
 
   private canExecuteOrders(): boolean {
     if (!isTradingExecutor()) return false;
-    if (!this.config.autoTrade) return true;
+    // Allow trade gates both auto and manual order placement for this market.
     return this.config.startTrading;
   }
 

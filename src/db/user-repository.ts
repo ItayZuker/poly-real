@@ -114,7 +114,6 @@ function normalizeTrading(raw: Partial<TradingConfig> | null | undefined): Tradi
   };
   if (!next.autoTrade) {
     next.useSchedule = false;
-    next.startTrading = false;
   }
   return next;
 }

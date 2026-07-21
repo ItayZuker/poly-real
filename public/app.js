@@ -2593,7 +2593,17 @@ async function onMarketSeriesChanged(nextSeries) {
   const res = await fetch(`/api/window?series=${encodeURIComponent(selectedSeries)}`);
   if (res.ok) updateWindowUI(await res.json());
   const config = await loadTradingConfig();
-  if (config) applyTradingConfigToUi(config);
+  applyTradingConfigToUi(config ?? readLocalTradingConfig() ?? {
+    autoTrade: false,
+    useSchedule: false,
+    startTrading: false,
+    manualOrderUnit: "shares",
+    manualShares: 10,
+    buyOverrideEnabled: false,
+    buyOverridePriceCents: 0,
+    buyOverrideShares: 0,
+    buyOverrideDirection: "with",
+  });
   void loadHeatmap();
   if (window.SchedulePlacements?.loadPlacements) {
     await window.SchedulePlacements.loadPlacements({ reloadStats: true });
@@ -3492,7 +3502,8 @@ function syncWalletControls(config) {
 
   if (sharesField) sharesField.hidden = autoTradeOn;
   if (useScheduleField) useScheduleField.hidden = !autoTradeOn;
-  if (startTradingField) startTradingField.hidden = !autoTradeOn;
+  // Allow trade stays visible per market (header control), even when Auto Trade is off.
+  if (startTradingField) startTradingField.hidden = false;
   if (unitSelect) {
     unitSelect.value = config?.manualOrderUnit === "usdc" ? "usdc" : "shares";
     syncManualAmountInputAttrs(unitSelect.value);
@@ -3546,8 +3557,8 @@ function readLocalTradingConfig() {
     const manualOrderUnit = parsed.manualOrderUnit === "usdc" ? "usdc" : "shares";
     return {
       autoTrade,
-      useSchedule: autoTrade && Boolean(parsed.useSchedule),
-      startTrading: autoTrade && Boolean(parsed.startTrading),
+      useSchedule: Boolean(parsed.useSchedule),
+      startTrading: Boolean(parsed.startTrading),
       manualOrderUnit,
       manualShares: normalizeManualAmount(parsed.manualShares, manualOrderUnit),
       buyOverrideEnabled: Boolean(parsed.buyOverrideEnabled),
@@ -3718,9 +3729,9 @@ function bindTradeToggles() {
   });
 
   autoTradeInput.addEventListener("change", async () => {
+    // Use Schedule only makes sense with Auto Trade; do not touch Allow trade.
     if (!autoTradeInput.checked) {
       useScheduleInput.checked = false;
-      startTradingInput.checked = false;
     }
     const patch = buildTradingConfigPatch();
     writeLocalTradingConfig(patch);
@@ -3760,6 +3771,7 @@ function bindTradeToggles() {
   });
 
   startTradingInput.addEventListener("change", async () => {
+    // Allow trade only switches real vs demo — leave Auto Trade / Use Schedule alone.
     const patch = buildTradingConfigPatch();
     writeLocalTradingConfig(patch);
     const config = await pushTradingConfig(patch);
@@ -3768,7 +3780,9 @@ function bindTradeToggles() {
     appendLogEntry({
       level: "info",
       source: "client",
-      message: startTradingInput.checked ? "Allow trade enabled" : "Allow trade disabled (preview mode)",
+      message: startTradingInput.checked
+        ? "Allow trade enabled (real hits)"
+        : "Allow trade disabled (demo hits)",
     });
   });
 
