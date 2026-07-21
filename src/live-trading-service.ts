@@ -2433,7 +2433,7 @@ export class LiveTradingService {
     }
     logService.info(
       "trading",
-      `Cancel resting GTD (${reason}) ${resting.side.toUpperCase()} ${resting.shares} sh @ ${(resting.limitPrice * 100).toFixed(0)}¢ phase ${((resting.phaseIdx ?? 0) + 1)}`,
+      `Cancel resting GTD (${reason}) ${resting.side.toUpperCase()} ${resting.shares} sh @ ${(resting.limitPrice * 100).toFixed(0)}¢ [phase ${((resting.phaseIdx ?? 0) + 1)}]`,
     );
     if (!this.positions.up && !this.positions.down) {
       this.autoEngine.setExternalBuyPaused(false);

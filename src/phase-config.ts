@@ -138,24 +138,22 @@ export function describeGapFilterCancelReason(
   phase: SimPhaseConfig,
   assetGap: number | null | undefined,
 ): string {
-  const sideLabel = side.toUpperCase();
   if (assetGap == null || !Number.isFinite(assetGap)) {
-    return `gap filter: no gap (${sideLabel})`;
+    return "gap filter - no gap";
   }
 
-  const gapLabel = assetGap >= 0 ? `+${assetGap.toFixed(2)}` : assetGap.toFixed(2);
   const abs = Math.abs(assetGap);
   if (phase.minGap > 0 && abs + 1e-9 < phase.minGap) {
-    return `gap filter: |gap| ${abs.toFixed(2)} < min ${phase.minGap}`;
+    return "gap filter - below minGap";
   }
   if (phase.maxGap > 0 && abs - 1e-9 > phase.maxGap) {
-    return `gap filter: |gap| ${abs.toFixed(2)} > max ${phase.maxGap}`;
+    return "gap filter - above maxGap";
   }
   if (phase.gapVsPtb === "none") {
-    return `gap filter: none (${sideLabel}, gap ${gapLabel})`;
+    return "gap filter - none";
   }
 
-  return `gap filter: PTB side flip (${sideLabel}, gap ${gapLabel})`;
+  return "gap filter - PTB side flip";
 }
 
 /** Append best-ask ¢ samples from the current book snapshot (one sample per side per book tick). */
