@@ -10,8 +10,11 @@ let chartWindowStart = null;
 let chainlinkChartFrame = null;
 let pendingChainlinkTicks = [];
 
-const MAX_LOG_LINES = 50;
+const MAX_POSITION_CARDS = 50;
 const LOG_CLEARED_SESSION_KEY = "poly-real:log-cleared";
+
+let logCurrentWindowStart = null;
+let logPreviousWindowStart = null;
 
 function shortAddress(addr) {
   if (!addr || addr.length < 10) return addr || "—";
@@ -737,6 +740,34 @@ function isLogAtBottom(output, threshold = 12) {
   return output.scrollHeight - output.scrollTop - output.clientHeight <= threshold;
 }
 
+function isLogWindowKept(windowStart) {
+  if (windowStart == null || !Number.isFinite(windowStart)) {
+    return logCurrentWindowStart == null;
+  }
+  if (logCurrentWindowStart == null) return true;
+  return windowStart === logCurrentWindowStart || windowStart === logPreviousWindowStart;
+}
+
+function onLogWindowChanged(windowStart) {
+  if (windowStart == null || !Number.isFinite(windowStart)) return;
+  if (logCurrentWindowStart === windowStart) return;
+  logPreviousWindowStart = logCurrentWindowStart;
+  logCurrentWindowStart = windowStart;
+  pruneLogDomToTwoWindows();
+}
+
+function pruneLogDomToTwoWindows() {
+  const output = $("log-output");
+  if (!output) return;
+  for (const line of [...output.children]) {
+    const raw = line.dataset?.windowStart;
+    const ws = raw != null && raw !== "" ? Number(raw) : null;
+    if (!isLogWindowKept(Number.isFinite(ws) ? ws : null)) {
+      line.remove();
+    }
+  }
+}
+
 function appendLogEntry(entry) {
   const output = $("log-output");
   if (!output) return;
@@ -744,10 +775,19 @@ function appendLogEntry(entry) {
   const { message, level = "info", source, tMs } = entry ?? {};
   if (!message) return;
 
+  const windowStart =
+    entry?.windowStart != null && Number.isFinite(Number(entry.windowStart))
+      ? Number(entry.windowStart)
+      : windowState?.windowStart ?? null;
+  if (!isLogWindowKept(windowStart)) return;
+
   const stickToBottom = isLogAtBottom(output);
 
   const line = document.createElement("div");
   line.className = `log-line log-line-${level}`;
+  if (windowStart != null && Number.isFinite(windowStart)) {
+    line.dataset.windowStart = String(windowStart);
+  }
 
   const time = document.createElement("span");
   time.className = "log-line-time";
@@ -763,9 +803,7 @@ function appendLogEntry(entry) {
   line.append(time, sourceEl, text);
   output.appendChild(line);
 
-  while (output.children.length > MAX_LOG_LINES) {
-    output.removeChild(output.firstChild);
-  }
+  pruneLogDomToTwoWindows();
 
   if (stickToBottom) {
     output.scrollTop = output.scrollHeight;
@@ -787,6 +825,8 @@ function clearLog() {
   } catch {
     // ignore
   }
+  logCurrentWindowStart = windowState?.windowStart ?? null;
+  logPreviousWindowStart = null;
   clearLogDom();
 }
 
@@ -2107,7 +2147,7 @@ function persistDemoPositionCards() {
   try {
     localStorage.setItem(
       userScopedStorageKey(DEMO_POSITION_CARDS_KEY),
-      JSON.stringify(demoPositionCards.slice(0, 100)),
+      JSON.stringify(demoPositionCards.slice(0, MAX_POSITION_CARDS)),
     );
   } catch {
     // ignore
@@ -2146,7 +2186,7 @@ function upsertDemoPositionCard(card) {
   } else {
     demoPositionCards.unshift({ ...card, demo: true });
   }
-  if (demoPositionCards.length > 100) demoPositionCards.length = 100;
+  if (demoPositionCards.length > MAX_POSITION_CARDS) demoPositionCards.length = MAX_POSITION_CARDS;
   persistDemoPositionCards();
 }
 
@@ -2283,7 +2323,7 @@ function updatePositionsPanel(state) {
   const cards = (Array.isArray(rawCards)
     ? rawCards.filter((c) => !c?.series || c.series === series)
     : []
-  ).slice(0, 10);
+  ).slice(0, MAX_POSITION_CARDS);
 
   const fingerprint = positionsFingerprint(cards);
   if (fingerprint === lastPositionsFingerprint) return;
@@ -2335,8 +2375,17 @@ function syncGraphSaveBtn(state = windowState) {
 }
 
 function updateWindowUI(state) {
+  const prevWindowStart = windowState?.windowStart;
   windowState = state;
   window.windowState = state;
+
+  if (
+    state?.windowStart != null &&
+    Number.isFinite(state.windowStart) &&
+    state.windowStart !== prevWindowStart
+  ) {
+    onLogWindowChanged(state.windowStart);
+  }
 
   if (pendingChainlinkTicks.length > 0) {
     const queued = pendingChainlinkTicks;
@@ -2504,7 +2553,11 @@ function connectSSE() {
     if (isLogClearedThisSession()) return;
     const entries = JSON.parse(e.data);
     if (Array.isArray(entries)) {
-      for (const entry of entries) appendLogEntry(entry);
+      for (const entry of entries) {
+        if (isLogWindowKept(entry?.windowStart ?? windowState?.windowStart ?? null)) {
+          appendLogEntry(entry);
+        }
+      }
       scrollLogToBottom();
     }
   });

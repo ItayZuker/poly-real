@@ -248,6 +248,7 @@ export class DisplayService {
         this.state.upAskCentsSamples = [];
         this.state.downAskCentsSamples = [];
         // Keep prevCloseAsset until Polymarket open arrives.
+        logService.setActiveWindow(pair.windowStart);
         this.prefetchedNextWindowStart = null;
         this.prefetchedYesTokenId = null;
         this.prefetchedNoTokenId = null;

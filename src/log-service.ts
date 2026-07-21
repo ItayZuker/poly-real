@@ -5,15 +5,17 @@ export interface LogEntry {
   level: LogLevel;
   source: string;
   message: string;
+  /** Market window start (unix sec) when the line was emitted. */
+  windowStart?: number;
 }
-
-const MAX_BUFFER = 50;
 
 type LogListener = (entry: LogEntry) => void;
 
 class LogService {
   private readonly buffer: LogEntry[] = [];
   private readonly listeners = new Set<LogListener>();
+  private currentWindowStart: number | null = null;
+  private previousWindowStart: number | null = null;
 
   info(source: string, message: string): void {
     this.emit("info", source, message);
@@ -31,6 +33,15 @@ class LogService {
     this.emit("error", source, message);
   }
 
+  /** Track display window rolls — buffer keeps current + previous window only. */
+  setActiveWindow(windowStart: number): void {
+    if (!Number.isFinite(windowStart) || windowStart <= 0) return;
+    if (this.currentWindowStart === windowStart) return;
+    this.previousWindowStart = this.currentWindowStart;
+    this.currentWindowStart = windowStart;
+    this.pruneBuffer();
+  }
+
   getRecent(): LogEntry[] {
     return [...this.buffer];
   }
@@ -40,17 +51,31 @@ class LogService {
     return () => this.listeners.delete(listener);
   }
 
+  private isWindowKept(windowStart?: number): boolean {
+    if (this.currentWindowStart == null) return true;
+    if (windowStart == null) return false;
+    return (
+      windowStart === this.currentWindowStart || windowStart === this.previousWindowStart
+    );
+  }
+
+  private pruneBuffer(): void {
+    if (this.buffer.length === 0) return;
+    const kept = this.buffer.filter((entry) => this.isWindowKept(entry.windowStart));
+    this.buffer.length = 0;
+    this.buffer.push(...kept);
+  }
+
   private emit(level: LogLevel, source: string, message: string): void {
     const entry: LogEntry = {
       tMs: Date.now(),
       level,
       source,
       message,
+      windowStart: this.currentWindowStart ?? undefined,
     };
     this.buffer.push(entry);
-    if (this.buffer.length > MAX_BUFFER) {
-      this.buffer.shift();
-    }
+    this.pruneBuffer();
 
     const line = `[${source}] ${message}`;
     if (level === "error") console.error(line);

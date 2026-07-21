@@ -505,6 +505,8 @@ function emptyQuoteLocks(): SimQuoteLocks {
 const GTD_FILTER_REPRESS_MS = 2500;
 /** Quiet period after sell balance/allowance reject (tokens not credited yet). */
 const GTD_SELL_BALANCE_REPRESS_MS = 2500;
+/** Max position cards kept in RAM and sent to the UI scroll. */
+const MAX_POSITION_CARDS = 50;
 
 function isRoutineGtdCancelReason(reason: string): boolean {
   return reason === "gap filter" || reason === "stabilize filter";
@@ -756,7 +758,7 @@ export class LiveTradingService {
       }
 
       restored.sort((a, b) => (b.buyAt ?? 0) - (a.buyAt ?? 0));
-      this.positionCards = [...openCards, ...restored].slice(0, 100);
+      this.positionCards = [...openCards, ...restored].slice(0, MAX_POSITION_CARDS);
       this.statsHydrated = true;
 
       const backfilled = await this.backfillOrphanPlacementIds();
@@ -1689,7 +1691,7 @@ export class LiveTradingService {
     this.lastGtdBuyPhaseIdx = -1;
     this.gtdBuyBlockedWindowKey = null;
     this.liveFakWatch = null;
-    this.pendingBuyCancels = [];
+    // Keep pendingBuyCancels — old GTDs may still fill after window roll.
     this.liveAbortedBuyPhases.clear();
     this.livePendingPhaseAborts.clear();
     this.liveCompletedPhaseAbortCancellations.clear();
@@ -1764,6 +1766,8 @@ export class LiveTradingService {
     if (this.manualBuyPending) return true;
     if (this.manualBuyOverrideWindowKey === key) return true;
     if (this.buyBlockedWindowKey === key) return true;
+    // Block while a prior GTD cancel may still race-fill on the CLOB.
+    if (this.pendingBuyCancels.length > 0) return true;
     return false;
   }
 
@@ -1779,13 +1783,18 @@ export class LiveTradingService {
    * and suppress more buys. Prevents duplicate FOK/FAK submissions after a fill
    * that the app failed to record.
    */
-  private async adoptOnChainPositionIfAny(state: LiveWindowState): Promise<boolean> {
+  private async adoptOnChainPositionIfAny(
+    state: LiveWindowState,
+    options?: { force?: boolean },
+  ): Promise<boolean> {
     if (this.positions.up || this.positions.down) return true;
     if (!isTradingExecutor()) return false;
     const nowMs = Date.now();
-    if (nowMs < this.onChainCheckNotBeforeMs) return false;
+    if (!options?.force && nowMs < this.onChainCheckNotBeforeMs) return false;
     // Throttle routine empty checks even when the API is healthy.
-    this.onChainCheckNotBeforeMs = nowMs + Math.max(5_000, this.onChainBackoffMs);
+    if (!options?.force) {
+      this.onChainCheckNotBeforeMs = nowMs + Math.max(5_000, this.onChainBackoffMs);
+    }
     try {
       const pair = await fetchCurrentUpDownMarket(state.series);
       const rows = await fetchUserPositions(this.userId, {
@@ -2192,12 +2201,16 @@ export class LiveTradingService {
     w.prevAskCents = askCents;
     if (!shouldFire) return;
 
-    this.liveFakWatch = null;
+    if (await this.adoptOnChainPositionIfAny(state, { force: true })) {
+      this.liveFakWatch = null;
+      return;
+    }
+
     logService.info(
       "trading",
       `FAK buy firing: ${w.side} up to ${w.shares} sh @ ≤${w.triggerCents}¢`,
     );
-    await this.executeOrder(
+    const result = await this.executeOrder(
       state,
       w.side,
       "buy",
@@ -2208,6 +2221,10 @@ export class LiveTradingService {
       centsToPrice(w.triggerCents),
       phaseIdx,
     );
+    // Keep the watch only for clearly-unfilled retries; block/adopt clears via isBuyBlocked.
+    if (result.ok || this.isBuyBlocked(state) || this.positions.up || this.positions.down) {
+      this.liveFakWatch = null;
+    }
   }
 
   private async cancelRestingBuy(
@@ -2408,6 +2425,12 @@ export class LiveTradingService {
         );
         // Last-ditch cancel; fill may still be adopted via on-chain check.
         void cancelOpenOrder(this.userId, item.resting.orderId, { quiet: true });
+        if (!this.positions.up && !this.positions.down) {
+          const adopted = await this.adoptOnChainPositionIfAny(state, { force: true });
+          if (!adopted) {
+            this.blockFurtherBuys(state, "GTD cancel abandoned — possible orphan fill");
+          }
+        }
         continue;
       }
       const result = await cancelOpenOrder(this.userId, item.resting.orderId, { quiet: true });
@@ -2708,14 +2731,10 @@ export class LiveTradingService {
       if (this.restingBuy) return; // still open — don't place another
     }
 
-    // Block new phase GTD while a prior cancel is still settling — prevents dual
-    // live limits across a phase boundary.
-    if (this.pendingBuyCancels.some((p) => p.kind === "phase")) return;
-
     if (this.orderInFlight) return;
     if (crossingAborted) return;
 
-    if (await this.adoptOnChainPositionIfAny(state)) return;
+    if (await this.adoptOnChainPositionIfAny(state, { force: true })) return;
 
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;
@@ -3231,8 +3250,8 @@ export class LiveTradingService {
       if (resolvedPlacementId) {
         this.rememberActivatedPlacement(resolvedPlacementId);
       }
-      if (this.positionCards.length > 100) {
-        this.positionCards.length = 100;
+      if (this.positionCards.length > MAX_POSITION_CARDS) {
+        this.positionCards.length = MAX_POSITION_CARDS;
       }
       void this.enrichCardFromPolymarketBuy(cardId);
     }
@@ -3740,15 +3759,18 @@ export class LiveTradingService {
       });
       if (!result.success || result.fillPrice == null || result.fillShares == null) {
         if (leg === "buy") {
-          const adopted = await this.adoptOnChainPositionIfAny(state);
+          const adopted = await this.adoptOnChainPositionIfAny(state, { force: true });
           if (adopted) {
             const pos = this.positions[side] ?? this.positions.up ?? this.positions.down;
             if (pos) {
               return { ok: true, fillShares: pos.shares, fillPrice: pos.avgPrice };
             }
           }
-          if (result.ambiguous) {
-            this.blockFurtherBuys(state, result.error ?? "ambiguous buy response");
+          if (result.orderId || result.ambiguous) {
+            const reason = result.ambiguous
+              ? (result.error ?? "ambiguous buy response")
+              : `unverified buy (order ${result.orderId!.slice(0, 10)}…)`;
+            this.blockFurtherBuys(state, reason);
           }
         }
         return { ok: false, error: result.error ?? "Order failed" };
