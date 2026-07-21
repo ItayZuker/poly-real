@@ -184,10 +184,12 @@ export class DisplayService {
         this.lastPtbSide = ptbSide;
       }
     }
-    const tickMs = live.timestampMs;
+    // Phase / GTD scheduling must follow wall clock, not oracle stamp (which can lag
+    // or arrive out of order and briefly look like an earlier phase).
+    const tickMs = Date.now();
     this.state.lastTickMs = tickMs;
 
-    const tickSec = live.timestampMs / 1000;
+    const tickSec = tickMs / 1000;
     if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
       this.state.priceHistory.push({ t: tickSec, price: live.value });
       if (this.state.priceHistory.length > 2000) {

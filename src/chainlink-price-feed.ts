@@ -496,6 +496,10 @@ export class ChainlinkPriceFeed {
         ? timestampMs
         : Date.now();
 
+    // Drop out-of-order / replayed oracle stamps so trading never rewinds phase.
+    const prev = this.prices.get(asset);
+    if (prev && ts < prev.timestampMs) return;
+
     this.prices.set(asset, {
       value: parsedValue,
       timestampMs: ts,

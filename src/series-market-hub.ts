@@ -110,7 +110,7 @@ class SeriesFeed {
           this.lastPtbSide = ptbSide;
         }
       }
-      const tickSec = live.timestampMs / 1000;
+      const tickSec = Date.now() / 1000;
       if (tickSec >= this.state.windowStart && tickSec < this.state.windowEnd) {
         this.state.priceHistory.push({ t: tickSec, price: live.value });
         if (this.state.priceHistory.length > 2000) {
