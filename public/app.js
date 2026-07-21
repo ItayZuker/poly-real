@@ -1503,10 +1503,7 @@ function initLeftRowSplitter() {
   const initDefaultHeights = () => {
     const { maxContent } = getMetrics();
     if (maxContent < 1) return;
-    const defaultLog = Math.min(220, Math.max(120, Math.round(maxContent * 0.32)));
-    const trade = Math.max(80, maxContent - defaultLog);
-    applyHeights(trade, 0, defaultLog);
-    scrollLogToBottom();
+    applyHeights(0, maxContent, 0);
   };
 
   const clampPrevDrag = (clientY) => {
@@ -1907,21 +1904,6 @@ function drawPriceChart(state, options = {}) {
 function updateGraphPanel(state) {
   $("graph-ptb").textContent = fmtPrice(state.prevCloseAsset);
   $("graph-current").textContent = fmtPrice(state.assetPrice);
-
-  const ptbSourceEl = $("graph-ptb-source");
-  if (ptbSourceEl) {
-    if (state.prevCloseAsset != null) {
-      ptbSourceEl.textContent = "Polymarket open";
-      ptbSourceEl.title = "Polymarket crypto-price openPrice for this window";
-      ptbSourceEl.hidden = false;
-      ptbSourceEl.classList.toggle("is-provisional", false);
-    } else {
-      ptbSourceEl.textContent = "";
-      ptbSourceEl.title = "";
-      ptbSourceEl.hidden = true;
-      ptbSourceEl.classList.toggle("is-provisional", false);
-    }
-  }
 
   const gapEl = $("graph-gap");
   if (state.assetGap != null && Number.isFinite(state.assetGap)) {
@@ -3849,12 +3831,7 @@ function bindPageToggle() {
           const needsInit = !inlineTrade;
           if (needsInit) {
             const { maxContent } = leftColumnLayout.getMetrics();
-            const defaultLog = Math.min(220, Math.max(120, Math.round(maxContent * 0.32)));
-            leftColumnLayout.applyHeights(
-              Math.max(80, maxContent - defaultLog),
-              0,
-              defaultLog,
-            );
+            leftColumnLayout.applyHeights(0, maxContent, 0);
           } else {
             leftColumnLayout.reflowHeights();
           }

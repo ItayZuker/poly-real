@@ -2935,9 +2935,9 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  --trade-content-height: 252px;
-  --prev-content-height: 0px;
-  --log-content-height: 160px;
+  --trade-content-height: 0px;
+  --prev-content-height: 400px;
+  --log-content-height: 0px;
   --log-margin-top: 0px;
 }
 

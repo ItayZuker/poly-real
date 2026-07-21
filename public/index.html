@@ -312,7 +312,7 @@
               </div>
             </div>
           </div>
-          <div id="trade-body" class="trade-panel-body">
+          <div id="trade-body" class="trade-panel-body is-collapsed">
             <div class="wallet-summary-rows">
               <div class="wallet-control-fields">
                 <label class="wallet-control-field wallet-control-field--toggle" for="auto-trade">
@@ -424,7 +424,7 @@
               </div>
             </div>
           </div>
-          <div id="positions-list" class="positions-body is-collapsed">
+          <div id="positions-list" class="positions-body">
             <div class="positions-empty" id="positions-empty">No positions yet</div>
             <div class="positions-cards" id="positions-cards"></div>
           </div>
@@ -458,7 +458,7 @@
             </div>
             </div>
           </div>
-          <div id="log-output" class="log-output is-scrollable" role="log" aria-live="polite"></div>
+          <div id="log-output" class="log-output is-collapsed" role="log" aria-live="polite"></div>
         </section>
         </div>
       </div>
@@ -481,10 +481,7 @@
         <div class="sim-row">
           <div class="sim-box">
             <div class="sim-cell">
-              <div class="sim-label">
-                Price to Beat
-                <span id="graph-ptb-source" class="sim-label-hint" hidden></span>
-              </div>
+              <div class="sim-label">PTB</div>
               <div id="graph-ptb" class="sim-value">—</div>
             </div>
           </div>
