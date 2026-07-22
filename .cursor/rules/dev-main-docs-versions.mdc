@@ -16,14 +16,14 @@ When starting work, prefer being on `dev`. If creating a branch for a task, bran
 
 Product docs live in `public/docs/*.md` (index in `public/docs/manifest.json`).
 
-- Before changing user-facing behavior, read the matching doc page.
-- When you add or change a user-facing feature, update the matching Markdown file in the **same change**.
-- Do not invent UI/behavior that contradicts the docs; if code must diverge, update the docs.
+- Follow **Docs alignment and change permission** (always-apply rule): stay aligned with docs; **ask permission** before behavior/doc-affecting changes; update docs in the same work when approved.
 - Topic map (extend `manifest.json` when adding a new page):
   - Overview → `overview.md`
   - Onboarding → `getting-started.md`
   - Market page → `market.md`
   - Schedule / Heatmap → `schedule.md`
+  - Setups & phases → `setups-phases.md`
+  - Information flow → `data-flow.md`
   - Settings / wallet → `settings.md`
 
 Internal/schema notes may stay under repo `docs/` (not the homepage Docs tab).

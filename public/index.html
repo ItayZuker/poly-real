@@ -40,7 +40,9 @@
   <div id="auth-screen" class="auth-screen" hidden>
     <div class="auth-shell" aria-label="Home">
       <nav class="auth-tabs" role="tablist" aria-label="Home sections">
-        <button type="button" class="auth-tab is-active" role="tab" aria-selected="true" data-auth-tab="main" id="auth-tab-btn-main">Main</button>
+        <button type="button" class="auth-tab is-active" role="tab" aria-selected="true" data-auth-tab="main" id="auth-tab-btn-main">
+          <span class="auth-tab-label">Main</span>
+        </button>
         <button type="button" class="auth-tab" role="tab" aria-selected="false" data-auth-tab="docs" id="auth-tab-btn-docs">Docs</button>
         <button type="button" class="auth-tab" role="tab" aria-selected="false" data-auth-tab="versions" id="auth-tab-btn-versions">Versions</button>
       </nav>
@@ -144,8 +146,24 @@
         </div>
 
         <div id="auth-tab-docs" class="auth-tab-panel auth-tab-panel--docs" role="tabpanel" aria-labelledby="auth-tab-btn-docs" hidden>
-          <nav id="auth-docs-nav" class="auth-docs-nav" aria-label="Documentation"></nav>
-          <article id="auth-docs-content" class="auth-docs-content" aria-live="polite"></article>
+          <aside class="auth-docs-sidebar">
+            <label class="auth-docs-search" for="auth-docs-search">
+              <span class="auth-docs-search-label">Search</span>
+              <input
+                type="search"
+                id="auth-docs-search"
+                class="auth-docs-search-input"
+                placeholder="Search docs…"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <p class="auth-docs-sidebar-label">Subjects</p>
+            <nav id="auth-docs-nav" class="auth-docs-nav" aria-label="Documentation"></nav>
+          </aside>
+          <div class="auth-docs-main">
+            <article id="auth-docs-content" class="auth-docs-content" aria-live="polite"></article>
+          </div>
         </div>
 
         <div id="auth-tab-versions" class="auth-tab-panel auth-tab-panel--versions" role="tabpanel" aria-labelledby="auth-tab-btn-versions" hidden>
@@ -587,6 +605,14 @@
               <button type="button" id="settings-logout-btn" class="settings-secondary-btn">Log out</button>
               <button type="button" id="settings-delete-account-btn" class="settings-danger-btn">Delete account</button>
               <span id="settings-session-status" class="settings-inline-status" hidden></span>
+            </div>
+          </section>
+
+          <section class="settings-card" aria-label="Documentation">
+            <h3 class="settings-card-title">Documentation</h3>
+            <p class="settings-card-desc">Guides for Market, Schedule, setups, and how data flows through the app</p>
+            <div class="settings-card-actions">
+              <button type="button" id="settings-open-docs" class="settings-secondary-btn">Open documentation</button>
             </div>
           </section>
 

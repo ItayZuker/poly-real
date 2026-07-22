@@ -8,7 +8,52 @@ alwaysApply: false
 
 - Source of truth for the **Docs** tab: `public/docs/*.md`
 - Nav order: `public/docs/manifest.json` (`pages[].id`, `title`, `file`)
-- Renderer: `public/markdown.js` (headings, lists, tables, links, code) — keep docs within that subset
-- Prefer short sections with stable `##` headings so future edits can target one section
+- Left sidebar subjects are built from `manifest.json`
+- Renderer: `public/markdown.js` — demos reuse **real app CSS classes**
 
-When adding a new doc topic: create the `.md`, add it to `manifest.json`, and keep Overview links/wording consistent if needed.
+## Cross-links
+
+Use `[Label](doc:page-id)` (e.g. `[Market](doc:market)`).
+
+App routes: `/` (main/app), `/docs` (documentation), `/version` (release notes).
+
+## Visual references (must match the app)
+
+Fenced `demo` blocks are non-interactive but must use the same markup/classes as the live UI:
+
+````md
+```demo
+trade-toggle|Allow trade|off
+trade-toggle|Auto Trade|on
+trade-size|10|shares
+trade-toggle|Use Schedule|on
+modal-toggle|Optimize|off
+modal-input|Shares to buy|10
+modal-select|Gap vs PTB|with|None=none,Opposite=opposite,With=with
+modal-stack|Title|My setup
+page-toggle|Schedule|Heatmap|Schedule
+auth-buttons|Log in|Sign up
+```
+````
+
+| Demo type | Matches |
+|-----------|---------|
+| `trade-toggle` / `trade-size` | Market Trade panel (`.wallet-control-field`) |
+| `modal-toggle` / `modal-input` / `modal-select` / `modal-stack` | Phase / setup modals |
+| `settings-field` | Settings page inputs |
+| `page-toggle` | Header Schedule / Heatmap toggle |
+| `auth-buttons` | Main Log in / Sign up |
+
+## Flow diagrams
+
+Fenced `flow` blocks render simple container → arrow rows:
+
+````md
+```flow
+# Title
+Browser -> REST /api -> Server
+Server -> SSE /api/stream -> Browser
+```
+````
+
+Keep flows minimal (few boxes). Channel names like REST/SSE/WS get accent styling.

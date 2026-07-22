@@ -95,31 +95,76 @@ let authTopTab = "main";
 let authDocsManifest = null;
 let authDocsLoaded = Object.create(null);
 let authDocsActiveId = null;
+let authDocsSearchQuery = "";
+let authDocsSearchTimer = null;
+let authDocsSearchBound = false;
 let authVersionsLoaded = false;
+let authUrlSyncBound = false;
 
-function setAuthTopTab(tab) {
-  authTopTab = tab === "docs" || tab === "versions" ? tab : "main";
+const AUTH_TAB_BACK_ICON =
+  '<span class="auth-tab-back-icon" aria-hidden="true">' +
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M10.5 3.5L5.5 8l5 4.5"/>' +
+  "</svg></span>";
+
+function isLoggedIn() {
+  return Boolean(currentUserId);
+}
+
+function pathToAuthTab(pathname) {
+  const p = String(pathname || "/").replace(/\/+$/, "") || "/";
+  if (p === "/docs") return "docs";
+  if (p === "/version") return "versions";
+  return "main";
+}
+
+function authTabToPath(tab) {
+  if (tab === "docs") return "/docs";
+  if (tab === "versions") return "/version";
+  return "/";
+}
+
+function syncAuthUrl(tab, { replace = false } = {}) {
+  const nextPath = authTabToPath(tab);
+  if (location.pathname === nextPath) return;
+  const state = { authTab: tab };
+  if (replace) history.replaceState(state, "", nextPath);
+  else history.pushState(state, "", nextPath);
+}
+
+function bindAuthUrlRouting() {
+  if (authUrlSyncBound) return;
+  authUrlSyncBound = true;
+  window.addEventListener("popstate", () => {
+    applyAuthRoute(pathToAuthTab(location.pathname), { syncUrl: false });
+  });
+}
+
+function showAuthOverlay() {
+  const auth = $("auth-screen");
+  const app = $("app-shell");
+  if (auth) auth.hidden = false;
+  if (app) app.hidden = true;
+  document.body.style.overflow = "hidden";
+}
+
+function renderAuthTopPanels(tab) {
   const panels = {
     main: $("auth-tab-main"),
     docs: $("auth-tab-docs"),
     versions: $("auth-tab-versions"),
   };
   for (const [key, el] of Object.entries(panels)) {
-    if (el) el.hidden = key !== authTopTab;
+    if (el) el.hidden = key !== tab;
   }
   document.querySelectorAll(".auth-tab[data-auth-tab]").forEach((btn) => {
-    const active = btn.getAttribute("data-auth-tab") === authTopTab;
+    const active = btn.getAttribute("data-auth-tab") === tab;
     btn.classList.toggle("is-active", active);
     btn.setAttribute("aria-selected", active ? "true" : "false");
   });
-  if (authTopTab === "docs") void ensureAuthDocsReady();
-  if (authTopTab === "versions") void ensureAuthVersionsReady();
 }
 
-function showAuthView(view) {
-  if (view === "home" || view === "login" || view === "signup") {
-    setAuthTopTab("main");
-  }
+function showAuthViewPanels(view) {
   const home = $("auth-home");
   const login = $("auth-login-panel");
   const signup = $("auth-signup-panel");
@@ -132,10 +177,262 @@ function showAuthView(view) {
   else if (view === "signup") $("auth-signup-email")?.focus();
 }
 
+function syncAuthMainTabButton() {
+  const mainBtn = $("auth-tab-btn-main");
+  if (!mainBtn) return;
+  const showBack = isLoggedIn() && (authTopTab === "docs" || authTopTab === "versions");
+  mainBtn.classList.toggle("is-back-mode", showBack);
+  if (showBack) {
+    mainBtn.innerHTML = `${AUTH_TAB_BACK_ICON}<span class="auth-tab-label">Back</span>`;
+    mainBtn.setAttribute("aria-label", "Back to app");
+  } else {
+    mainBtn.innerHTML = '<span class="auth-tab-label">Main</span>';
+    mainBtn.setAttribute("aria-label", "Main");
+  }
+}
+
+function applyAuthRoute(tab, { syncUrl = true, replace = false } = {}) {
+  const next = tab === "docs" || tab === "versions" ? tab : "main";
+  if (next === "main") {
+    if (isLoggedIn()) {
+      showAppShell();
+      authTopTab = "main";
+      syncAuthMainTabButton();
+      if (syncUrl) syncAuthUrl("main", { replace });
+      return;
+    }
+    showAuthOverlay();
+    authTopTab = "main";
+    renderAuthTopPanels("main");
+    showAuthViewPanels("home");
+    syncAuthMainTabButton();
+    if (syncUrl) syncAuthUrl("main", { replace });
+    return;
+  }
+  showAuthOverlay();
+  authTopTab = next;
+  renderAuthTopPanels(next);
+  syncAuthMainTabButton();
+  if (syncUrl) syncAuthUrl(next, { replace });
+  if (authTopTab === "docs") void ensureAuthDocsReady();
+  if (authTopTab === "versions") void ensureAuthVersionsReady();
+}
+
+function setAuthTopTab(tab) {
+  applyAuthRoute(tab, { syncUrl: true });
+}
+
+function openAuthPublicTab(tab) {
+  applyAuthRoute(tab === "versions" ? "versions" : "docs", { syncUrl: true });
+}
+
+function showAuthView(view) {
+  if (view === "home" || view === "login" || view === "signup") {
+    applyAuthRoute("main", { syncUrl: true });
+    if (isLoggedIn()) return;
+  }
+  showAuthViewPanels(view);
+}
+
+function bindAuthDocsSearch() {
+  const input = $("auth-docs-search");
+  if (!input || authDocsSearchBound) return;
+  authDocsSearchBound = true;
+  input.addEventListener("input", () => {
+    clearTimeout(authDocsSearchTimer);
+    authDocsSearchTimer = setTimeout(() => {
+      void runAuthDocsSearch(input.value);
+    }, 140);
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      input.value = "";
+      void runAuthDocsSearch("");
+      input.blur();
+    }
+  });
+}
+
+async function preloadAuthDocsPages() {
+  const pages = Array.isArray(authDocsManifest?.pages) ? authDocsManifest.pages : [];
+  await Promise.all(
+    pages.map(async (page) => {
+      if (authDocsLoaded[page.id]) return;
+      try {
+        const res = await fetch(`/docs/${page.file}`, { cache: "no-cache" });
+        if (!res.ok) return;
+        authDocsLoaded[page.id] = await res.text();
+      } catch {
+        /* ignore single-page fetch errors for search */
+      }
+    }),
+  );
+}
+
+function plainTextFromDocMd(md) {
+  return String(md || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\[([^\]]+)\]\(doc:[^)]+\)/gi, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,3}\s+/gm, "")
+    .replace(/[|*_`>#-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightDocSnippet(text, query) {
+  const safe = String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+  if (!query) return safe;
+  const re = new RegExp(`(${escapeRegExp(query)})`, "ig");
+  return safe.replace(re, "<mark>$1</mark>");
+}
+
+function buildAuthDocSearchResults(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const pages = Array.isArray(authDocsManifest?.pages) ? authDocsManifest.pages : [];
+  const results = [];
+
+  for (const page of pages) {
+    const title = page.title || page.id;
+    const md = authDocsLoaded[page.id] || "";
+    const plain = plainTextFromDocMd(md);
+    const titleHit = title.toLowerCase().includes(q);
+    const bodyHit = plain.toLowerCase().includes(q);
+    if (!titleHit && !bodyHit) continue;
+
+    let section = "";
+    const headingRe = /^(#{2,3})\s+(.+)$/gm;
+    let match;
+    while ((match = headingRe.exec(md)) !== null) {
+      if (match[2].toLowerCase().includes(q)) {
+        section = match[2].trim();
+        break;
+      }
+    }
+    if (!section) {
+      const lines = md.split("\n");
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (/^#{2,3}\s+/.test(line)) {
+          section = line.replace(/^#{2,3}\s+/, "").trim();
+        }
+        const plainLine = plainTextFromDocMd(line);
+        if (plainLine.toLowerCase().includes(q) && !/^#{1,3}\s+/.test(line)) {
+          break;
+        }
+      }
+    }
+
+    let snippet = "";
+    const idx = plain.toLowerCase().indexOf(q);
+    if (idx >= 0) {
+      const start = Math.max(0, idx - 48);
+      const end = Math.min(plain.length, idx + q.length + 72);
+      snippet = `${start > 0 ? "…" : ""}${plain.slice(start, end).trim()}${end < plain.length ? "…" : ""}`;
+    } else if (titleHit) {
+      snippet = plain.slice(0, 120).trim() + (plain.length > 120 ? "…" : "");
+    }
+
+    results.push({
+      id: page.id,
+      title,
+      section: section && section.toLowerCase() !== title.toLowerCase() ? section : "",
+      snippet: snippet || title,
+      score: (titleHit ? 20 : 0) + (section ? 8 : 0) + (bodyHit ? 1 : 0),
+    });
+  }
+
+  results.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+  return results;
+}
+
+function updateAuthDocsNavSearchState(hitIds) {
+  const searching = hitIds != null;
+  document.querySelectorAll(".auth-docs-nav-btn").forEach((btn) => {
+    btn.classList.remove("is-search-hit", "is-search-miss");
+    if (!searching) return;
+    const id = btn.dataset.docId;
+    if (hitIds.has(id)) btn.classList.add("is-search-hit");
+    else btn.classList.add("is-search-miss");
+  });
+}
+
+function renderAuthDocsSearchResults(query, results) {
+  const content = $("auth-docs-content");
+  if (!content) return;
+  const q = query.trim();
+  if (!results.length) {
+    content.innerHTML =
+      `<div class="auth-docs-search-view">` +
+      `<h1 class="auth-docs-search-view-title">Search</h1>` +
+      `<p class="auth-docs-search-view-meta">No matches for “${q.replace(/</g, "&lt;")}”.</p>` +
+      `</div>`;
+    return;
+  }
+
+  const items = results
+    .map((hit) => {
+      const section = hit.section
+        ? `<span class="auth-docs-search-hit-section">${highlightDocSnippet(hit.section, q)}</span>`
+        : "";
+      return (
+        `<button type="button" class="auth-docs-search-hit" data-doc-id="${hit.id}">` +
+        `<span class="auth-docs-search-hit-title">${highlightDocSnippet(hit.title, q)}</span>` +
+        section +
+        `<span class="auth-docs-search-hit-snippet">${highlightDocSnippet(hit.snippet, q)}</span>` +
+        `</button>`
+      );
+    })
+    .join("");
+
+  content.innerHTML =
+    `<div class="auth-docs-search-view">` +
+    `<h1 class="auth-docs-search-view-title">Search</h1>` +
+    `<p class="auth-docs-search-view-meta">${results.length} result${results.length === 1 ? "" : "s"} for “${q.replace(/</g, "&lt;")}”</p>` +
+    items +
+    `</div>`;
+
+  content.querySelectorAll(".auth-docs-search-hit").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.getAttribute("data-doc-id");
+      const input = $("auth-docs-search");
+      if (input) input.value = "";
+      authDocsSearchQuery = "";
+      updateAuthDocsNavSearchState(null);
+      if (id) void loadAuthDocPage(id);
+    });
+  });
+}
+
+async function runAuthDocsSearch(rawQuery) {
+  const query = String(rawQuery || "");
+  authDocsSearchQuery = query.trim();
+  if (!authDocsSearchQuery) {
+    updateAuthDocsNavSearchState(null);
+    if (authDocsActiveId) await loadAuthDocPage(authDocsActiveId);
+    else if (authDocsManifest?.pages?.[0]) await loadAuthDocPage(authDocsManifest.pages[0].id);
+    return;
+  }
+  await preloadAuthDocsPages();
+  const results = buildAuthDocSearchResults(authDocsSearchQuery);
+  updateAuthDocsNavSearchState(new Set(results.map((r) => r.id)));
+  renderAuthDocsSearchResults(authDocsSearchQuery, results);
+}
+
 async function ensureAuthDocsReady() {
   const nav = $("auth-docs-nav");
   const content = $("auth-docs-content");
   if (!nav || !content) return;
+  bindAuthDocsSearch();
   try {
     if (!authDocsManifest) {
       const res = await fetch("/docs/manifest.json", { cache: "no-cache" });
@@ -150,12 +447,21 @@ async function ensureAuthDocsReady() {
         btn.textContent = page.title || page.id;
         btn.dataset.docId = page.id;
         btn.addEventListener("click", () => {
+          const input = $("auth-docs-search");
+          if (input && input.value) {
+            input.value = "";
+            authDocsSearchQuery = "";
+            updateAuthDocsNavSearchState(null);
+          }
           void loadAuthDocPage(page.id);
         });
         nav.appendChild(btn);
       }
+      void preloadAuthDocsPages();
       if (pages.length) await loadAuthDocPage(pages[0].id);
       else content.innerHTML = "<p>No documentation pages yet.</p>";
+    } else if (authDocsSearchQuery) {
+      await runAuthDocsSearch(authDocsSearchQuery);
     } else if (!authDocsActiveId && Array.isArray(authDocsManifest?.pages) && authDocsManifest.pages[0]) {
       await loadAuthDocPage(authDocsManifest.pages[0].id);
     }
@@ -183,9 +489,24 @@ async function loadAuthDocPage(pageId) {
     content.innerHTML = typeof window.markdownToHtml === "function"
       ? window.markdownToHtml(md)
       : `<pre>${md}</pre>`;
+    bindAuthDocContentLinks(content);
+    content.scrollTop = 0;
   } catch (err) {
     content.textContent = `Failed to load ${page.file}: ${err instanceof Error ? err.message : String(err)}`;
   }
+}
+
+function bindAuthDocContentLinks(root) {
+  if (!root) return;
+  root.querySelectorAll("a[data-doc-link]").forEach((link) => {
+    if (link.dataset.bound === "1") return;
+    link.dataset.bound = "1";
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const id = link.getAttribute("data-doc-link");
+      if (id) void loadAuthDocPage(id);
+    });
+  });
 }
 
 function formatVersionTime(iso) {
@@ -250,13 +571,9 @@ async function ensureAuthVersionsReady() {
 }
 
 function showAuthScreen() {
-  const auth = $("auth-screen");
-  const app = $("app-shell");
-  if (auth) auth.hidden = false;
-  if (app) app.hidden = true;
-  document.body.style.overflow = "hidden";
-  setAuthTopTab("main");
-  showAuthView("home");
+  applyAuthRoute("main", { syncUrl: true, replace: true });
+  if (!isLoggedIn()) showAuthViewPanels("home");
+  syncAuthMainTabButton();
 }
 
 function showAppShell() {
@@ -265,6 +582,8 @@ function showAppShell() {
   if (auth) auth.hidden = true;
   if (app) app.hidden = false;
   document.body.style.overflow = "";
+  authTopTab = "main";
+  syncAuthMainTabButton();
 }
 
 async function fetchAuthMe() {
@@ -392,8 +711,8 @@ function bindAuthForm(onLoggedIn) {
     btn.dataset.bound = "1";
     btn.addEventListener("click", () => {
       const tab = btn.getAttribute("data-auth-tab");
-      setAuthTopTab(tab);
-      if (tab === "main") showAuthView("home");
+      applyAuthRoute(tab, { syncUrl: true });
+      if (tab === "main" && !isLoggedIn()) showAuthViewPanels("home");
     });
   });
 }
@@ -778,6 +1097,14 @@ function bindSettingsEditors() {
         setSettingsSessionStatus(err instanceof Error ? err.message : String(err), true);
         logoutBtn.disabled = false;
       }
+    });
+  }
+
+  const openDocsBtn = $("settings-open-docs");
+  if (openDocsBtn && openDocsBtn.dataset.bound !== "1") {
+    openDocsBtn.dataset.bound = "1";
+    openDocsBtn.addEventListener("click", () => {
+      openAuthPublicTab("docs");
     });
   }
 
@@ -4019,9 +4346,12 @@ async function init() {
 
 let appInitialized = false;
 
-async function enterApp(user) {
+async function enterApp(user, options = {}) {
   setCurrentUser(user);
   showAppShell();
+  if (!options.keepPublicRoute) {
+    syncAuthUrl("main", { replace: true });
+  }
   if (user) {
     renderSettingsUser(user);
     applyWalletGate(isWalletReadyFromUser(user));
@@ -4040,15 +4370,26 @@ async function enterApp(user) {
 }
 
 async function boot() {
+  bindAuthUrlRouting();
   bindAuthForm(enterApp);
+  const routeTab = pathToAuthTab(location.pathname);
   try {
     const user = await fetchAuthMe();
     if (user) {
-      await enterApp(user);
+      if (routeTab === "docs" || routeTab === "versions") {
+        await enterApp(user, { keepPublicRoute: true });
+        applyAuthRoute(routeTab, { syncUrl: false });
+      } else {
+        await enterApp(user);
+      }
       return;
     }
   } catch {
-    // fall through to home
+    // fall through to public auth pages
+  }
+  if (routeTab === "docs" || routeTab === "versions") {
+    applyAuthRoute(routeTab, { syncUrl: false });
+    return;
   }
   showAuthScreen();
 }

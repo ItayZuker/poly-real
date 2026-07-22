@@ -2,13 +2,18 @@
 
 Toggle between **Schedule** and **Heatmap** on this page.
 
+```demo
+page-toggle|Schedule|Heatmap|Schedule
+```
+
 ## Setups
 
-A **setup** is a reusable template:
+A **setup** is a reusable template (see [Setups & phases](doc:setups-phases) for every field):
 
-- Name and ordering in the setups list
-- Up to **3 time phases** with buy enable, size, trigger (¢), abort-on-crossing, filters, and sell profit (¢)
-- Create, edit, reorder, and delete from the setups list / editor modals
+- Name, description, border color, and list order
+- **3 time phases** with buy/sell rules and split bars on the phase chart
+- Create, edit, reorder, delete from the setups list / editor
+- Drag onto the UTC week grid to place
 
 ## Schedule grid
 
@@ -18,10 +23,26 @@ A **setup** is a reusable template:
 - Clear cells when needed
 - The “now” cell is highlighted for the current UTC day/hour
 
-When **Use Schedule** and **Auto Trade** are enabled on Market, the setup on the current UTC cell drives live/demo behavior for that series.
+When **Use Schedule** and **Auto Trade** are enabled on [Market](doc:market), the setup on the current UTC cell drives live/demo behavior for that series.
+
+```demo
+trade-toggle|Auto Trade|on
+trade-toggle|Use Schedule|on
+```
 
 Placement cards can show backtest / live-style stats for the scheduled setup.
 
 ## Heatmap
 
 The heatmap is a day × hour intensity view from recorded windows (for example crossings, range, wallets, new wallets). Use it to decide where to place setups — it does not place trades by itself.
+
+```demo
+page-toggle|Schedule|Heatmap|Heatmap
+```
+
+## See also
+
+- [Setups & phases](doc:setups-phases)
+- [Market](doc:market)
+- [Getting started](doc:getting-started)
+- [Overview](doc:overview)

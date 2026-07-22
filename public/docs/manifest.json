@@ -4,6 +4,8 @@
     { "id": "getting-started", "title": "Getting started", "file": "getting-started.md" },
     { "id": "market", "title": "Market", "file": "market.md" },
     { "id": "schedule", "title": "Schedule", "file": "schedule.md" },
+    { "id": "setups-phases", "title": "Setups & phases", "file": "setups-phases.md" },
+    { "id": "data-flow", "title": "Information flow", "file": "data-flow.md" },
     { "id": "settings", "title": "Settings & wallet", "file": "settings.md" }
   ]
 }

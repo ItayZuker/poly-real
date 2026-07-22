@@ -1,6 +1,11 @@
 {
-  "current": "1.1.0",
+  "current": "1.2.0",
   "releases": [
+    {
+      "version": "1.2.0",
+      "releasedAt": "2026-07-22T09:25:00.000Z",
+      "notes": "Docs & Versions as /docs and /version routes; setups/phases and information-flow docs with UI demos and flow diagrams; docs search; Settings link to documentation; signed-in Back control; docs permission Cursor rules."
+    },
     {
       "version": "1.1.0",
       "releasedAt": "2026-07-22T07:14:00.000Z",

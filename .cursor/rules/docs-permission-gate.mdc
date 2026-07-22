@@ -1,0 +1,41 @@
+---
+description: Code must match product docs; ask permission before behavior changes; update docs when approved.
+alwaysApply: true
+---
+
+# Docs alignment and change permission
+
+Product docs in `public/docs/*.md` (nav: `public/docs/manifest.json`) are the source of truth for user-facing behavior.
+
+## Align with documentation
+
+- Before changing UI, trading rules, setups/phases, schedule, auth, or settings, **read** the matching doc page(s).
+- Every change you make must **stay consistent** with those docs.
+- Do not ship code that contradicts the docs.
+
+## Ask before changing
+
+If a requested or proposed change would alter documented behavior, add/remove a user-facing feature, or require doc edits:
+
+1. **Stop and ask the user for permission** before implementing.
+2. Briefly say what would change and which doc page(s) would need updating.
+3. Only implement after the user explicitly approves.
+
+Pure bugfixes that restore already-documented behavior do not need this permission step (still verify docs remain accurate).
+
+## After permission is granted
+
+- Implement the approved change **and** update `public/docs/*.md` (and `manifest.json` if adding a page) in the **same** work.
+- Do not leave docs stale after an approved behavior change.
+
+## Topic map
+
+| Area | Doc |
+|------|-----|
+| Overview / concepts | `overview.md` |
+| Onboarding | `getting-started.md` |
+| Market | `market.md` |
+| Schedule / Heatmap | `schedule.md` |
+| Setup cards & phase inputs | `setups-phases.md` |
+| REST / SSE / trading flow | `data-flow.md` |
+| Settings / wallet | `settings.md` |

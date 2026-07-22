@@ -99,10 +99,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3848;
 /** Sparse Mongo → RAM heatmap refresh (sim upserts windows elsewhere). */
 const HEATMAP_REFRESH_MS = 10 * 60 * 1000;
+const publicDir = path.join(__dirname, "../public");
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "../public")));
+
+function sendIndexHtml(_req: express.Request, res: express.Response): void {
+  res.sendFile(path.join(publicDir, "index.html"));
+}
+
+// Exact SPA pages (before static so /docs is the app, not the docs/ folder).
+app.get(["/docs", "/version"], sendIndexHtml);
+
+app.use(express.static(publicDir));
 
 type AuthedRequest = express.Request & { authUser?: UserPublic };
 
