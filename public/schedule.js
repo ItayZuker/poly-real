@@ -5,7 +5,6 @@
   const MIN_DURATION = 1;
   const STATS_CACHE_STORAGE_KEY = "poly-real:schedule-placement-stats";
   /** Live real-trade stats — do not reuse sim backtest caches. */
-  const STATS_CACHE_VERSION = "live-1";
 
   let placements = [];
   let placementStats = new Map();
@@ -589,12 +588,24 @@
     return window.getSelectedSeries?.() || "btc-5m";
   }
 
+  function workspaceMode() {
+    return window.getScheduleWorkspaceMode?.() || "live";
+  }
+
+  function isReplayWorkspace() {
+    return workspaceMode() === "replay";
+  }
+
   function seriesQuery() {
-    return `series=${encodeURIComponent(selectedSeries())}`;
+    return `series=${encodeURIComponent(selectedSeries())}&mode=${encodeURIComponent(workspaceMode())}`;
   }
 
   function withSeries(body) {
-    return { ...body, series: selectedSeries() };
+    return { ...body, series: selectedSeries(), mode: workspaceMode() };
+  }
+
+  function statsCacheVersion() {
+    return isReplayWorkspace() ? "replay-1" : "live-1";
   }
 
   function simLatencyMs() {
@@ -637,7 +648,7 @@
 
   function placementCacheKey(placement) {
     return [
-      STATS_CACHE_VERSION,
+      statsCacheVersion(),
       selectedSeries(),
       placement._id,
       placement.day,
@@ -654,14 +665,14 @@
   function readStatsCache() {
     try {
       const raw = localStorage.getItem(STATS_CACHE_STORAGE_KEY);
-      if (!raw) return { version: STATS_CACHE_VERSION, entries: {} };
+      if (!raw) return { version: statsCacheVersion(), entries: {} };
       const parsed = JSON.parse(raw);
-      if (parsed?.version !== STATS_CACHE_VERSION || typeof parsed.entries !== "object") {
-        return { version: STATS_CACHE_VERSION, entries: {} };
+      if (parsed?.version !== statsCacheVersion() || typeof parsed.entries !== "object") {
+        return { version: statsCacheVersion(), entries: {} };
       }
       return parsed;
     } catch {
-      return { version: STATS_CACHE_VERSION, entries: {} };
+      return { version: statsCacheVersion(), entries: {} };
     }
   }
 
@@ -1180,6 +1191,7 @@
   }
 
   function applyLivePlacementStats(statsList, sessionTotals, demoLastWindow, trading) {
+    if (isReplayWorkspace()) return;
     if (sessionTotals) {
       liveSessionTotals = normalizeSessionTotals(sessionTotals);
     }
@@ -1499,7 +1511,7 @@
       const quiet = options.quiet === true;
       if (!quiet) showHeaderStatsProgressIndeterminate();
 
-      let url = `/api/schedule-placement-stats/stream?series=${encodeURIComponent(series)}`;
+      let url = `/api/schedule-placement-stats/stream?series=${encodeURIComponent(series)}&mode=${encodeURIComponent(workspaceMode())}`;
       if (options.setupId) {
         url += `&setupId=${encodeURIComponent(options.setupId)}`;
       }
@@ -1706,6 +1718,10 @@
   }
 
   async function scheduleStatsRefresh(options = {}) {
+    if (isReplayWorkspace() && !options.fromReplay) {
+      applyCardStatsStates();
+      return;
+    }
     if (placements.length === 0) {
       placementStats.clear();
       lockedPlacementIds.clear();
@@ -2007,6 +2023,7 @@
   }
 
   function isPlacementLocked(placementId) {
+    if (isReplayWorkspace()) return false;
     if (!placementId) return false;
     if (lockedPlacementIds.has(placementId)) return true;
     const stats = placementStats.get(placementId);
@@ -2697,11 +2714,14 @@
     if (unchanged) return;
 
     try {
-      const res = await fetch("/api/trading-setups/reorder", {
+      const res = await fetch(
+        `/api/trading-setups/reorder?mode=${encodeURIComponent(workspaceMode())}`,
+        {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderedIds }),
-      });
+        body: JSON.stringify({ orderedIds, mode: workspaceMode() }),
+      },
+      );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `Reorder failed (${res.status})`);
@@ -2906,16 +2926,210 @@
   }
 
   async function loadPlacements(options = {}) {
+    const expectedMode = options.expectedMode || workspaceMode();
     try {
       const res = await fetch(`/api/schedule-placements?${seriesQuery()}`);
-      if (!res.ok) return;
-      placements = await res.json();
+      if (workspaceMode() !== expectedMode) return;
+      if (!res.ok) {
+        placements = [];
+        renderPlacements({ reloadStats: false });
+        return;
+      }
+      const next = await res.json();
+      if (workspaceMode() !== expectedMode) return;
+      placements = Array.isArray(next) ? next : [];
+      const reloadStats =
+        options.reloadStats !== false && !isReplayWorkspace();
       renderPlacements({
-        reloadStats: options.reloadStats !== false,
+        reloadStats,
         statsOptions: options.statsOptions,
       });
+      if (isReplayWorkspace() && options.reloadStats !== false) {
+        applyCardStatsStates();
+        updateWeekHeaderSummary();
+        updateHighlightedHeaderSummary();
+      }
     } catch {
-      // ignore
+      if (workspaceMode() !== expectedMode) return;
+      placements = [];
+      renderPlacements({ reloadStats: false });
+    }
+  }
+
+  function clearWorkspaceBoard() {
+    closeMenus();
+    clearDropPreview();
+    clearHeaderFillPreview();
+    if (statsAbortController) {
+      try {
+        statsAbortController.abort();
+      } catch {
+        // ignore
+      }
+    }
+    closeStatsEventSource();
+    placementStats.clear();
+    lockedPlacementIds.clear();
+    framedPlacementIds.clear();
+    statsPendingIds.clear();
+    statsBatchFetching = false;
+    syncPlacementsDom([]);
+    updateWeekHeaderSummary();
+    updateHighlightedHeaderSummary();
+    syncNowHighlights();
+  }
+
+  async function onWorkspaceModeChanged(mode) {
+    const expectedMode = mode || workspaceMode();
+    clearWorkspaceBoard();
+    await loadPlacements({
+      reloadStats: expectedMode !== "replay",
+      expectedMode,
+    });
+    if (isReplayWorkspace()) {
+      setHeaderSummaryRange("schedule");
+    }
+    syncHeaderSummaryControls();
+    updateWeekHeaderSummary();
+    updateHighlightedHeaderSummary();
+    syncNowHighlights();
+  }
+
+  function parseSseChunk(buffer, onEvent) {
+    let rest = buffer;
+    let sep;
+    while ((sep = rest.indexOf("\n\n")) >= 0) {
+      const raw = rest.slice(0, sep);
+      rest = rest.slice(sep + 2);
+      let event = "message";
+      const dataLines = [];
+      for (const line of raw.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length === 0) continue;
+      try {
+        onEvent(event, JSON.parse(dataLines.join("\n")));
+      } catch {
+        // ignore malformed
+      }
+    }
+    return rest;
+  }
+
+  function applyReplayPlacementStat(stats) {
+    if (!stats?.placementId) return;
+    placementStats.set(stats.placementId, {
+      placementId: stats.placementId,
+      hasData: stats.hasData === true,
+      green: stats.green ?? 0,
+      red: stats.red ?? 0,
+      blue: stats.blue ?? 0,
+      pnl: stats.pnl ?? 0,
+      locked: false,
+    });
+    applyCardStatsStates();
+    updateWeekHeaderSummary();
+    updateHighlightedHeaderSummary();
+  }
+
+  let replayRunning = false;
+
+  async function runReplay() {
+    if (!isReplayWorkspace() || replayRunning) return;
+    if (placements.length === 0) {
+      window.appendLogEntry?.({
+        level: "warn",
+        source: "client",
+        message: "Place setup cards on the Replay schedule before running Replay",
+      });
+      return;
+    }
+
+    const btn = document.getElementById("schedule-replay-run-btn");
+    replayRunning = true;
+    if (btn) btn.disabled = true;
+    placementStats.clear();
+    applyCardStatsStates();
+    showHeaderStatsProgressIndeterminate();
+
+    const setupIds = [...new Set(placements.map((p) => p.setupId).filter(Boolean))];
+    const setups = setupIds
+      .map((id) => window.getScheduleSetupById?.(id))
+      .filter(Boolean);
+
+    try {
+      const res = await fetch("/api/schedule-replay", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          series: selectedSeries(),
+          placements,
+          setups,
+        }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Replay failed (${res.status})`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let failure = null;
+      let doneStats = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        buffer = parseSseChunk(buffer, (event, data) => {
+          if (event === "progress") {
+            const { completed, total, indeterminate } = data || {};
+            if (indeterminate) showHeaderStatsProgressIndeterminate();
+            else if (total > 0) setHeaderStatsProgress(completed / total);
+          } else if (event === "placement") {
+            applyReplayPlacementStat(data);
+            if (data?.progress?.total > 0) {
+              setHeaderStatsProgress(data.progress.completed / data.progress.total);
+            }
+          } else if (event === "done") {
+            doneStats = data;
+          } else if (event === "failure") {
+            failure = data;
+          }
+        });
+      }
+      parseSseChunk(buffer + "\n\n", (event, data) => {
+        if (event === "placement") applyReplayPlacementStat(data);
+        else if (event === "done") doneStats = data;
+        else if (event === "failure") failure = data;
+      });
+
+      if (failure) {
+        throw new Error(failure.error || "Replay failed");
+      }
+      if (Array.isArray(doneStats)) {
+        for (const stats of doneStats) applyReplayPlacementStat(stats);
+      } else if (Array.isArray(doneStats?.stats)) {
+        for (const stats of doneStats.stats) applyReplayPlacementStat(stats);
+      }
+      applyCardStatsStates();
+      updateWeekHeaderSummary();
+      updateHighlightedHeaderSummary();
+    } catch (err) {
+      window.appendLogEntry?.({
+        level: "error",
+        source: "client",
+        message: `Replay: ${err.message || err}`,
+      });
+    } finally {
+      hideHeaderStatsProgress();
+      replayRunning = false;
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -2968,6 +3182,9 @@
     setPlacements,
     onSetupsRendered,
     onViewChange,
+    onWorkspaceModeChanged,
+    clearWorkspaceBoard,
+    runReplay,
     onHeatmapUpdated,
     applyLivePlacementStats,
     applyLiveSessionTotals,

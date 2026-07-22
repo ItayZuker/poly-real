@@ -1374,6 +1374,84 @@ body {
   scrollbar-color: #484f58 transparent;
 }
 
+.schedule-workspace-footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.app-page-schedule.is-heatmap-view .schedule-workspace-footer {
+  display: none !important;
+}
+
+.schedule-replay-run-btn {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 70%, #fff);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 28%, var(--bg));
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.schedule-replay-run-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 42%, var(--bg));
+}
+
+.schedule-replay-run-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.schedule-workspace-toggle {
+  display: flex;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.schedule-workspace-toggle-btn {
+  flex: 1 1 0;
+  min-height: 36px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #9aa3ad);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.schedule-workspace-toggle-btn:hover:not(.is-active) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.schedule-workspace-toggle-btn.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg));
+  color: #fff;
+}
+
+.schedule-workspace-toggle-btn + .schedule-workspace-toggle-btn {
+  border-left: 1px solid var(--border);
+}
+
+.app-page-schedule.is-replay-workspace .schedule-setups-panel {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
 .schedule-heatmap-panel {
   flex: 1;
   min-height: 0;

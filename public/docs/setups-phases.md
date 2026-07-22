@@ -1,6 +1,6 @@
 # Setups & phases
 
-A **setup** is a template with **3 time phases** inside each market window. Manage setups on [Schedule](doc:schedule). On [Market](doc:market), edit phases on the chart when **Auto Trade** is on and **Use Schedule** is off.
+A **setup** is a template with **3 time phases** inside each market window. Manage setups on [Schedule](doc:schedule) — separately for **Live** and **Replay** workspaces. On [Market](doc:market), edit phases on the chart when **Auto Trade** is on and **Use Schedule** is off (Live trading only).
 
 ## Setup editor
 

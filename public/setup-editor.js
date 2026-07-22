@@ -221,7 +221,11 @@
     persisting = true;
     try {
       const payload = snapshotDraft();
-      const res = await fetch(`/api/trading-setups/${encodeURIComponent(editingId)}`, {
+      const res = await fetch(
+        (window.withScheduleWorkspaceMode || ((u) => u))(
+          `/api/trading-setups/${encodeURIComponent(editingId)}`,
+        ),
+        {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -268,7 +272,7 @@
     try {
       const payload = snapshotDraft();
       payload.title = title;
-      const res = await fetch("/api/trading-setups", {
+      const res = await fetch((window.withScheduleWorkspaceMode || ((u) => u))("/api/trading-setups"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -283,11 +287,16 @@
       }
 
       if (body._id && colorTouched && payload.color && payload.color !== body.color) {
-        const colorRes = await fetch(`/api/trading-setups/${encodeURIComponent(body._id)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ color: payload.color }),
-        });
+        const colorRes = await fetch(
+          (window.withScheduleWorkspaceMode || ((u) => u))(
+            `/api/trading-setups/${encodeURIComponent(body._id)}`,
+          ),
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ color: payload.color }),
+          },
+        );
         const colorBody = await colorRes.json().catch(() => ({}));
         if (colorRes.ok) body = colorBody;
       }

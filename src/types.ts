@@ -287,6 +287,8 @@ export interface TradingSetupRecord {
   simScheduleInUse?: boolean;
 }
 
+/** Replay-mode setups live in `trading_setups_replay`; placements in `schedual_setups_replay`. */
+
 export type ScheduleDayId = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
 export interface SchedulePlacementRecord {

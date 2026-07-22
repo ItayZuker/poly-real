@@ -1,9 +1,17 @@
 import type { ObjectId } from "mongodb";
 import { DEFAULT_MARKET_SERIES } from "../collections.js";
 import type { ScheduleDayId, SchedulePlacementRecord } from "../types.js";
+import {
+  schedulePlacementsCollection,
+  type ScheduleWorkspaceMode,
+} from "../schedule-workspace-mode.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
 
-const COLLECTION = "schedual_setups_real";
+const LIVE_COLLECTION = schedulePlacementsCollection("live");
+
+function collectionFor(mode: ScheduleWorkspaceMode = "live"): string {
+  return schedulePlacementsCollection(mode);
+}
 
 const VALID_DAYS: ScheduleDayId[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
@@ -29,14 +37,14 @@ function normalizeSeries(raw: string | undefined | null): string {
   return s || DEFAULT_MARKET_SERIES;
 }
 
-/** One-time: assign bootstrap owner to placements missing userId. */
+/** One-time: assign bootstrap owner to live placements missing userId. */
 export async function ensureSchedulePlacementsUserId(bootstrapUserId: string): Promise<void> {
   if (!ensureUserIdPromise) {
     ensureUserIdPromise = (async () => {
       const mongo = await getMongoClient();
       const result = await mongo
         .db(getMongoDbName())
-        .collection(COLLECTION)
+        .collection(LIVE_COLLECTION)
         .updateMany(
           {
             $or: [
@@ -60,7 +68,7 @@ export async function ensureSchedulePlacementsUserId(bootstrapUserId: string): P
   await ensureUserIdPromise;
 }
 
-/** One-time: assign default market series to placements missing series. */
+/** One-time: assign default market series to live placements missing series. */
 export async function ensureSchedulePlacementsSeries(
   defaultSeries: string = DEFAULT_MARKET_SERIES,
 ): Promise<void> {
@@ -69,7 +77,7 @@ export async function ensureSchedulePlacementsSeries(
       const mongo = await getMongoClient();
       const result = await mongo
         .db(getMongoDbName())
-        .collection(COLLECTION)
+        .collection(LIVE_COLLECTION)
         .updateMany(
           {
             $or: [{ series: { $exists: false } }, { series: null }, { series: "" }],
@@ -89,7 +97,8 @@ export async function ensureSchedulePlacementsSeries(
   await ensureSeriesPromise;
 }
 
-async function ensurePlacementMigrations(): Promise<void> {
+async function ensurePlacementMigrations(mode: ScheduleWorkspaceMode = "live"): Promise<void> {
+  if (mode !== "live") return;
   const { getBootstrapUserId } = await import("./user-repository.js");
   await ensureSchedulePlacementsUserId(await getBootstrapUserId());
   await ensureSchedulePlacementsSeries();
@@ -144,6 +153,7 @@ async function listDocsForDay(
   userId: string,
   series: string,
   day: ScheduleDayId,
+  mode: ScheduleWorkspaceMode,
   excludeId?: ObjectId,
 ): Promise<SchedulePlacementDoc[]> {
   const mongo = await getMongoClient();
@@ -151,7 +161,7 @@ async function listDocsForDay(
   if (excludeId) filter._id = { $ne: excludeId };
   return mongo
     .db(getMongoDbName())
-    .collection<SchedulePlacementDoc>(COLLECTION)
+    .collection<SchedulePlacementDoc>(collectionFor(mode))
     .find(filter)
     .toArray();
 }
@@ -162,9 +172,10 @@ async function assertNoOverlap(
   day: ScheduleDayId,
   startHour: number,
   durationHours: number,
+  mode: ScheduleWorkspaceMode,
   excludeId?: ObjectId,
 ): Promise<void> {
-  const existing = await listDocsForDay(userId, series, day, excludeId);
+  const existing = await listDocsForDay(userId, series, day, mode, excludeId);
   for (const doc of existing) {
     if (rangesOverlap(startHour, durationHours, doc.startHour, doc.durationHours)) {
       throw new Error("Placement overlaps an existing card in this column");
@@ -175,8 +186,9 @@ async function assertNoOverlap(
 export async function listSchedulePlacements(
   userId: string,
   series?: string | null,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<SchedulePlacementListItem[]> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
 
   const mongo = await getMongoClient();
   const filter: Record<string, unknown> = { userId };
@@ -185,7 +197,7 @@ export async function listSchedulePlacements(
   }
   const docs = await mongo
     .db(getMongoDbName())
-    .collection<SchedulePlacementDoc>(COLLECTION)
+    .collection<SchedulePlacementDoc>(collectionFor(mode))
     .find(filter)
     .sort({ series: 1, day: 1, startHour: 1 })
     .toArray();
@@ -204,8 +216,9 @@ export interface CreateSchedulePlacementInput {
 export async function insertSchedulePlacement(
   userId: string,
   input: CreateSchedulePlacementInput,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<SchedulePlacementListItem> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
   const series = normalizeSeries(input.series);
   const day = normalizeDay(input.day);
   const startHour = normalizeStartHour(input.startHour);
@@ -219,7 +232,7 @@ export async function insertSchedulePlacement(
     throw new Error("Placement exceeds day bounds");
   }
 
-  await assertNoOverlap(userId, series, day, startHour, durationHours);
+  await assertNoOverlap(userId, series, day, startHour, durationHours, mode);
 
   const now = new Date();
   const doc: SchedulePlacementRecord = {
@@ -235,7 +248,7 @@ export async function insertSchedulePlacement(
   };
 
   const mongo = await getMongoClient();
-  const result = await mongo.db(getMongoDbName()).collection(COLLECTION).insertOne(doc);
+  const result = await mongo.db(getMongoDbName()).collection(collectionFor(mode)).insertOne(doc);
   return serializePlacement({ ...doc, _id: result.insertedId });
 }
 
@@ -249,8 +262,9 @@ export async function updateSchedulePlacement(
   userId: string,
   id: string,
   input: UpdateSchedulePlacementInput,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<SchedulePlacementListItem | null> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -260,9 +274,10 @@ export async function updateSchedulePlacement(
   }
 
   const mongo = await getMongoClient();
+  const col = collectionFor(mode);
   const existing = await mongo
     .db(getMongoDbName())
-    .collection<SchedulePlacementDoc>(COLLECTION)
+    .collection<SchedulePlacementDoc>(col)
     .findOne({ _id: oid, userId });
   if (!existing) return null;
   if (existing.userId !== userId) return null;
@@ -279,12 +294,12 @@ export async function updateSchedulePlacement(
     throw new Error("Placement exceeds day bounds");
   }
 
-  await assertNoOverlap(userId, series, day, startHour, durationHours, oid);
+  await assertNoOverlap(userId, series, day, startHour, durationHours, mode, oid);
 
   const updatedAt = new Date();
   await mongo
     .db(getMongoDbName())
-    .collection<SchedulePlacementDoc>(COLLECTION)
+    .collection<SchedulePlacementDoc>(col)
     .updateOne(
       { _id: oid, userId },
       { $set: { day, startHour, durationHours, series, updatedAt } },
@@ -303,8 +318,9 @@ export async function updateSchedulePlacement(
 export async function getSchedulePlacementById(
   userId: string,
   id: string,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<SchedulePlacementListItem | null> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -315,32 +331,43 @@ export async function getSchedulePlacementById(
   const mongo = await getMongoClient();
   const doc = await mongo
     .db(getMongoDbName())
-    .collection<SchedulePlacementDoc>(COLLECTION)
+    .collection<SchedulePlacementDoc>(collectionFor(mode))
     .findOne({ _id: oid, userId });
   return doc ? serializePlacement(doc) : null;
 }
 
 /** Across all markets — used to protect shared setup cards from delete. */
-export async function countPlacementsBySetupId(userId: string, setupId: string): Promise<number> {
-  await ensurePlacementMigrations();
+export async function countPlacementsBySetupId(
+  userId: string,
+  setupId: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<number> {
+  await ensurePlacementMigrations(mode);
   const mongo = await getMongoClient();
   return mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .countDocuments({ userId, setupId: String(setupId) });
 }
 
-export async function listDistinctPlacementSetupIds(userId: string): Promise<string[]> {
-  await ensurePlacementMigrations();
+export async function listDistinctPlacementSetupIds(
+  userId: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<string[]> {
+  await ensurePlacementMigrations(mode);
   const mongo = await getMongoClient();
   const ids = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .distinct("setupId", { userId });
   return ids.map((id) => String(id)).filter(Boolean);
 }
 
-export async function deleteSchedulePlacement(userId: string, id: string): Promise<boolean> {
+export async function deleteSchedulePlacement(
+  userId: string,
+  id: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<boolean> {
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -351,26 +378,33 @@ export async function deleteSchedulePlacement(userId: string, id: string): Promi
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .deleteOne({ _id: oid, userId });
   return result.deletedCount === 1;
 }
 
 /** Delete every schedule placement owned by this user (account teardown). */
-export async function deleteAllSchedulePlacementsForUser(userId: string): Promise<number> {
+export async function deleteAllSchedulePlacementsForUser(
+  userId: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<number> {
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .deleteMany({ userId: String(userId) });
   return result.deletedCount ?? 0;
 }
 
-export async function deletePlacementsBySetupId(userId: string, setupId: string): Promise<number> {
+export async function deletePlacementsBySetupId(
+  userId: string,
+  setupId: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<number> {
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .deleteMany({ userId, setupId });
   return result.deletedCount;
 }
@@ -379,15 +413,16 @@ export async function deletePlacementsByDay(
   userId: string,
   dayInput: string,
   series: string = DEFAULT_MARKET_SERIES,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<number> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
   const day = normalizeDay(dayInput);
   if (!day) throw new Error("Invalid schedule day");
   const seriesKey = normalizeSeries(series);
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .deleteMany({ userId, series: seriesKey, day });
   return result.deletedCount;
 }
@@ -399,8 +434,9 @@ export async function replaceDayWithSetup(
   setupIdInput: string,
   titleInput: string,
   series: string = DEFAULT_MARKET_SERIES,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<SchedulePlacementListItem[]> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
   const day = normalizeDay(dayInput);
   const setupId = String(setupIdInput ?? "").trim();
   const title = String(titleInput ?? "").trim();
@@ -408,7 +444,9 @@ export async function replaceDayWithSetup(
   if (!day || !setupId || !title) throw new Error("Invalid day fill fields");
 
   const mongo = await getMongoClient();
-  const collection = mongo.db(getMongoDbName()).collection<SchedulePlacementRecord>(COLLECTION);
+  const collection = mongo
+    .db(getMongoDbName())
+    .collection<SchedulePlacementRecord>(collectionFor(mode));
   await collection.deleteMany({ userId, series: seriesKey, day });
 
   const now = new Date();
@@ -424,18 +462,19 @@ export async function replaceDayWithSetup(
     updatedAt: now,
   }));
   await collection.insertMany(docs);
-  return listSchedulePlacements(userId, seriesKey);
+  return listSchedulePlacements(userId, seriesKey, mode);
 }
 
 export async function updatePlacementTitlesBySetupId(
   userId: string,
   setupId: string,
   title: string,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<number> {
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .updateMany({ userId, setupId }, { $set: { title, updatedAt: new Date() } });
   return result.modifiedCount;
 }
@@ -445,8 +484,9 @@ export async function replaceAllPlacementsSetup(
   setupId: string,
   title: string,
   series: string = DEFAULT_MARKET_SERIES,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<SchedulePlacementListItem[]> {
-  await ensurePlacementMigrations();
+  await ensurePlacementMigrations(mode);
   const setupIdNorm = String(setupId ?? "").trim();
   const titleNorm = String(title ?? "").trim();
   const seriesKey = normalizeSeries(series);
@@ -458,11 +498,11 @@ export async function replaceAllPlacementsSetup(
   const updatedAt = new Date();
   await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .updateMany(
       { userId, series: seriesKey },
       { $set: { setupId: setupIdNorm, title: titleNorm, updatedAt } },
     );
 
-  return listSchedulePlacements(userId, seriesKey);
+  return listSchedulePlacements(userId, seriesKey, mode);
 }

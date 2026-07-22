@@ -12,6 +12,99 @@ let pendingChainlinkTicks = [];
 
 const MAX_POSITION_CARDS = 50;
 const LOG_CLEARED_SESSION_KEY = "poly-real:log-cleared";
+const SCHEDULE_WORKSPACE_STORAGE_KEY = "poly-real:schedule-workspace-mode";
+
+/** @type {"live" | "replay"} */
+let scheduleWorkspaceMode = "live";
+
+function normalizeScheduleWorkspaceMode(raw) {
+  return String(raw ?? "").trim().toLowerCase() === "replay" ? "replay" : "live";
+}
+
+function getScheduleWorkspaceMode() {
+  return scheduleWorkspaceMode;
+}
+
+function isReplayWorkspace() {
+  return scheduleWorkspaceMode === "replay";
+}
+
+function withScheduleWorkspaceMode(url) {
+  const mode = getScheduleWorkspaceMode();
+  const sep = String(url).includes("?") ? "&" : "?";
+  return `${url}${sep}mode=${encodeURIComponent(mode)}`;
+}
+
+function syncScheduleWorkspaceUi() {
+  const page = $("page-schedule-heatmap");
+  page?.classList.toggle("is-replay-workspace", isReplayWorkspace());
+  document.querySelectorAll("[data-schedule-workspace]").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.scheduleWorkspace === scheduleWorkspaceMode);
+  });
+  const replayBtn = $("schedule-replay-run-btn");
+  if (replayBtn) {
+    replayBtn.hidden = !isReplayWorkspace();
+  }
+}
+
+async function setScheduleWorkspaceMode(nextMode, options = {}) {
+  const mode = normalizeScheduleWorkspaceMode(nextMode);
+  if (mode === scheduleWorkspaceMode && !options.force) {
+    syncScheduleWorkspaceUi();
+    return;
+  }
+  scheduleWorkspaceMode = mode;
+  try {
+    localStorage.setItem(SCHEDULE_WORKSPACE_STORAGE_KEY, mode);
+  } catch {
+    // ignore
+  }
+  syncScheduleWorkspaceUi();
+  if (options.reload === false) return;
+
+  // Clear both panes immediately so Live cards never linger while Replay loads.
+  scheduleSetupsCache = [];
+  renderScheduleSetupsList([]);
+  if (window.SchedulePlacements?.clearWorkspaceBoard) {
+    window.SchedulePlacements.clearWorkspaceBoard();
+  }
+
+  await loadScheduleSetups({ expectedMode: mode });
+  if (window.SchedulePlacements?.onWorkspaceModeChanged) {
+    await window.SchedulePlacements.onWorkspaceModeChanged(mode);
+  } else if (window.SchedulePlacements?.loadPlacements) {
+    await window.SchedulePlacements.loadPlacements({
+      reloadStats: mode !== "replay",
+      expectedMode: mode,
+    });
+  }
+}
+
+function initScheduleWorkspaceMode() {
+  try {
+    scheduleWorkspaceMode = normalizeScheduleWorkspaceMode(
+      localStorage.getItem(SCHEDULE_WORKSPACE_STORAGE_KEY),
+    );
+  } catch {
+    scheduleWorkspaceMode = "live";
+  }
+  syncScheduleWorkspaceUi();
+  document.querySelectorAll("[data-schedule-workspace]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      void setScheduleWorkspaceMode(btn.dataset.scheduleWorkspace);
+    });
+  });
+  $("schedule-replay-run-btn")?.addEventListener("click", () => {
+    void window.SchedulePlacements?.runReplay?.();
+  });
+}
+
+window.getScheduleWorkspaceMode = getScheduleWorkspaceMode;
+window.isReplayWorkspace = isReplayWorkspace;
+window.withScheduleWorkspaceMode = withScheduleWorkspaceMode;
+window.setScheduleWorkspaceMode = setScheduleWorkspaceMode;
+
+let scheduleSetupsCache = [];
 
 let logCurrentWindowStart = null;
 let logPreviousWindowStart = null;
@@ -1469,6 +1562,8 @@ function appendLogEntry(entry) {
     output.scrollTop = output.scrollHeight;
   }
 }
+
+window.appendLogEntry = appendLogEntry;
 
 function appendLog(message) {
   appendLogEntry({ message, level: "info" });
@@ -3062,7 +3157,7 @@ function updateWindowUI(state) {
   updateCountdown(state);
   updateGraphPanel(state);
 
-  if (state?.trading && window.SchedulePlacements?.applyLivePlacementStats) {
+  if (state?.trading && !isReplayWorkspace() && window.SchedulePlacements?.applyLivePlacementStats) {
     window.SchedulePlacements.applyLivePlacementStats(
       state.trading.placementStats,
       state.trading.sessionTotals,
@@ -3185,7 +3280,11 @@ function connectSSE() {
     const state = JSON.parse(e.data);
     if (state.series === selectedSeries || !state.series) {
       updateWindowUI(state);
-    } else if (state.trading && window.SchedulePlacements?.applyLivePlacementStats) {
+    } else if (
+      state.trading &&
+      !isReplayWorkspace() &&
+      window.SchedulePlacements?.applyLivePlacementStats
+    ) {
       // Keep header/placement stats current even when viewing another series.
       window.SchedulePlacements.applyLivePlacementStats(
         state.trading.placementStats,
@@ -3234,10 +3333,15 @@ function connectSSE() {
   es.addEventListener("schedule-placements", (e) => {
     if (!window.SchedulePlacements) return;
     const data = JSON.parse(e.data);
-    if (!Array.isArray(data)) return;
+    const mode = data && !Array.isArray(data) ? data.mode || "live" : "live";
+    if (mode !== getScheduleWorkspaceMode()) return;
+    const placements = Array.isArray(data) ? data : data?.placements;
+    if (!Array.isArray(placements)) return;
     // Ignore boards for other markets (broadcasts are per-series).
-    if (data.length > 0 && data[0]?.series && data[0].series !== selectedSeries) return;
-    window.SchedulePlacements.setPlacements(data);
+    if (placements.length > 0 && placements[0]?.series && placements[0].series !== selectedSeries) {
+      return;
+    }
+    window.SchedulePlacements.setPlacements(placements);
   });
 
   es.onerror = () => {
@@ -3325,7 +3429,7 @@ async function saveTradingSetup() {
       await window.Simulator.pushSetupToServer();
     }
 
-    const res = await fetch("/api/trading-setups", {
+    const res = await fetch(withScheduleWorkspaceMode("/api/trading-setups"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3356,7 +3460,6 @@ async function saveTradingSetup() {
   }
 }
 
-let scheduleSetupsCache = [];
 let openSetupMenuId = null;
 
 function formatSetupListTitle(title, count) {
@@ -3605,7 +3708,7 @@ async function deleteTradingSetup(setup) {
   });
 
   try {
-    const res = await fetch(`/api/trading-setups/${encodeURIComponent(setup._id)}`, {
+    const res = await fetch(withScheduleWorkspaceMode(`/api/trading-setups/${encodeURIComponent(setup._id)}`), {
       method: "DELETE",
     });
     if (!res.ok && res.status !== 204) {
@@ -3644,7 +3747,7 @@ async function duplicateTradingSetup(setup) {
   closeSetupMenus();
   if (!setup?.setup) return;
   try {
-    const res = await fetch("/api/trading-setups", {
+    const res = await fetch(withScheduleWorkspaceMode("/api/trading-setups"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3771,7 +3874,7 @@ function renderScheduleSetupsList(setups, errorMessage) {
   if (!setups?.length) {
     const empty = document.createElement("div");
     empty.className = "schedule-setups-empty";
-    empty.textContent = "No saved setups";
+    empty.textContent = isReplayWorkspace() ? "No replay setups yet" : "No saved setups";
     list.appendChild(empty);
     return;
   }
@@ -3890,22 +3993,28 @@ function renderScheduleSetupsList(setups, errorMessage) {
   }
 }
 
-async function loadScheduleSetups() {
+async function loadScheduleSetups(options = {}) {
   const list = $("schedule-setups-list");
   if (!list) return;
+  const expectedMode = options.expectedMode || getScheduleWorkspaceMode();
 
   list.innerHTML = '<div class="schedule-setups-empty">Loading…</div>';
 
   try {
-    const res = await fetch("/api/trading-setups");
+    const res = await fetch(withScheduleWorkspaceMode("/api/trading-setups"));
+    // Ignore stale responses if the user switched mode mid-flight.
+    if (getScheduleWorkspaceMode() !== expectedMode) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Failed to load setups (${res.status})`);
     }
     const setups = await res.json();
-    scheduleSetupsCache = setups;
-    renderScheduleSetupsList(setups);
+    if (getScheduleWorkspaceMode() !== expectedMode) return;
+    scheduleSetupsCache = Array.isArray(setups) ? setups : [];
+    renderScheduleSetupsList(scheduleSetupsCache);
   } catch (err) {
+    if (getScheduleWorkspaceMode() !== expectedMode) return;
+    scheduleSetupsCache = [];
     renderScheduleSetupsList([], err.message || "Failed to load setups");
   }
 }
@@ -4494,6 +4603,7 @@ async function init() {
   initScheduleDaySlots();
   initScheduleUtcColumn();
   initHeatmapLegend();
+  initScheduleWorkspaceMode();
   if (window.SchedulePlacements) window.SchedulePlacements.init();
   if (window.SetupEditor) window.SetupEditor.init();
   bindPageToggle();

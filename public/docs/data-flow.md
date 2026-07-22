@@ -48,6 +48,8 @@ Without schedule, phases come from the graph setup — [Setups & phases](doc:set
 
 ## Setups and schedule
 
-Saved over REST to the database. The server picks the active UTC placement each tick. SSE keeps the schedule board updated.
+Saved over REST to the database (`trading_setups_real` / `schedual_setups_real` for **Live**; `trading_setups_replay` / `schedual_setups_replay` for **Replay**). The server picks the active **Live** UTC placement each tick. SSE keeps the schedule board updated.
+
+**Replay** runs via REST `POST /api/schedule-replay` (SSE response). The external worker URL is configured with `SCHEDULE_REPLAY_SERVICE_URL` (empty until wired).
 
 Wallet credentials in [Settings](doc:settings) unlock Market/Schedule and live signing.

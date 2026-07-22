@@ -796,6 +796,21 @@
           <div id="schedule-setups-list" class="schedule-setups-list">
             <div class="schedule-setups-empty">Loading…</div>
           </div>
+          <div class="schedule-workspace-footer">
+            <button
+              type="button"
+              id="schedule-replay-run-btn"
+              class="schedule-replay-run-btn"
+              hidden
+              title="Replay placed cards over the last week"
+            >
+              Replay
+            </button>
+            <div class="schedule-workspace-toggle" role="group" aria-label="Schedule workspace">
+              <button type="button" class="schedule-workspace-toggle-btn is-active" data-schedule-workspace="live">Live</button>
+              <button type="button" class="schedule-workspace-toggle-btn" data-schedule-workspace="replay">Replay</button>
+            </div>
+          </div>
           <div id="schedule-heatmap-panel" class="schedule-heatmap-panel" hidden></div>
         </aside>
         <section class="schedule-main-panel" aria-label="Schedule and heatmap">

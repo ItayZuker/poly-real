@@ -6,12 +6,20 @@ import {
   normalizeSetupColor,
   pickUniqueSetupColor,
 } from "../setup-colors.js";
+import {
+  tradingSetupsCollection,
+  type ScheduleWorkspaceMode,
+} from "../schedule-workspace-mode.js";
 import { getMongoClient, getMongoDbName } from "./mongo-client.js";
 
-/** Real-app setups only — never read/write `trading_setups_sim`. */
-const COLLECTION = "trading_setups_real";
+/** Real-app live setups only — never read/write `trading_setups_sim`. */
+const LIVE_COLLECTION = tradingSetupsCollection("live");
 /** Shared legacy name — migration source only; not deleted. */
 const LEGACY_COLLECTION = "trading_setups";
+
+function collectionFor(mode: ScheduleWorkspaceMode = "live"): string {
+  return tradingSetupsCollection(mode);
+}
 
 export interface CreateTradingSetupInput {
   title: string;
@@ -48,7 +56,7 @@ async function ensureTradingSetupsMigrated(): Promise<void> {
     migratePromise = (async () => {
       const mongo = await getMongoClient();
       const db = mongo.db(getMongoDbName());
-      const real = db.collection(COLLECTION);
+      const real = db.collection(LIVE_COLLECTION);
       const legacy = db.collection(LEGACY_COLLECTION);
 
       const realCount = await real.countDocuments({}, { limit: 1 });
@@ -60,7 +68,7 @@ async function ensureTradingSetupsMigrated(): Promise<void> {
       try {
         await real.insertMany(legacyDocs, { ordered: false });
         console.log(
-          `[trading-setups] Migrated ${legacyDocs.length} doc(s) from ${LEGACY_COLLECTION} → ${COLLECTION}`,
+          `[trading-setups] Migrated ${legacyDocs.length} doc(s) from ${LEGACY_COLLECTION} → ${LIVE_COLLECTION}`,
         );
       } catch (err) {
         // Partial insert (e.g. rerun) — ignore duplicate _id; fail only if real stayed empty.
@@ -78,14 +86,14 @@ async function ensureTradingSetupsMigrated(): Promise<void> {
   await migratePromise;
 }
 
-/** One-time: assign bootstrap owner to setups missing userId. */
+/** One-time: assign bootstrap owner to live setups missing userId. */
 export async function ensureTradingSetupsUserId(bootstrapUserId: string): Promise<void> {
   if (!ensureUserIdPromise) {
     ensureUserIdPromise = (async () => {
       const mongo = await getMongoClient();
       const result = await mongo
         .db(getMongoDbName())
-        .collection(COLLECTION)
+        .collection(LIVE_COLLECTION)
         .updateMany(
           {
             $or: [
@@ -109,7 +117,8 @@ export async function ensureTradingSetupsUserId(bootstrapUserId: string): Promis
   await ensureUserIdPromise;
 }
 
-async function ensureReady(): Promise<void> {
+async function ensureReady(mode: ScheduleWorkspaceMode = "live"): Promise<void> {
+  if (mode !== "live") return;
   await ensureTradingSetupsMigrated();
   const { getBootstrapUserId } = await import("./user-repository.js");
   await ensureTradingSetupsUserId(await getBootstrapUserId());
@@ -176,7 +185,7 @@ export async function setLiveScheduleInUse(
   setupId: string,
   inUse: boolean,
 ): Promise<void> {
-  await ensureReady();
+  await ensureReady("live");
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -188,22 +197,25 @@ export async function setLiveScheduleInUse(
   if (inUse) {
     await mongo
       .db(getMongoDbName())
-      .collection<TradingSetupDoc>(COLLECTION)
+      .collection<TradingSetupDoc>(LIVE_COLLECTION)
       .updateOne({ _id: oid, userId }, { $set: { liveScheduleInUse: true } });
     return;
   }
   await mongo
     .db(getMongoDbName())
-    .collection<TradingSetupDoc>(COLLECTION)
+    .collection<TradingSetupDoc>(LIVE_COLLECTION)
     .updateOne({ _id: oid, userId }, { $unset: { liveScheduleInUse: "" } });
 }
 
-export async function listTradingSetups(userId: string): Promise<TradingSetupListItem[]> {
-  await ensureReady();
+export async function listTradingSetups(
+  userId: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<TradingSetupListItem[]> {
+  await ensureReady(mode);
   const mongo = await getMongoClient();
   const docs = await mongo
     .db(getMongoDbName())
-    .collection<TradingSetupDoc>(COLLECTION)
+    .collection<TradingSetupDoc>(collectionFor(mode))
     .find({ userId })
     .toArray();
   docs.sort(compareSetupDocs);
@@ -213,12 +225,14 @@ export async function listTradingSetups(userId: string): Promise<TradingSetupLis
 export async function insertTradingSetup(
   userId: string,
   input: CreateTradingSetupInput,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<TradingSetupListItem> {
-  await ensureReady();
+  await ensureReady(mode);
   const mongo = await getMongoClient();
+  const col = collectionFor(mode);
   const existing = await mongo
     .db(getMongoDbName())
-    .collection<TradingSetupDoc>(COLLECTION)
+    .collection<TradingSetupDoc>(col)
     .find({ userId })
     .project({ color: 1, sortOrder: 1 })
     .toArray();
@@ -247,15 +261,16 @@ export async function insertTradingSetup(
     doc.description = input.description;
   }
 
-  const result = await mongo.db(getMongoDbName()).collection(COLLECTION).insertOne(doc);
+  const result = await mongo.db(getMongoDbName()).collection(col).insertOne(doc);
   return serializeTradingSetup({ ...doc, _id: result.insertedId });
 }
 
 export async function getTradingSetupById(
   userId: string,
   id: string,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<TradingSetupListItem | null> {
-  await ensureReady();
+  await ensureReady(mode);
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -266,7 +281,7 @@ export async function getTradingSetupById(
   const mongo = await getMongoClient();
   const doc = await mongo
     .db(getMongoDbName())
-    .collection<TradingSetupDoc>(COLLECTION)
+    .collection<TradingSetupDoc>(collectionFor(mode))
     .findOne({ _id: oid, userId });
   return doc ? serializeTradingSetup(doc) : null;
 }
@@ -286,8 +301,9 @@ export async function updateTradingSetup(
   userId: string,
   id: string,
   input: UpdateTradingSetupInput,
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<TradingSetupListItem | null> {
-  await ensureReady();
+  await ensureReady(mode);
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -297,9 +313,10 @@ export async function updateTradingSetup(
   }
 
   const mongo = await getMongoClient();
+  const col = collectionFor(mode);
   const existing = await mongo
     .db(getMongoDbName())
-    .collection<TradingSetupDoc>(COLLECTION)
+    .collection<TradingSetupDoc>(col)
     .findOne({ _id: oid, userId });
   if (!existing) return null;
   if (existing.userId !== userId) return null;
@@ -319,7 +336,7 @@ export async function updateTradingSetup(
     if (!color) throw new Error("Invalid color");
     const conflict = await mongo
       .db(getMongoDbName())
-      .collection<TradingSetupDoc>(COLLECTION)
+      .collection<TradingSetupDoc>(col)
       .findOne({ userId, color, _id: { $ne: oid } });
     if (conflict) throw new Error("Color already in use");
     update.color = color;
@@ -342,20 +359,24 @@ export async function updateTradingSetup(
     mongoUpdate.$unset = { description: "" };
   }
 
-  await mongo.db(getMongoDbName()).collection<TradingSetupDoc>(COLLECTION).updateOne(
+  await mongo.db(getMongoDbName()).collection<TradingSetupDoc>(col).updateOne(
     { _id: oid, userId },
     mongoUpdate,
   );
 
   const refreshed = await mongo
     .db(getMongoDbName())
-    .collection<TradingSetupDoc>(COLLECTION)
+    .collection<TradingSetupDoc>(col)
     .findOne({ _id: oid, userId });
   return refreshed ? serializeTradingSetup(refreshed) : null;
 }
 
-export async function deleteTradingSetup(userId: string, id: string): Promise<boolean> {
-  await ensureReady();
+export async function deleteTradingSetup(
+  userId: string,
+  id: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<boolean> {
+  await ensureReady(mode);
   const { ObjectId } = await import("mongodb");
   let oid: ObjectId;
   try {
@@ -366,18 +387,21 @@ export async function deleteTradingSetup(userId: string, id: string): Promise<bo
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .deleteOne({ _id: oid, userId });
   return result.deletedCount === 1;
 }
 
 /** Delete every trading setup owned by this user (account teardown). */
-export async function deleteAllTradingSetupsForUser(userId: string): Promise<number> {
-  await ensureReady();
+export async function deleteAllTradingSetupsForUser(
+  userId: string,
+  mode: ScheduleWorkspaceMode = "live",
+): Promise<number> {
+  await ensureReady(mode);
   const mongo = await getMongoClient();
   const result = await mongo
     .db(getMongoDbName())
-    .collection(COLLECTION)
+    .collection(collectionFor(mode))
     .deleteMany({ userId: String(userId) });
   return result.deletedCount ?? 0;
 }
@@ -386,8 +410,9 @@ export async function deleteAllTradingSetupsForUser(userId: string): Promise<num
 export async function reorderTradingSetups(
   userId: string,
   orderedIds: string[],
+  mode: ScheduleWorkspaceMode = "live",
 ): Promise<TradingSetupListItem[]> {
-  await ensureReady();
+  await ensureReady(mode);
   if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
     throw new Error("orderedIds is required");
   }
@@ -407,7 +432,7 @@ export async function reorderTradingSetups(
   }
 
   const mongo = await getMongoClient();
-  const col = mongo.db(getMongoDbName()).collection<TradingSetupDoc>(COLLECTION);
+  const col = mongo.db(getMongoDbName()).collection<TradingSetupDoc>(collectionFor(mode));
   const existing = await col.find({ userId }).project({ _id: 1 }).toArray();
   if (existing.length !== oids.length) {
     throw new Error("orderedIds must include every setup");
@@ -428,5 +453,5 @@ export async function reorderTradingSetups(
   if (ops.length > 0) {
     await col.bulkWrite(ops, { ordered: false });
   }
-  return listTradingSetups(userId);
+  return listTradingSetups(userId, mode);
 }
