@@ -2777,6 +2777,24 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
   gap: 12px;
 }
 
+.settings-card--inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.settings-card-inline-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-card--inline .settings-secondary-btn {
+  flex-shrink: 0;
+}
+
 .settings-card-title {
   margin: 0;
   font-size: 0.95rem;

@@ -1,12 +1,12 @@
 # Settings & wallet
 
+## Documentation
+
+The first Settings card is a single row: **Documentation** on the left, **Open** on the right (goes to `/docs`). Release notes are at `/version`. Use **Back** to return to the app. Choosing **Main** while signed in also returns you to `/`.
+
 ## Profile
 
 Update display name, log out, or delete your account from Settings.
-
-## Documentation
-
-While signed in, open **Documentation** from Settings (or go to `/docs`). Release notes are at `/version`. Use **Back** to return to the app. Choosing **Main** while signed in also returns you to `/`.
 
 ## Trading credentials
 
