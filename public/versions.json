@@ -1,0 +1,15 @@
+{
+  "current": "1.1.0",
+  "releases": [
+    {
+      "version": "1.1.0",
+      "releasedAt": "2026-07-22T07:14:00.000Z",
+      "notes": "Homepage Main / Docs / Versions tabs; right-column auth layout; Markdown product docs under public/docs; versions changelog; Cursor rules for dev→main workflow."
+    },
+    {
+      "version": "1.0.0",
+      "releasedAt": "2026-07-01T00:00:00.000Z",
+      "notes": "Initial Poly Real app: auth, Market, Schedule / Heatmap, Settings, and live/demo trading."
+    }
+  ]
+}

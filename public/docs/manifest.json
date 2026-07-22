@@ -1,0 +1,9 @@
+{
+  "pages": [
+    { "id": "overview", "title": "Overview", "file": "overview.md" },
+    { "id": "getting-started", "title": "Getting started", "file": "getting-started.md" },
+    { "id": "market", "title": "Market", "file": "market.md" },
+    { "id": "schedule", "title": "Schedule", "file": "schedule.md" },
+    { "id": "settings", "title": "Settings & wallet", "file": "settings.md" }
+  ]
+}

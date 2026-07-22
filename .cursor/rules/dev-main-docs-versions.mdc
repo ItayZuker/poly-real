@@ -1,0 +1,50 @@
+---
+description: Develop on dev; main is production. Keep docs aligned; bump version on every merge to main.
+alwaysApply: true
+---
+
+# Branch, docs, and release workflow
+
+## Branches
+
+- **`dev`** — default development / testing branch in Cursor. Do feature work here.
+- **`main`** — production. Do not commit day-to-day feature work directly to `main`.
+
+When starting work, prefer being on `dev`. If creating a branch for a task, branch from `dev` unless the user asks otherwise.
+
+## Docs while developing (on `dev`)
+
+Product docs live in `public/docs/*.md` (index in `public/docs/manifest.json`).
+
+- Before changing user-facing behavior, read the matching doc page.
+- When you add or change a user-facing feature, update the matching Markdown file in the **same change**.
+- Do not invent UI/behavior that contradicts the docs; if code must diverge, update the docs.
+- Topic map (extend `manifest.json` when adding a new page):
+  - Overview → `overview.md`
+  - Onboarding → `getting-started.md`
+  - Market page → `market.md`
+  - Schedule / Heatmap → `schedule.md`
+  - Settings / wallet → `settings.md`
+
+Internal/schema notes may stay under repo `docs/` (not the homepage Docs tab).
+
+## Every merge into `main` (required)
+
+On **every** merge from `dev` (or a PR) into `main`, bump the product version and record it:
+
+1. Bump semver in **both**:
+   - `package.json` → `version`
+   - `public/versions.json` → `current`
+2. Prepend a new object to `public/versions.json` → `releases[]`:
+   - `version` — new semver
+   - `releasedAt` — ISO-8601 UTC timestamp of the release
+   - `notes` — short comment of what shipped (user-facing; mention doc updates if any)
+3. Default bump: **patch** (`1.1.0` → `1.1.1`). Use **minor** for user-visible features, **major** for breaking changes — or follow the user’s explicit version.
+
+Do this as part of the merge/release work even when docs did not change.
+
+## Do not
+
+- Skip the Versions entry on a `main` merge
+- Put production-only hotfixes on `dev` without merging intent clear to the user
+- Edit homepage Docs via large HTML in `index.html` — edit Markdown under `public/docs/`

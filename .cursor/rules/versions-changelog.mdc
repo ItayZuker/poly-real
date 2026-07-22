@@ -1,0 +1,27 @@
+---
+description: Version bump and changelog format for public/versions.json on main releases.
+globs: public/versions.json
+alwaysApply: false
+---
+
+# Versions changelog
+
+`public/versions.json` powers the homepage **Versions** tab.
+
+```json
+{
+  "current": "1.1.0",
+  "releases": [
+    {
+      "version": "1.1.0",
+      "releasedAt": "2026-07-22T07:14:00.000Z",
+      "notes": "What changed in this release."
+    }
+  ]
+}
+```
+
+- Keep `releases` newest-first
+- `releasedAt` must be ISO-8601 (include time; UI shows local timezone)
+- `package.json` `version` must equal `current`
+- On every merge to `main`, prepend a release and bump `current`

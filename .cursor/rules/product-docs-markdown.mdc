@@ -1,0 +1,14 @@
+---
+description: How to edit homepage Docs (Markdown) and Versions changelog files.
+globs: public/docs/**/*
+alwaysApply: false
+---
+
+# Homepage Docs files
+
+- Source of truth for the **Docs** tab: `public/docs/*.md`
+- Nav order: `public/docs/manifest.json` (`pages[].id`, `title`, `file`)
+- Renderer: `public/markdown.js` (headings, lists, tables, links, code) — keep docs within that subset
+- Prefer short sections with stable `##` headings so future edits can target one section
+
+When adding a new doc topic: create the `.md`, add it to `manifest.json`, and keep Overview links/wording consistent if needed.

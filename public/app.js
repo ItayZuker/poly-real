@@ -91,7 +91,35 @@ function setSignupError(message) {
   el.textContent = message;
 }
 
+let authTopTab = "main";
+let authDocsManifest = null;
+let authDocsLoaded = Object.create(null);
+let authDocsActiveId = null;
+let authVersionsLoaded = false;
+
+function setAuthTopTab(tab) {
+  authTopTab = tab === "docs" || tab === "versions" ? tab : "main";
+  const panels = {
+    main: $("auth-tab-main"),
+    docs: $("auth-tab-docs"),
+    versions: $("auth-tab-versions"),
+  };
+  for (const [key, el] of Object.entries(panels)) {
+    if (el) el.hidden = key !== authTopTab;
+  }
+  document.querySelectorAll(".auth-tab[data-auth-tab]").forEach((btn) => {
+    const active = btn.getAttribute("data-auth-tab") === authTopTab;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  if (authTopTab === "docs") void ensureAuthDocsReady();
+  if (authTopTab === "versions") void ensureAuthVersionsReady();
+}
+
 function showAuthView(view) {
+  if (view === "home" || view === "login" || view === "signup") {
+    setAuthTopTab("main");
+  }
   const home = $("auth-home");
   const login = $("auth-login-panel");
   const signup = $("auth-signup-panel");
@@ -104,12 +132,130 @@ function showAuthView(view) {
   else if (view === "signup") $("auth-signup-email")?.focus();
 }
 
+async function ensureAuthDocsReady() {
+  const nav = $("auth-docs-nav");
+  const content = $("auth-docs-content");
+  if (!nav || !content) return;
+  try {
+    if (!authDocsManifest) {
+      const res = await fetch("/docs/manifest.json", { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      authDocsManifest = await res.json();
+      nav.innerHTML = "";
+      const pages = Array.isArray(authDocsManifest?.pages) ? authDocsManifest.pages : [];
+      for (const page of pages) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "auth-docs-nav-btn";
+        btn.textContent = page.title || page.id;
+        btn.dataset.docId = page.id;
+        btn.addEventListener("click", () => {
+          void loadAuthDocPage(page.id);
+        });
+        nav.appendChild(btn);
+      }
+      if (pages.length) await loadAuthDocPage(pages[0].id);
+      else content.innerHTML = "<p>No documentation pages yet.</p>";
+    } else if (!authDocsActiveId && Array.isArray(authDocsManifest?.pages) && authDocsManifest.pages[0]) {
+      await loadAuthDocPage(authDocsManifest.pages[0].id);
+    }
+  } catch (err) {
+    content.textContent = `Failed to load docs: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+async function loadAuthDocPage(pageId) {
+  const content = $("auth-docs-content");
+  if (!content || !authDocsManifest) return;
+  const page = (authDocsManifest.pages || []).find((p) => p.id === pageId);
+  if (!page) return;
+  authDocsActiveId = pageId;
+  document.querySelectorAll(".auth-docs-nav-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.docId === pageId);
+  });
+  try {
+    if (!authDocsLoaded[pageId]) {
+      const res = await fetch(`/docs/${page.file}`, { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      authDocsLoaded[pageId] = await res.text();
+    }
+    const md = authDocsLoaded[pageId];
+    content.innerHTML = typeof window.markdownToHtml === "function"
+      ? window.markdownToHtml(md)
+      : `<pre>${md}</pre>`;
+  } catch (err) {
+    content.textContent = `Failed to load ${page.file}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function formatVersionTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }).format(d);
+  } catch {
+    return d.toISOString();
+  }
+}
+
+async function ensureAuthVersionsReady() {
+  const list = $("auth-versions-list");
+  const currentEl = $("auth-versions-current");
+  if (!list) return;
+  try {
+    const res = await fetch("/versions.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const releases = Array.isArray(data?.releases) ? data.releases : [];
+    if (currentEl) {
+      currentEl.textContent = data?.current ? `Current: v${data.current}` : "";
+    }
+    list.innerHTML = "";
+    if (!releases.length) {
+      list.innerHTML = "<p class=\"auth-sub\">No releases recorded yet.</p>";
+    } else {
+      for (const release of releases) {
+        const card = document.createElement("article");
+        card.className = "auth-version-card";
+        const meta = document.createElement("div");
+        meta.className = "auth-version-meta";
+        const id = document.createElement("span");
+        id.className = "auth-version-id";
+        id.textContent = `v${release.version || "?"}`;
+        const time = document.createElement("span");
+        time.className = "auth-version-time";
+        time.textContent = formatVersionTime(release.releasedAt);
+        meta.appendChild(id);
+        meta.appendChild(time);
+        const notes = document.createElement("p");
+        notes.className = "auth-version-notes";
+        notes.textContent = release.notes || "";
+        card.appendChild(meta);
+        card.appendChild(notes);
+        list.appendChild(card);
+      }
+    }
+    authVersionsLoaded = true;
+  } catch (err) {
+    list.textContent = `Failed to load versions: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 function showAuthScreen() {
   const auth = $("auth-screen");
   const app = $("app-shell");
   if (auth) auth.hidden = false;
   if (app) app.hidden = true;
   document.body.style.overflow = "hidden";
+  setAuthTopTab("main");
   showAuthView("home");
 }
 
@@ -240,6 +386,16 @@ function bindAuthForm(onLoggedIn) {
   bindNav("auth-login-to-home", "home");
   bindNav("auth-signup-to-login", "login");
   bindNav("auth-signup-to-home", "home");
+
+  document.querySelectorAll(".auth-tab[data-auth-tab]").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const tab = btn.getAttribute("data-auth-tab");
+      setAuthTopTab(tab);
+      if (tab === "main") showAuthView("home");
+    });
+  });
 }
 
 function renderWalletAccount(data) {
