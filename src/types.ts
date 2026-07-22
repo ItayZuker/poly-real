@@ -209,7 +209,8 @@ export interface LiveWindowState {
   bookTickSequence?: number;
 }
 
-export type GapVsPtb = "none" | "with" | "opposite";
+/** Direction / dual-side policy vs PTB. Same meaning for FAK and GTD. */
+export type GapVsPtb = "with" | "opposite" | "first" | "both";
 
 /** Optimize off → GTD resting limit; optimize on → immediate FAK. */
 export type BuyOrderType = "GTD" | "FAK";

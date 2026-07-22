@@ -3689,18 +3689,41 @@ async function deleteTradingSetup(setup) {
   closeSetupMenus();
   if (!setup?._id) return;
 
+  const setupId = String(setup._id);
   const item = document.querySelector(
-    `.schedule-setup-item[data-setup-id="${CSS.escape(String(setup._id))}"]`,
+    `.schedule-setup-item[data-setup-id="${CSS.escape(setupId)}"]`,
   );
   if (item?.classList.contains("is-deleting")) return;
 
-  const lockedCount = window.SchedulePlacements?.getLockedCountForSetup?.(setup._id) ?? 0;
-  if (lockedCount > 0) {
-    const confirmed = window.confirm(
-      `Delete "${setup.title}"?\n\nIt has ${lockedCount} locked schedule card${lockedCount === 1 ? "" : "s"}. Those will be removed and this cannot be undone.`,
-    );
-    if (!confirmed) return;
+  // Count from in-memory placements and from DOM cards (belt-and-suspenders —
+  // list titles / active cards can disagree with one source alone).
+  const memoryPlacements =
+    window.SchedulePlacements?.getPlacementsForSetup?.(setupId) ?? [];
+  const domCardCount = document.querySelectorAll(
+    `.schedule-placement-card[data-setup-id="${CSS.escape(setupId)}"]`,
+  ).length;
+  const placementCount = Math.max(memoryPlacements.length, domCardCount);
+  const lockedCount =
+    window.SchedulePlacements?.getLockedCountForSetup?.(setupId) ??
+    [...document.querySelectorAll(
+      `.schedule-placement-card[data-setup-id="${CSS.escape(setupId)}"].is-locked`,
+    )].length;
+  const onSchedule =
+    placementCount > 0 ||
+    lockedCount > 0 ||
+    setup.liveScheduleInUse === true ||
+    item?.classList.contains("is-in-use") === true;
+
+  let message = `Delete "${setup.title}"?\n\nThis cannot be undone.`;
+  if (onSchedule) {
+    const count = Math.max(placementCount, lockedCount, 1);
+    const lockedNote =
+      lockedCount > 0
+        ? `\n${lockedCount} of those card${lockedCount === 1 ? " is" : "s are"} locked (already traded).`
+        : "";
+    message = `Delete "${setup.title}"?\n\nIt is placed on the schedule (${count} card${count === 1 ? "" : "s"}). Those will be removed and this cannot be undone.${lockedNote}`;
   }
+  if (!window.confirm(message)) return;
 
   setSetupListItemDeleting(setup._id, true);
   await new Promise((resolve) => {

@@ -157,14 +157,7 @@
       buyOrderType: resolveBuyOrderType(buyOptimize),
       minGap: Number.isFinite(minGap) && minGap > 0 ? Math.round(minGap * 100) / 100 : 0,
       maxGap: Number.isFinite(maxGap) && maxGap > 0 ? Math.round(maxGap * 100) / 100 : 0,
-      gapVsPtb:
-        !buyOptimize && raw.gapVsPtb === "none"
-          ? "with"
-          : raw.gapVsPtb === "with" || raw.gapVsPtb === "opposite" || raw.gapVsPtb === "none"
-            ? raw.gapVsPtb
-            : buyOptimize
-              ? "none"
-              : "with",
+      gapVsPtb: normalizeGapVsPtb(raw.gapVsPtb),
       buyAbortOnCrossing: Math.max(
         0,
         Math.min(1000, Math.floor(Number(raw.buyAbortOnCrossing)) || 0),
@@ -174,6 +167,14 @@
         Math.min(100, Math.floor(Number(raw.sellProfitCents)) || base.sellProfitCents),
       ),
     };
+  }
+
+  function normalizeGapVsPtb(value) {
+    if (value === "none") return "first";
+    if (value === "with" || value === "opposite" || value === "first" || value === "both") {
+      return value;
+    }
+    return "with";
   }
 
   function syncTriggerOrderTypeLabel() {
@@ -206,43 +207,31 @@
 
   function rememberGapVsPtbValue(select) {
     if (!select) return;
-    if (select.value === "opposite" || select.value === "with") {
+    if (
+      select.value === "opposite" ||
+      select.value === "with" ||
+      select.value === "first" ||
+      select.value === "both"
+    ) {
       select.dataset.lastValue = select.value;
     }
   }
 
   function resolvedGapVsPtb(select) {
-    if (!select) return "none";
-    if (select.value === "with" || select.value === "opposite" || select.value === "none") {
-      return select.value;
-    }
-    const last = select.dataset.lastValue;
-    if (last === "with" || last === "opposite") return last;
-    return "none";
+    if (!select) return "with";
+    return normalizeGapVsPtb(select.value);
   }
 
   function syncGapVsPtbControl(formLocked = false) {
     const select = document.getElementById("phase-gap-vs-ptb");
     const label = document.getElementById("phase-gap-vs-ptb-label");
     const buyEnabled = Boolean(document.getElementById("phase-buy-enabled")?.checked);
-    const optimize = Boolean(document.getElementById("phase-buy-optimize")?.checked);
     if (!select || !label) return;
 
     rememberGapVsPtbValue(select);
-    const noneOpt = select.querySelector('option[value="none"]');
-    if (noneOpt) {
-      noneOpt.hidden = !optimize;
-      noneOpt.disabled = !optimize;
-    }
+    select.value = normalizeGapVsPtb(select.value);
 
-    if (!optimize && select.value === "none") {
-      select.value = "with";
-    } else if (select.value !== "with" && select.value !== "opposite" && select.value !== "none") {
-      select.value = optimize ? "none" : "with";
-    }
-
-    label.classList.toggle("is-none", select.value === "none");
-    // Always interactive when buy is on — auto-None is a value change, not a disable.
+    label.classList.toggle("is-none", false);
     select.disabled = formLocked || !buyEnabled;
   }
 
@@ -841,13 +830,8 @@
     document.getElementById("phase-max-gap").value = cfg.maxGap ?? 0;
     document.getElementById("phase-min-gap").value = cfg.minGap ?? 0;
     const gapSelect = document.getElementById("phase-gap-vs-ptb");
-    gapSelect.value =
-      cfg.gapVsPtb === "with" || cfg.gapVsPtb === "opposite" || cfg.gapVsPtb === "none"
-        ? cfg.gapVsPtb
-        : "none";
-    if (gapSelect.value === "with" || gapSelect.value === "opposite") {
-      gapSelect.dataset.lastValue = gapSelect.value;
-    }
+    gapSelect.value = normalizeGapVsPtb(cfg.gapVsPtb);
+    gapSelect.dataset.lastValue = gapSelect.value;
     document.getElementById("phase-sell-profit").value = cfg.sellProfitCents;
     syncPhaseFormDisabled(readOnly);
     if (externalPhaseContext) modal.classList.add("modal-overlay-stacked");
@@ -1068,8 +1052,6 @@
       syncTriggerOrderTypeLabel();
       const locked =
         isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked;
-      const optimizeOn = document.getElementById("phase-buy-optimize").checked;
-      document.getElementById("phase-gap-vs-ptb").value = optimizeOn ? "none" : "with";
       syncGapLabels(locked);
     });
     document.getElementById("phase-max-gap").addEventListener("input", () => {

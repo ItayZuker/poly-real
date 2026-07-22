@@ -30,16 +30,21 @@ The window is split into Phase 1 → 2 → 3 (default ~⅓ and ~⅔). Only the *
 | **Trigger (¢)** | Limit / ask trigger (1–99). Label is **GTD** or **FAK** from Optimize |
 | **Abort on crossing** | Abort *unfilled* buys after this many PTB crossings in the phase. **0 = off** |
 | **Optimize** | Off = **GTD** resting limit. On = **FAK**: after exact trigger touch, hunt ≤ trigger |
-| **Min / max gap ($)** | Filter by \|asset − PTB\|. **0 = none** |
-| **Gap vs PTB** | Direction filter (below) |
+| **Min / max gap ($)** | Filter by \|asset − PTB\|. **0 = none**. Applies in every Gap vs PTB mode for both GTD and FAK |
+| **Gap vs PTB** | Side policy (below) — same rules for GTD and FAK |
 
 ### Gap vs PTB
+
+Direction is always set here (FAK does **not** ignore direction unless you pick First or Both).
 
 | Value | Meaning |
 |-------|---------|
 | **With** | Buy Up only above PTB; Down only below |
 | **Opposite** | Buy Up only below PTB; Down only above |
-| **None** | Ignore direction (FAK only; GTD keeps a direction, default **With**) |
+| **First** | Ignore direction. Whichever side hits the trigger first takes it. **GTD:** rest **both** sides at the trigger; when one fills, **cancel the other**. **FAK:** arm/fire the first side that touches |
+| **Both** | Ignore direction. Try to buy **both** Up and Down. **GTD:** rest both and **keep** the other after one fills. **FAK:** can fire on each empty side |
+
+Legacy saved value **None** (old FAK-only ignore) is loaded as **First**.
 
 ## Sell
 
@@ -51,7 +56,7 @@ The window is split into Phase 1 → 2 → 3 (default ~⅓ and ~⅔). Only the *
 
 | Mode | Placed | Cancelled |
 |------|--------|-----------|
-| **GTD** | Phase start, if gap allows | Phases 1–2: ~**3s before** phase end (next phase can place without waiting). Also gap fail, buy off, fill, or **window end**. Phase 3: at **window end** (or fill / gap / buy off) |
+| **GTD** | Phase start, if gap allows (First/Both may place two rests) | Phases 1–2: ~**3s before** phase end (next phase can place without waiting). Also gap fail, buy off, fill, First sibling cancel, or **window end**. Phase 3: at **window end** (or fill / gap / buy off) |
 | **FAK** | Ask hits trigger **exactly**, then hunts ≤ | Phase change, abort, or after the buy |
 
 Early GTD cancel (~3s) covers typical live cancel latency. A late fill on a cancelled order is still recorded.
