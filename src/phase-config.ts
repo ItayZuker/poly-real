@@ -1,8 +1,6 @@
 import type { BuyOrderType, GapVsPtb, LiveWindowState, SimPhaseConfig, TradingPhaseSetup } from "./types.js";
 
 const SIDES_ORDER = ["up", "down"] as const;
-const MAX_STABILIZE_TICKS = 500;
-export const MAX_ASK_CENTS_SAMPLES = 2000;
 
 export function defaultPhaseConfig(): SimPhaseConfig {
   return {
@@ -14,8 +12,6 @@ export function defaultPhaseConfig(): SimPhaseConfig {
     minGap: 0,
     maxGap: 0,
     gapVsPtb: "with",
-    buyStabilizeTicks: 1,
-    buyStabilizeRange: 0,
     buyAbortOnCrossing: 0,
     sellProfitCents: 20,
   };
@@ -29,19 +25,6 @@ function asMoneyGap(value: unknown): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
   return Math.round(n * 100) / 100;
-}
-
-function asStabilizeTicks(value: unknown): number {
-  const n = Math.floor(Number(value));
-  if (!Number.isFinite(n) || n < 1) return 1;
-  return Math.min(MAX_STABILIZE_TICKS, n);
-}
-
-function asStabilizeRange(ticks: number, value: unknown): number {
-  if (ticks <= 1) return 0;
-  const n = Math.floor(Number(value));
-  if (!Number.isFinite(n) || n < 1) return 1;
-  return Math.max(1, Math.min(99, n));
 }
 
 /** Resolve order type from optimize flag (migrates legacy FOK → FAK). */
@@ -61,7 +44,6 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     buyOptimize = raw.buyOptimize > 0;
   }
 
-  const buyStabilizeTicks = asStabilizeTicks(raw.buyStabilizeTicks ?? base.buyStabilizeTicks);
   const gapVsPtb = asGapVsPtb(
     raw.gapVsPtb,
     buyOptimize ? "none" : "with",
@@ -75,8 +57,6 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     minGap: asMoneyGap(raw.minGap),
     maxGap: asMoneyGap(raw.maxGap),
     gapVsPtb: !buyOptimize && gapVsPtb === "none" ? "with" : gapVsPtb,
-    buyStabilizeTicks,
-    buyStabilizeRange: asStabilizeRange(buyStabilizeTicks, raw.buyStabilizeRange),
     buyAbortOnCrossing: Math.max(
       0,
       Math.min(1000, Math.floor(Number(raw.buyAbortOnCrossing)) || 0),
@@ -156,60 +136,9 @@ export function describeGapFilterCancelReason(
   return "gap filter - PTB side flip";
 }
 
-/** Append best-ask ¢ samples from the current book snapshot (one sample per side per book tick). */
+/** Bump book tick sequence used by FAK optimize (one count per book snapshot). */
 export function recordAskSamples(state: LiveWindowState): void {
   state.bookTickSequence = Math.max(0, Math.floor(state.bookTickSequence ?? 0)) + 1;
-  if (state.yesAsk != null && Number.isFinite(state.yesAsk)) {
-    if (!state.upAskCentsSamples) state.upAskCentsSamples = [];
-    state.upAskCentsSamples.push(Math.round(state.yesAsk * 100));
-    if (state.upAskCentsSamples.length > MAX_ASK_CENTS_SAMPLES) {
-      state.upAskCentsSamples.splice(0, state.upAskCentsSamples.length - MAX_ASK_CENTS_SAMPLES);
-    }
-  }
-  if (state.noAsk != null && Number.isFinite(state.noAsk)) {
-    if (!state.downAskCentsSamples) state.downAskCentsSamples = [];
-    state.downAskCentsSamples.push(Math.round(state.noAsk * 100));
-    if (state.downAskCentsSamples.length > MAX_ASK_CENTS_SAMPLES) {
-      state.downAskCentsSamples.splice(0, state.downAskCentsSamples.length - MAX_ASK_CENTS_SAMPLES);
-    }
-  }
-}
-
-export function askCentsSamplesForSide(
-  state: Pick<LiveWindowState, "upAskCentsSamples" | "downAskCentsSamples"> | null | undefined,
-  side: "up" | "down",
-): number[] {
-  if (!state) return [];
-  return side === "up" ? (state.upAskCentsSamples ?? []) : (state.downAskCentsSamples ?? []);
-}
-
-/**
- * Stabilize filter: last N best-ask ¢ samples for the buy side must span ≤ buyStabilizeRange.
- * ticks ≤ 1 → off (allow). Fewer than N samples → block.
- */
-export function stabilizeAllowsBuy(phase: SimPhaseConfig, askCentsSamples: ReadonlyArray<number>): boolean {
-  const ticks = Math.max(1, Math.floor(phase.buyStabilizeTicks || 1));
-  if (ticks <= 1) return true;
-  const range = Math.max(1, Math.floor(phase.buyStabilizeRange || 1));
-  if (askCentsSamples.length < ticks) return false;
-
-  let min = Infinity;
-  let max = -Infinity;
-  for (let i = askCentsSamples.length - ticks; i < askCentsSamples.length; i++) {
-    const p = askCentsSamples[i]!;
-    if (!Number.isFinite(p)) return false;
-    min = Math.min(min, p);
-    max = Math.max(max, p);
-  }
-  return max - min <= range;
-}
-
-export function stabilizeAllowsBuyForSide(
-  phase: SimPhaseConfig,
-  state: Pick<LiveWindowState, "upAskCentsSamples" | "downAskCentsSamples"> | null | undefined,
-  side: "up" | "down",
-): boolean {
-  return stabilizeAllowsBuy(phase, askCentsSamplesForSide(state, side));
 }
 
 export function priceToCents(price: number): number {

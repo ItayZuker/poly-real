@@ -34,7 +34,7 @@ export interface PlaceLimitOrderInput {
   /** Unix seconds expiration for GTD. */
   expirationSec: number;
   state?: LiveWindowState;
-  /** Optional tag appended to success logs (e.g. "phase 2", "override"). */
+  /** Optional tag appended to success logs (e.g. "phase 2"). */
   logTag?: string;
 }
 

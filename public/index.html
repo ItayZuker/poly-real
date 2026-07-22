@@ -348,57 +348,6 @@
                     <span class="switch-slider"></span>
                   </span>
                 </label>
-                <div id="wallet-buy-override-field" class="wallet-control-field wallet-control-field--buy-override">
-                  <label class="buy-override-toggle" for="buy-override-enabled">
-                    <span class="wallet-control-label">Buy Override</span>
-                    <span class="switch">
-                      <input type="checkbox" id="buy-override-enabled" />
-                      <span class="switch-slider"></span>
-                    </span>
-                  </label>
-                  <div class="buy-override-params">
-                    <label class="buy-override-param" for="buy-override-price">
-                      <span class="buy-override-param-label">Trigger</span>
-                      <input
-                        type="number"
-                        id="buy-override-price"
-                        class="buy-override-price-input"
-                        min="0"
-                        max="99"
-                        step="1"
-                        value="0"
-                        disabled
-                        aria-label="Buy override price in cents"
-                      />
-                    </label>
-                    <label class="buy-override-param" for="buy-override-shares">
-                      <span class="buy-override-param-label">Shares</span>
-                      <input
-                        type="number"
-                        id="buy-override-shares"
-                        class="buy-override-shares-input"
-                        min="0"
-                        max="100000"
-                        step="1"
-                        value="0"
-                        disabled
-                        aria-label="Buy override shares"
-                      />
-                    </label>
-                    <label class="buy-override-param" for="buy-override-direction">
-                      <span class="buy-override-param-label">Price vs PTB</span>
-                      <select
-                        id="buy-override-direction"
-                        class="buy-override-direction"
-                        disabled
-                        aria-label="Buy override direction vs PTB"
-                      >
-                        <option value="with">With</option>
-                        <option value="opposite">Opposite</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
               </div>
             </div>
           </div>
@@ -837,14 +786,6 @@
           <label class="modal-field" id="phase-buy-trigger-label">
             <span id="phase-buy-trigger-text">Trigger (¢) GTD</span>
             <input type="number" id="phase-buy-trigger" min="1" max="99" step="1" value="40" />
-          </label>
-          <label class="modal-field" id="phase-stabilize-ticks-label">
-            <span id="phase-stabilize-ticks-text">Stabilize ticks off</span>
-            <input type="number" id="phase-stabilize-ticks" min="1" max="500" step="1" value="1" />
-          </label>
-          <label class="modal-field" id="phase-stabilize-range-label">
-            <span id="phase-stabilize-range-text">Stabilize range (¢) off</span>
-            <input type="number" id="phase-stabilize-range" min="1" max="99" step="1" value="0" disabled />
           </label>
           <label
             class="modal-field is-none"

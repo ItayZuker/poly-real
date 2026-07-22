@@ -39,8 +39,6 @@ class SeriesFeed {
       priceHistory: [],
       ptbCrossings: 0,
       bookTickSequence: 0,
-      upAskCentsSamples: [],
-      downAskCentsSamples: [],
     };
   }
 
@@ -48,8 +46,6 @@ class SeriesFeed {
     return {
       ...this.state,
       priceHistory: [...this.state.priceHistory],
-      upAskCentsSamples: [...(this.state.upAskCentsSamples ?? [])],
-      downAskCentsSamples: [...(this.state.downAskCentsSamples ?? [])],
     };
   }
 
@@ -137,8 +133,6 @@ class SeriesFeed {
         this.state.ptbCrossings = 0;
         this.state.bookTickSequence = 0;
         this.lastPtbSide = null;
-        this.state.upAskCentsSamples = [];
-        this.state.downAskCentsSamples = [];
       }
 
       this.state.series = this.series;

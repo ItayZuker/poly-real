@@ -136,8 +136,6 @@
       minGap: 0,
       maxGap: 0,
       gapVsPtb: "with",
-      buyStabilizeTicks: 1,
-      buyStabilizeRange: 0,
       buyAbortOnCrossing: 0,
       sellProfitCents: 20,
     };
@@ -151,13 +149,6 @@
     else if (typeof raw.buyOptimize === "number") buyOptimize = raw.buyOptimize > 0;
     const minGap = Number(raw.minGap);
     const maxGap = Number(raw.maxGap);
-    let buyStabilizeTicks = Math.floor(Number(raw.buyStabilizeTicks));
-    if (!Number.isFinite(buyStabilizeTicks) || buyStabilizeTicks < 1) buyStabilizeTicks = 1;
-    buyStabilizeTicks = Math.min(500, buyStabilizeTicks);
-    let buyStabilizeRange = Math.floor(Number(raw.buyStabilizeRange));
-    if (buyStabilizeTicks <= 1) buyStabilizeRange = 0;
-    else if (!Number.isFinite(buyStabilizeRange) || buyStabilizeRange < 1) buyStabilizeRange = 1;
-    else buyStabilizeRange = Math.max(1, Math.min(99, buyStabilizeRange));
     return {
       buyEnabled: Boolean(raw.buyEnabled ?? base.buyEnabled),
       buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
@@ -174,8 +165,6 @@
             : buyOptimize
               ? "none"
               : "with",
-      buyStabilizeTicks,
-      buyStabilizeRange,
       buyAbortOnCrossing: Math.max(
         0,
         Math.min(1000, Math.floor(Number(raw.buyAbortOnCrossing)) || 0),
@@ -257,45 +246,6 @@
     select.disabled = formLocked || !buyEnabled;
   }
 
-  function syncStabilizeLabels(formLocked = false) {
-    const ticksInput = document.getElementById("phase-stabilize-ticks");
-    const rangeInput = document.getElementById("phase-stabilize-range");
-    const ticksText = document.getElementById("phase-stabilize-ticks-text");
-    const rangeText = document.getElementById("phase-stabilize-range-text");
-    const rangeLabel = document.getElementById("phase-stabilize-range-label");
-    const ticksLabel = document.getElementById("phase-stabilize-ticks-label");
-    if (!ticksInput || !rangeInput || !rangeText || !rangeLabel) return;
-
-    const buyEnabled = Boolean(document.getElementById("phase-buy-enabled")?.checked);
-    const locked = formLocked === true || isPhaseModalReadOnly() || !buyEnabled;
-    let ticks = Math.floor(Number(ticksInput.value));
-    if (!Number.isFinite(ticks) || ticks < 1) ticks = 1;
-    ticks = Math.min(500, ticks);
-    ticksInput.value = String(ticks);
-
-    const filterOff = ticks <= 1;
-    if (ticksText) {
-      ticksText.textContent = filterOff ? "Stabilize ticks off" : "Stabilize ticks";
-    }
-    if (ticksLabel) {
-      ticksLabel.classList.toggle("is-none", filterOff);
-    }
-    if (filterOff) {
-      rangeInput.value = "0";
-      rangeText.textContent = "Stabilize range (¢) off";
-      rangeLabel.classList.add("is-none");
-    } else {
-      if (!Number.isFinite(Number(rangeInput.value)) || Number(rangeInput.value) < 1) {
-        rangeInput.value = "1";
-      }
-      rangeText.textContent = "Stabilize range (¢)";
-      rangeLabel.classList.remove("is-none");
-    }
-
-    ticksInput.disabled = locked;
-    rangeInput.disabled = locked || filterOff;
-  }
-
   function syncAbortOnCrossingLabel(formLocked = false) {
     const input = document.getElementById("phase-abort-on-crossing");
     const text = document.getElementById("phase-abort-on-crossing-text");
@@ -333,7 +283,6 @@
     syncGapLabel("max");
     syncGapLabel("min");
     syncGapVsPtbControl(formLocked === true || isPhaseModalReadOnly());
-    syncStabilizeLabels(formLocked);
     syncAbortOnCrossingLabel(formLocked);
   }
 
@@ -822,17 +771,6 @@
     cfg.maxGap = Number.isFinite(maxGap) && maxGap > 0 ? Math.round(maxGap * 100) / 100 : 0;
     cfg.minGap = Number.isFinite(minGap) && minGap > 0 ? Math.round(minGap * 100) / 100 : 0;
     cfg.gapVsPtb = resolvedGapVsPtb(document.getElementById("phase-gap-vs-ptb"));
-    let buyStabilizeTicks = Math.floor(Number(document.getElementById("phase-stabilize-ticks").value));
-    if (!Number.isFinite(buyStabilizeTicks) || buyStabilizeTicks < 1) buyStabilizeTicks = 1;
-    buyStabilizeTicks = Math.min(500, buyStabilizeTicks);
-    cfg.buyStabilizeTicks = buyStabilizeTicks;
-    const stabilizeRange = Math.floor(Number(document.getElementById("phase-stabilize-range").value));
-    cfg.buyStabilizeRange =
-      buyStabilizeTicks <= 1
-        ? 0
-        : Number.isFinite(stabilizeRange) && stabilizeRange >= 1
-          ? Math.max(1, Math.min(99, stabilizeRange))
-          : 1;
     cfg.buyAbortOnCrossing = Math.max(
       0,
       Math.min(
@@ -899,8 +837,6 @@
     document.getElementById("phase-buy-trigger").value = cfg.buyTrigger;
     document.getElementById("phase-buy-optimize").checked = Boolean(cfg.buyOptimize);
     syncTriggerOrderTypeLabel();
-    document.getElementById("phase-stabilize-ticks").value = cfg.buyStabilizeTicks ?? 1;
-    document.getElementById("phase-stabilize-range").value = cfg.buyStabilizeRange ?? 0;
     document.getElementById("phase-abort-on-crossing").value = cfg.buyAbortOnCrossing ?? 0;
     document.getElementById("phase-max-gap").value = cfg.maxGap ?? 0;
     document.getElementById("phase-min-gap").value = cfg.minGap ?? 0;
@@ -952,7 +888,6 @@
     document.getElementById("phase-buy-shares").disabled = locked || !enabled;
     document.getElementById("phase-buy-trigger").disabled = locked || !enabled;
     document.getElementById("phase-buy-optimize").disabled = locked || !enabled;
-    document.getElementById("phase-stabilize-ticks").disabled = locked || !enabled;
     document.getElementById("phase-abort-on-crossing").disabled = locked || !enabled;
     document.getElementById("phase-max-gap").disabled = locked || !enabled;
     document.getElementById("phase-min-gap").disabled = locked || !enabled;
@@ -1142,9 +1077,6 @@
     });
     document.getElementById("phase-min-gap").addEventListener("input", () => {
       syncGapLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
-    });
-    document.getElementById("phase-stabilize-ticks").addEventListener("input", () => {
-      syncStabilizeLabels(isPhaseModalReadOnly() || !document.getElementById("phase-buy-enabled").checked);
     });
     document.getElementById("phase-abort-on-crossing").addEventListener("input", () => {
       syncAbortOnCrossingLabel(

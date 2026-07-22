@@ -205,10 +205,6 @@ export interface LiveWindowState {
   /** Measured CLOB WebSocket round-trip latency (ms). */
   feedLatencyMs?: number;
   priceHistory: Array<{ t: number; price: number }>;
-  /** Rolling UP token best-ask samples in ¢ (CLOB book ticks). */
-  upAskCentsSamples?: number[];
-  /** Rolling DOWN token best-ask samples in ¢ (CLOB book ticks). */
-  downAskCentsSamples?: number[];
   /** Monotonic sequence incremented once per CLOB book update. */
   bookTickSequence?: number;
 }
@@ -236,16 +232,6 @@ export interface SimPhaseConfig {
   maxGap: number;
   /** Gap direction relative to the side being bought. */
   gapVsPtb: GapVsPtb;
-  /**
-   * Stabilize lookback in CLOB best-ask book samples (¢).
-   * 1 = filter off; ≥2 = on. Cap 500.
-   */
-  buyStabilizeTicks: number;
-  /**
-   * Max allowed max(ask)−min(ask) over the last buyStabilizeTicks samples (¢).
-   * Forced to 0 when ticks ≤ 1; clamped 1–99 when ticks ≥ 2.
-   */
-  buyStabilizeRange: number;
   /**
    * Abort unfilled buys after this many PTB crossings in the current phase.
    * 0 = off; clamped 0–1000.
@@ -380,17 +366,6 @@ export interface TradingConfig {
   /** Manual buy size (share count or USDC, depending on manualOrderUnit). */
   manualShares: number;
   manualOrderUnit: "shares" | "usdc";
-  /**
-   * Highest-priority resting buy. Any fill cancels phase activity and holds
-   * to settlement (no sell). Inactive while disabled or price/shares are 0.
-   */
-  buyOverrideEnabled: boolean;
-  /** Limit price in cents (0 = inert; live placement uses 1–99). */
-  buyOverridePriceCents: number;
-  /** Share size (0 = inert). */
-  buyOverrideShares: number;
-  /** Side relative to PTB: with = above→UP / below→DOWN; opposite flips. */
-  buyOverrideDirection: "with" | "opposite";
 }
 
 export interface LiveSidePosition {

@@ -51,8 +51,6 @@ export class DisplayService {
       priceHistory: [],
       ptbCrossings: 0,
       bookTickSequence: 0,
-      upAskCentsSamples: [],
-      downAskCentsSamples: [],
     };
   }
 
@@ -116,8 +114,6 @@ export class DisplayService {
     return {
       ...this.state,
       priceHistory: [...this.state.priceHistory],
-      upAskCentsSamples: [...(this.state.upAskCentsSamples ?? [])],
-      downAskCentsSamples: [...(this.state.downAskCentsSamples ?? [])],
     };
   }
 
@@ -247,8 +243,6 @@ export class DisplayService {
         this.state.ptbCrossings = 0;
         this.state.bookTickSequence = 0;
         this.lastPtbSide = null;
-        this.state.upAskCentsSamples = [];
-        this.state.downAskCentsSamples = [];
         // Keep prevCloseAsset until Polymarket open arrives.
         logService.setActiveWindow(pair.windowStart);
         this.prefetchedNextWindowStart = null;

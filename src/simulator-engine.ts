@@ -10,7 +10,7 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
-import { describeGapFilterCancelReason, gapAllowsBuy, priceToCents, sellEnabledForPhase, SIDES_ORDER, stabilizeAllowsBuyForSide } from "./phase-config.js";
+import { describeGapFilterCancelReason, gapAllowsBuy, priceToCents, sellEnabledForPhase, SIDES_ORDER } from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -100,11 +100,11 @@ function sessionKeyFor(state: LiveWindowState): string {
   return `${state.series || ""}:${state.windowStart || ""}`;
 }
 
-/** Quiet period after gap/stabilize cancel before placing another resting GTD. */
+/** Quiet period after gap-filter cancel before placing another resting GTD. */
 const GTD_FILTER_REPRESS_MS = 2500;
 
 function isRoutineGtdCancelReason(reason: string): boolean {
-  return reason === "stabilize filter" || reason.startsWith("gap filter");
+  return reason.startsWith("gap filter");
 }
 
 function depthFromState(state: LiveWindowState): DepthQuote {
@@ -185,7 +185,7 @@ export class SimulatorEngine {
     downBuy: null,
     downSell: null,
   };
-  /** After gap/stabilize cancels, wait before re-placing to avoid tick thrash. */
+  /** After gap-filter cancels, wait before re-placing to avoid tick thrash. */
   private gtdRepressUntilMs = 0;
   /** Last phase index seen this window — used to clear repress on phase change. */
   private lastGtdPhaseIdx = -1;
@@ -646,11 +646,6 @@ export class SimulatorEngine {
     const phase = setup.phases[phaseIdx];
     if (!phase?.buyEnabled || !phase.buyOptimize) return;
     if (!allowAbortedPending && this.isPhaseBuyAborted(phaseIdx)) return;
-    if (!stabilizeAllowsBuyForSide(phase, state, side)) {
-      logService.error("sim", `FAK buy skipped after latency (stabilize filter)`);
-      return;
-    }
-
     const ask = bestAskForSide(quote, side);
     if (ask == null || !Number.isFinite(ask) || priceToCents(ask) > triggerCents) {
       logService.error("sim", `FAK buy skipped after latency (ask above trigger or missing)`);
@@ -848,7 +843,6 @@ export class SimulatorEngine {
       }
     }
     if (!chosenSide) return;
-    if (!stabilizeAllowsBuyForSide(phase, state, chosenSide)) return;
 
     const shares = Math.max(1, phase.buyShares || 1);
     const limitPrice = centsToPrice(phase.buyTrigger);
@@ -867,7 +861,7 @@ export class SimulatorEngine {
   private cancelRestingGtd(reason: string, nowMs?: number): void {
     if (!this.restingGtd) return;
     if (isRoutineGtdCancelReason(reason)) {
-      // Price flickering around PTB / stabilize — don't log every tick cancel.
+      // Price flickering around PTB — don't log every tick cancel.
       this.gtdRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
     } else {
       logService.info("sim", `GTD resting cancelled (${reason})`);
@@ -887,8 +881,7 @@ export class SimulatorEngine {
       this.restingGtd.phaseIdx !== phaseIdx ||
       phase.buyOptimize ||
       !phase.buyEnabled ||
-      !gapAllowsBuy(restingSide, phase, state.assetGap) ||
-      !stabilizeAllowsBuyForSide(phase, state, restingSide)
+      !gapAllowsBuy(restingSide, phase, state.assetGap)
     ) {
       this.cancelRestingGtd(
         this.restingGtd.phaseIdx !== phaseIdx
@@ -897,9 +890,7 @@ export class SimulatorEngine {
             ? "optimize on"
             : !phase.buyEnabled
               ? "buy disabled"
-              : !gapAllowsBuy(restingSide, phase, state.assetGap)
-                ? describeGapFilterCancelReason(restingSide, phase, state.assetGap)
-                : "stabilize filter",
+              : describeGapFilterCancelReason(restingSide, phase, state.assetGap),
         simNowMs,
       );
     }
@@ -918,11 +909,6 @@ export class SimulatorEngine {
     // Safety: never fill a resting order that belongs to a previous phase.
     if (resting.phaseIdx !== phaseIdx) {
       this.cancelRestingGtd("phase change", simNowMs);
-      return;
-    }
-
-    if (!stabilizeAllowsBuyForSide(phase, state, resting.side)) {
-      this.cancelRestingGtd("stabilize filter", simNowMs);
       return;
     }
 
@@ -965,7 +951,6 @@ export class SimulatorEngine {
       // Optimize: must first touch trigger exactly, then hunt ≤.
       if (askCents !== triggerCents) continue;
       if (!gapAllowsBuy(side, phase, assetGap)) continue;
-      if (!stabilizeAllowsBuyForSide(phase, state, side)) continue;
 
       this.buyWatch = {
         side,
@@ -982,7 +967,7 @@ export class SimulatorEngine {
       };
       logService.info(
         "sim",
-        `Buy optimize armed: ${side} touched ${triggerCents}¢ (gap + stabilize passed)`,
+        `Buy optimize armed: ${side} touched ${triggerCents}¢ (gap passed)`,
       );
       return;
     }
@@ -1035,11 +1020,7 @@ export class SimulatorEngine {
         w.prevAskCents = askCents;
         return;
       }
-      // Re-touch — gap already validated at first arm; re-check stabilize.
-      if (!stabilizeAllowsBuyForSide(phase, state, w.side)) {
-        w.prevAskCents = askCents;
-        return;
-      }
+      // Re-touch — gap was already validated at first arm.
       w.armed = true;
       w.stallCents = null;
       w.stallTicks = 0;
@@ -1050,7 +1031,6 @@ export class SimulatorEngine {
 
     // FAK: any available size is enough (partial OK).
     if (totalLevelSize(asksForSide(quote, w.side)) <= 0) return;
-    if (!stabilizeAllowsBuyForSide(phase, state, w.side)) return;
 
     // Hunting at ≤ trigger.
     if (askCents <= w.triggerCents) {
@@ -1119,7 +1099,7 @@ export class SimulatorEngine {
     this.processPendingFills(state, setup, quote, nowSec, simNowMs);
     this.processPendingPhaseAbort(simNowMs);
 
-    // GTD resting: cancel on optimize/gap/stabilize change, fill from book, place when active.
+    // GTD resting: cancel on optimize/gap change, fill from book, place when active.
     this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs);
     this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     if (!this.position || this.restingGtd) {
