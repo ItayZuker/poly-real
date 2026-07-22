@@ -1,6 +1,11 @@
 {
-  "current": "1.2.0",
+  "current": "1.2.1",
   "releases": [
+    {
+      "version": "1.2.1",
+      "releasedAt": "2026-07-22T09:34:00.000Z",
+      "notes": "Settings Documentation card moved to the top as a single-row label + Open control."
+    },
     {
       "version": "1.2.0",
       "releasedAt": "2026-07-22T09:25:00.000Z",
