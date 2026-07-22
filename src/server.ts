@@ -115,7 +115,15 @@ function sendIndexHtml(_req: express.Request, res: express.Response): void {
 // Exact SPA pages (before static so /docs is the app, not the docs/ folder).
 app.get(["/docs", "/version"], sendIndexHtml);
 
-app.use(express.static(publicDir));
+app.use(
+  express.static(publicDir, {
+    setHeaders(res, filePath) {
+      if (/\.(?:js|css|html)$/i.test(filePath)) {
+        res.setHeader("Cache-Control", "no-cache");
+      }
+    },
+  }),
+);
 
 type AuthedRequest = express.Request & { authUser?: UserPublic };
 

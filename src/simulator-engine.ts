@@ -13,6 +13,7 @@ import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow
 import {
   describeGapFilterCancelReason,
   gapAllowsBuy,
+  gapAllowsSecondSide,
   priceToCents,
   sellEnabledForPhase,
   shouldPreCancelGtdForNextPhase,
@@ -168,10 +169,33 @@ function phaseIndexForFrac(frac: number, setup: SimSetup): number {
 /** Server-side trading simulator — runs on every book update. */
 export class SimulatorEngine {
   private sessionKey: string | null = null;
-  private position: Position | null = null;
+  private positions: Record<Side, Position | null> = { up: null, down: null };
   private buyWatch: BuyWatch | null = null;
-  private restingGtd: RestingGtdBuy | null = null;
+  private restingGtds = new Map<Side, RestingGtdBuy>();
   private sellWatch: SellWatch | null = null;
+  private sellWatchSide: Side | null = null;
+  private hasAnyPosition(): boolean {
+    return this.positions.up != null || this.positions.down != null;
+  }
+  private buysFullySatisfied(phase: { gapVsPtb: string }): boolean {
+    if (gapAllowsSecondSide(phase.gapVsPtb as "with" | "opposite" | "first" | "both")) {
+      return this.positions.up != null && this.positions.down != null;
+    }
+    return this.hasAnyPosition();
+  }
+  private sideStillWantsBuy(side: Side, phase: { gapVsPtb: string }): boolean {
+    if (this.positions[side]) return false;
+    if (
+      !gapAllowsSecondSide(phase.gapVsPtb as "with" | "opposite" | "first" | "both") &&
+      this.hasAnyPosition()
+    ) {
+      return false;
+    }
+    return true;
+  }
+  private clearAllRestingGtd(): void {
+    this.restingGtds.clear();
+  }
   private pendingBuy: PendingBuy | null = null;
   private pendingPhaseAborts = new Map<number, number>();
   private abortedBuyPhases = new Set<number>();
@@ -227,7 +251,7 @@ export class SimulatorEngine {
     if (!paused) return;
     this.buyWatch = null;
     this.pendingBuy = null;
-    this.restingGtd = null;
+    this.clearAllRestingGtd();
   }
 
   /** Permanently suppress all three phase buy paths for the current window. */
@@ -238,7 +262,7 @@ export class SimulatorEngine {
     this.abortedBuyPhases.add(2);
     this.buyWatch = null;
     this.pendingBuy = null;
-    this.restingGtd = null;
+    this.clearAllRestingGtd();
   }
 
   /** Hold an adopted position to settlement — no demo/live sell markers this window. */
@@ -259,9 +283,10 @@ export class SimulatorEngine {
     this.resetRuntime(state);
     this.buyWatch = null;
     this.pendingBuy = null;
-    this.restingGtd = null;
+    this.clearAllRestingGtd();
     this.sellWatch = null;
-    this.position = {
+    this.positions = { up: null, down: null };
+    this.positions[side] = {
       side,
       buyPrice: price,
       buyT: nowSec,
@@ -271,16 +296,20 @@ export class SimulatorEngine {
       buyCost: shares * price,
       buyFees: 0,
     };
+    this.sellWatchSide = side;
     this.boughtThisWindow = true;
     this.captureWindowSnapshot(state);
   }
 
   /** Reflect a manual sell in the simulator so stale sell markers are not emitted. */
   clearExternalPosition(side: Side): void {
-    if (this.position?.side !== side) return;
-    this.position = null;
-    this.sellWatch = null;
-    this.boughtThisWindow = false;
+    if (!this.positions[side]) return;
+    this.positions[side] = null;
+    if (this.sellWatchSide === side) {
+      this.sellWatch = null;
+      this.sellWatchSide = null;
+    }
+    this.boughtThisWindow = this.hasAnyPosition();
   }
 
   /**
@@ -343,9 +372,9 @@ export class SimulatorEngine {
     const key = sessionKeyFor(state);
     if (this.sessionKey === key) return;
     this.sessionKey = key;
-    this.position = null;
+    this.positions = { up: null, down: null }; this.sellWatchSide = null;
     this.buyWatch = null;
-    this.restingGtd = null;
+    this.clearAllRestingGtd();
     this.sellWatch = null;
     this.pendingBuy = null;
     this.pendingPhaseAborts.clear();
@@ -515,13 +544,16 @@ export class SimulatorEngine {
   }
 
   private executePhaseAbortCancellation(phaseIdx: number): void {
-    if (this.position?.phaseIndex === phaseIdx) {
-      logService.warn(
-        "sim",
-        `Phase ${phaseIdx + 1} PTB-crossing abort lost race to a buy fill; cancelling remainder`,
-      );
+    for (const side of SIDES_ORDER) {
+      if (this.positions[side]?.phaseIndex === phaseIdx) {
+        logService.warn(
+          "sim",
+          `Phase ${phaseIdx + 1} PTB-crossing abort lost race to a buy fill; cancelling remainder`,
+        );
+      }
+      const resting = this.restingGtds.get(side);
+      if (resting?.phaseIdx === phaseIdx) this.cancelRestingGtdSide(side, "PTB crossing abort");
     }
-    if (this.restingGtd?.phaseIdx === phaseIdx) this.cancelRestingGtd("PTB crossing abort");
     if (this.pendingBuy?.phaseIdx === phaseIdx) this.pendingBuy = null;
     this.completedPhaseAbortCancellations.add(phaseIdx);
     logService.info("sim", `Phase ${phaseIdx + 1} PTB-crossing cancellation executed`);
@@ -594,11 +626,12 @@ export class SimulatorEngine {
       );
       this.buyWatch = null;
     }
-    if (this.restingGtd) {
-      this.cancelRestingGtd("phase change", simNowMs);
+    for (const side of SIDES_ORDER) {
+      if (this.restingGtds.has(side)) this.cancelRestingGtdSide(side, "phase change", simNowMs);
     }
     // Re-evaluate sell target from the new phase's sell settings.
     this.sellWatch = null;
+    this.sellWatchSide = null;
   }
 
   private processPendingFills(
@@ -621,7 +654,7 @@ export class SimulatorEngine {
         );
         return;
       }
-      if (!this.position) {
+      if (this.sideStillWantsBuy(pending.side, phase)) {
         this.executeFakBuy(
           pending.side,
           pending.shares,
@@ -647,11 +680,10 @@ export class SimulatorEngine {
     quote: DepthQuote,
     allowAbortedPending = false,
   ): void {
-    if (this.position) return;
-
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), setup);
     const phase = setup.phases[phaseIdx];
     if (!phase?.buyEnabled || !phase.buyOptimize) return;
+    if (!this.sideStillWantsBuy(side, phase)) return;
     if (!allowAbortedPending && this.isPhaseBuyAborted(phaseIdx)) return;
     const ask = bestAskForSide(quote, side);
     if (ask == null || !Number.isFinite(ask) || priceToCents(ask) > triggerCents) {
@@ -672,7 +704,7 @@ export class SimulatorEngine {
       return;
     }
 
-    this.applyBuyFill(side, fill, nowSec, state, phaseIdx, "taker", triggerCents);
+    this.applyBuyFill(side, fill, nowSec, state, phaseIdx, phase, "taker", triggerCents);
     this.buyWatch = null;
   }
 
@@ -682,23 +714,26 @@ export class SimulatorEngine {
     nowSec: number,
     state: LiveWindowState,
     phaseIdx: number,
+    phase: SimSetup["phases"][number],
     style: "maker" | "taker",
     triggerCents?: number,
   ): void {
     const shares = fill.shares;
     if (!(shares > 0)) return;
+    if (!this.sideStillWantsBuy(side, phase) && !this.positions[side]) return;
 
-    if (this.position && this.position.side === side) {
-      const totalShares = this.position.totalShares + shares;
-      const totalCost = this.position.buyCost + fill.cost;
-      const totalFees = this.position.buyFees + fill.fees;
-      this.position.totalShares = totalShares;
-      this.position.remainingShares += shares;
-      this.position.buyCost = totalCost;
-      this.position.buyFees = totalFees;
-      this.position.buyPrice = totalShares > 0 ? totalCost / totalShares : fill.avgPrice;
-    } else if (!this.position) {
-      this.position = {
+    const existing = this.positions[side];
+    if (existing) {
+      const totalShares = existing.totalShares + shares;
+      const totalCost = existing.buyCost + fill.cost;
+      const totalFees = existing.buyFees + fill.fees;
+      existing.totalShares = totalShares;
+      existing.remainingShares += shares;
+      existing.buyCost = totalCost;
+      existing.buyFees = totalFees;
+      existing.buyPrice = totalShares > 0 ? totalCost / totalShares : fill.avgPrice;
+    } else {
+      this.positions[side] = {
         side,
         buyPrice: fill.avgPrice,
         buyT: nowSec,
@@ -708,9 +743,17 @@ export class SimulatorEngine {
         buyCost: fill.cost,
         buyFees: fill.fees,
       };
-      this.sellWatch = null;
-    } else {
-      return;
+      if (this.sellWatchSide == null) {
+        this.sellWatch = null;
+        this.sellWatchSide = side;
+      }
+    }
+
+    if (phase.gapVsPtb === "first") {
+      const other = side === "up" ? "down" : "up";
+      if (this.restingGtds.has(other)) {
+        this.cancelRestingGtdSide(other, "first fill — cancel other", nowSec * 1000);
+      }
     }
 
     this.boughtThisWindow = true;
@@ -737,15 +780,30 @@ export class SimulatorEngine {
 
   /** Sync sell limit to the clock phase's sell settings (not the buy phase). */
   private syncSellWatchForPhase(phase: SimSetup["phases"][number]): void {
-    if (!this.position || this.sellsSuppressed) {
+    if (this.sellsSuppressed || !this.hasAnyPosition()) {
       this.sellWatch = null;
+      this.sellWatchSide = null;
       return;
     }
     if (!sellEnabledForPhase(phase)) {
       this.sellWatch = null;
+      this.sellWatchSide = null;
       return;
     }
-    const target = this.position.buyPrice + centsToPrice(phase.sellProfitCents);
+    const side =
+      this.sellWatchSide && this.positions[this.sellWatchSide]
+        ? this.sellWatchSide
+        : this.positions.up
+          ? "up"
+          : "down";
+    const pos = this.positions[side];
+    if (!pos) {
+      this.sellWatch = null;
+      this.sellWatchSide = null;
+      return;
+    }
+    this.sellWatchSide = side;
+    const target = pos.buyPrice + centsToPrice(phase.sellProfitCents);
     if (this.sellWatch && Math.abs(this.sellWatch.target - target) < 1e-9) return;
     this.sellWatch = { target };
     logService.info("sim", `Sell watch updated for clock phase, limit ${fmtCents(target)}`);
@@ -757,24 +815,26 @@ export class SimulatorEngine {
     state: LiveWindowState,
     setup: SimSetup,
   ): void {
-    if (!this.position || !this.boughtThisWindow) return;
+    if (!this.boughtThisWindow || !this.sellWatchSide) return;
+    const side = this.sellWatchSide;
+    const pos = this.positions[side];
+    if (!pos) return;
 
-    const side = this.position.side;
     const limitPrice = this.sellWatch?.target;
     const feeParams = this.feeParams(setup);
-    const shares = this.position.remainingShares;
+    const shares = pos.remainingShares;
     const fill =
       limitPrice == null
         ? walkBids(bidsForSide(quote, side), shares, true, feeParams)
         : fillMakerLimitSell(bidsForSide(quote, side), shares, limitPrice);
     if (!fill) return;
 
-    const positionCost = this.position.buyCost + this.position.buyFees;
+    const positionCost = pos.buyCost + pos.buyFees;
     const sellNet = fill.proceeds - fill.fees;
     const profit = sellNet - positionCost;
-    const sellT = Math.max(nowSec, this.position.buyT);
+    const sellT = Math.max(nowSec, pos.buyT);
 
-    this.position.remainingShares -= fill.shares;
+    pos.remainingShares -= fill.shares;
     this.markers.push({
       type: "sell",
       side,
@@ -795,7 +855,7 @@ export class SimulatorEngine {
       `Sell filled: ${side} ${fill.shares} sh @ ${fmtCents(fill.avgPrice)}, net $${sellNet.toFixed(2)}${feeNote}, P/L $${profit.toFixed(2)}`,
     );
 
-    if (this.position.remainingShares <= 0) {
+    if (pos.remainingShares <= 0) {
       this.windowTrade = {
         side,
         shares: fill.shares,
@@ -803,8 +863,9 @@ export class SimulatorEngine {
         proceeds: sellNet,
         net: sellNet - positionCost,
       };
-      this.position = null;
+      this.positions[side] = null;
       this.sellWatch = null;
+      this.sellWatchSide = this.positions.up ? "up" : this.positions.down ? "down" : null;
       return;
     }
 
@@ -841,41 +902,38 @@ export class SimulatorEngine {
     if (this.externalBuyPaused || phase.buyOptimize || !phase.buyEnabled) return;
     if (preCancelForNextPhase) return;
     if (this.isPhaseBuyAborted(phaseIdx)) return;
-    if (this.position || this.restingGtd || this.pendingBuy) return;
+    if (this.buysFullySatisfied(phase) || this.pendingBuy) return;
     if (simNowMs < this.gtdRepressUntilMs) return;
-
-    let chosenSide: Side | null = null;
-    for (const side of SIDES_ORDER) {
-      if (gapAllowsBuy(side, phase, state.assetGap)) {
-        chosenSide = side;
-        break;
-      }
-    }
-    if (!chosenSide) return;
 
     const shares = Math.max(1, phase.buyShares || 1);
     const limitPrice = centsToPrice(phase.buyTrigger);
-    this.restingGtd = {
-      side: chosenSide,
-      shares,
-      limitPrice,
-      phaseIdx,
-    };
-    logService.info(
-      "sim",
-      `GTD resting placed: ${chosenSide} ${shares} sh @ ${fmtCents(limitPrice)} (phase ${phaseIdx + 1})`,
-    );
+
+    for (const side of SIDES_ORDER) {
+      if (this.restingGtds.has(side)) continue;
+      if (!this.sideStillWantsBuy(side, phase)) continue;
+      if (!gapAllowsBuy(side, phase, state.assetGap)) continue;
+
+      this.restingGtds.set(side, {
+        side,
+        shares,
+        limitPrice,
+        phaseIdx,
+      });
+      logService.info(
+        "sim",
+        `GTD resting placed: ${side} ${shares} sh @ ${fmtCents(limitPrice)} (phase ${phaseIdx + 1})`,
+      );
+    }
   }
 
-  private cancelRestingGtd(reason: string, nowMs?: number): void {
-    if (!this.restingGtd) return;
+  private cancelRestingGtdSide(side: Side, reason: string, nowMs?: number): void {
+    if (!this.restingGtds.has(side)) return;
     if (isRoutineGtdCancelReason(reason)) {
-      // Price flickering around PTB — don't log every tick cancel.
       this.gtdRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
     } else {
-      logService.info("sim", `GTD resting cancelled (${reason})`);
+      logService.info("sim", `GTD resting cancelled (${reason}) ${side}`);
     }
-    this.restingGtd = null;
+    this.restingGtds.delete(side);
   }
 
   private syncRestingGtdForPhase(
@@ -885,28 +943,41 @@ export class SimulatorEngine {
     simNowMs: number,
     preCancelForNextPhase = false,
   ): void {
-    if (!this.restingGtd) return;
-    const restingSide = this.restingGtd.side;
-    const endingThisPhase = this.restingGtd.phaseIdx === phaseIdx && preCancelForNextPhase;
-    if (
-      this.restingGtd.phaseIdx !== phaseIdx ||
-      phase.buyOptimize ||
-      !phase.buyEnabled ||
-      !gapAllowsBuy(restingSide, phase, state.assetGap) ||
-      endingThisPhase
-    ) {
-      this.cancelRestingGtd(
-        endingThisPhase
-          ? "phase ending"
-          : this.restingGtd.phaseIdx !== phaseIdx
-            ? "phase change"
-            : phase.buyOptimize
-              ? "optimize on"
-              : !phase.buyEnabled
-                ? "buy disabled"
-                : describeGapFilterCancelReason(restingSide, phase, state.assetGap),
-        simNowMs,
-      );
+    for (const side of SIDES_ORDER) {
+      const resting = this.restingGtds.get(side);
+      if (!resting) continue;
+      const endingThisPhase = resting.phaseIdx === phaseIdx && preCancelForNextPhase;
+      const filledBlocksSibling =
+        !gapAllowsSecondSide(phase.gapVsPtb) &&
+        this.hasAnyPosition() &&
+        !this.positions[side];
+      if (
+        resting.phaseIdx !== phaseIdx ||
+        phase.buyOptimize ||
+        !phase.buyEnabled ||
+        !gapAllowsBuy(side, phase, state.assetGap) ||
+        endingThisPhase ||
+        filledBlocksSibling ||
+        this.positions[side]
+      ) {
+        this.cancelRestingGtdSide(
+          side,
+          endingThisPhase
+            ? "phase ending"
+            : this.positions[side]
+              ? "side filled"
+              : filledBlocksSibling
+                ? "first fill — cancel other"
+                : resting.phaseIdx !== phaseIdx
+                  ? "phase change"
+                  : phase.buyOptimize
+                    ? "optimize on"
+                    : !phase.buyEnabled
+                      ? "buy disabled"
+                      : describeGapFilterCancelReason(side, phase, state.assetGap),
+          simNowMs,
+        );
+      }
     }
   }
 
@@ -918,25 +989,27 @@ export class SimulatorEngine {
     phaseIdx: number,
     simNowMs: number,
   ): void {
-    const resting = this.restingGtd;
-    if (!resting) return;
-    // Safety: never fill a resting order that belongs to a previous phase.
-    if (resting.phaseIdx !== phaseIdx) {
-      this.cancelRestingGtd("phase change", simNowMs);
-      return;
-    }
+    for (const side of [...SIDES_ORDER]) {
+      const resting = this.restingGtds.get(side);
+      if (!resting) continue;
+      if (resting.phaseIdx !== phaseIdx) {
+        this.cancelRestingGtdSide(side, "phase change", simNowMs);
+        continue;
+      }
 
-    const fill = fillMakerLimitBuyAvailable(
-      asksForSide(quote, resting.side),
-      resting.shares,
-      resting.limitPrice,
-    );
-    if (!fill || fill.shares <= 0) return;
+      const fill = fillMakerLimitBuyAvailable(
+        asksForSide(quote, resting.side),
+        resting.shares,
+        resting.limitPrice,
+      );
+      if (!fill || fill.shares <= 0) continue;
 
-    this.applyBuyFill(resting.side, fill, nowSec, state, resting.phaseIdx, "maker");
-    resting.shares -= fill.shares;
-    if (resting.shares <= 1e-9) {
-      this.restingGtd = null;
+      this.applyBuyFill(resting.side, fill, nowSec, state, resting.phaseIdx, phase, "maker");
+      const still = this.restingGtds.get(side);
+      if (still) {
+        still.shares -= fill.shares;
+        if (still.shares <= 1e-9) this.restingGtds.delete(side);
+      }
     }
   }
 
@@ -951,18 +1024,20 @@ export class SimulatorEngine {
     if (this.externalBuyPaused || !phase.buyOptimize || !phase.buyEnabled) return;
     const phaseIdx = phaseIndexForFrac(elapsedFrac(state, nowSec), _setup);
     if (this.isPhaseBuyAborted(phaseIdx)) return;
-    if (this.position || this.buyWatch || this.restingGtd || this.pendingBuy) return;
+    if (this.buysFullySatisfied(phase) || this.buyWatch || this.restingGtds.size > 0 || this.pendingBuy) {
+      return;
+    }
 
     const shares = Math.max(1, phase.buyShares || 1);
     const triggerCents = phase.buyTrigger;
     const assetGap = state.assetGap;
 
     for (const side of SIDES_ORDER) {
+      if (!this.sideStillWantsBuy(side, phase)) continue;
       const ask = bestAskForSide(quote, side);
       if (ask == null || !Number.isFinite(ask)) continue;
       const askCents = priceToCents(ask);
 
-      // Optimize: must first touch trigger exactly, then hunt ≤.
       if (askCents !== triggerCents) continue;
       if (!gapAllowsBuy(side, phase, assetGap)) continue;
 
@@ -1076,8 +1151,8 @@ export class SimulatorEngine {
     setup: SimSetup,
     simNowMs: number,
   ): void {
-    if (!this.position || !this.sellWatch) return;
-    const bid = bestBidForSide(quote, this.position.side);
+    if (!this.sellWatchSide || !this.sellWatch || !this.positions[this.sellWatchSide]) return;
+    const bid = bestBidForSide(quote, this.sellWatchSide);
     if (bid == null || !Number.isFinite(bid)) return;
     if (bid < this.sellWatch.target) return;
     // Maker sell fills have no simulated latency.
@@ -1122,15 +1197,16 @@ export class SimulatorEngine {
     // GTD resting: cancel on optimize/gap/phase-ending, fill from book, place when active.
     this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs, preCancelForNextPhase);
     this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
-    if (!this.position || this.restingGtd) {
+    if (!this.buysFullySatisfied(phase) || this.restingGtds.size > 0) {
       this.tryPlaceRestingGtd(phase, phaseIdx, state, simNowMs, preCancelForNextPhase);
       this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     }
 
-    if (!this.position && !this.pendingBuy && !this.restingGtd) {
+    if (!this.buysFullySatisfied(phase) && !this.pendingBuy && this.restingGtds.size === 0) {
       this.tryStartBuyWatch(phase, quote, nowSec, state, setup, simNowMs);
       this.tickBuyWatch(quote, nowSec, state, setup, simNowMs);
-    } else if (this.position && !this.sellsSuppressed) {
+    }
+    if (this.hasAnyPosition() && !this.sellsSuppressed) {
       // Sell follows the clock phase's settings, not the phase that bought.
       this.syncSellWatchForPhase(phase);
       if (this.sellWatch) {

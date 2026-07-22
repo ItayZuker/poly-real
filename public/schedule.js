@@ -1793,7 +1793,8 @@
 
   function getPlacementsForSetup(setupId) {
     if (!setupId) return [];
-    return placements.filter((p) => p.setupId === setupId);
+    const id = String(setupId);
+    return placements.filter((p) => String(p.setupId) === id);
   }
 
   function getLockedCountForSetup(setupId) {
@@ -1806,7 +1807,8 @@
 
   function removePlacementsForSetup(setupId) {
     if (!setupId) return false;
-    const next = placements.filter((p) => p.setupId !== setupId);
+    const id = String(setupId);
+    const next = placements.filter((p) => String(p.setupId) !== id);
     if (next.length === placements.length) return false;
     return syncPlacementsDom(next);
   }
@@ -2010,7 +2012,9 @@
   function getPlacementCountsBySetup() {
     const counts = {};
     for (const placement of placements) {
-      counts[placement.setupId] = (counts[placement.setupId] || 0) + 1;
+      const id = String(placement.setupId || "");
+      if (!id) continue;
+      counts[id] = (counts[id] || 0) + 1;
     }
     return counts;
   }
@@ -2261,6 +2265,17 @@
       `.schedule-placement-card[data-placement-id="${CSS.escape(String(id))}"]`,
     );
     if (card?.classList.contains("is-deleting")) return;
+
+    const placement = placements.find((p) => p._id === id);
+    const locked = isPlacementLocked(id);
+    if (locked) {
+      const title = placement?.title ? `"${placement.title}"` : "this card";
+      const confirmed = window.confirm(
+        `Remove ${title} from the schedule?\n\nIt is locked (already traded). This cannot be undone.`,
+      );
+      if (!confirmed) return;
+    }
+
     setPlacementDeleting(id, true);
     // Let the solid fill + can paint before the delete request.
     await new Promise((resolve) => {

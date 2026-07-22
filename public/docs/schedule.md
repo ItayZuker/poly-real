@@ -9,6 +9,8 @@ Reusable templates — full fields: [Setups & phases](doc:setups-phases).
 - Create, edit, reorder, delete
 - **3 phases** with buy/sell rules
 - Drag onto the UTC week grid to place
+- Deleting a setup **always** asks for confirmation; if it is on the schedule, the prompt notes that those cards will be removed with it
+- Removing a **locked** schedule card (already traded) also asks for confirmation
 
 **Add setup** works the same in Live and Replay; each workspace stores its own setups and placements.
 

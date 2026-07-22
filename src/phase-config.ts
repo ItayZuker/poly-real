@@ -17,8 +17,12 @@ export function defaultPhaseConfig(): SimPhaseConfig {
   };
 }
 
-function asGapVsPtb(value: unknown, fallback: GapVsPtb = "none"): GapVsPtb {
-  return value === "with" || value === "opposite" || value === "none" ? value : fallback;
+const GAP_VS_PTB_VALUES: readonly GapVsPtb[] = ["with", "opposite", "first", "both"];
+
+/** Accept current values; map legacy FAK "none" → "first". */
+function asGapVsPtb(value: unknown, fallback: GapVsPtb = "with"): GapVsPtb {
+  if (value === "none") return "first";
+  return GAP_VS_PTB_VALUES.includes(value as GapVsPtb) ? (value as GapVsPtb) : fallback;
 }
 
 function asMoneyGap(value: unknown): number {
@@ -30,6 +34,21 @@ function asMoneyGap(value: unknown): number {
 /** Resolve order type from optimize flag (migrates legacy FOK → FAK). */
 export function resolveBuyOrderType(buyOptimize: boolean): BuyOrderType {
   return buyOptimize ? "FAK" : "GTD";
+}
+
+/** True when Gap vs PTB ignores PTB direction (either / both sides). */
+export function gapIgnoresDirection(gapVsPtb: GapVsPtb): boolean {
+  return gapVsPtb === "first" || gapVsPtb === "both";
+}
+
+/** GTD may rest on both Up and Down at once. */
+export function gapAllowsDualResting(gapVsPtb: GapVsPtb): boolean {
+  return gapVsPtb === "first" || gapVsPtb === "both";
+}
+
+/** After one side fills, keep buying / resting the other side. */
+export function gapAllowsSecondSide(gapVsPtb: GapVsPtb): boolean {
+  return gapVsPtb === "both";
 }
 
 /** Coerce legacy numeric buyOptimize / missing gap fields into the current shape. */
@@ -44,10 +63,6 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     buyOptimize = raw.buyOptimize > 0;
   }
 
-  const gapVsPtb = asGapVsPtb(
-    raw.gapVsPtb,
-    buyOptimize ? "none" : "with",
-  );
   return {
     buyEnabled: Boolean(raw.buyEnabled ?? base.buyEnabled),
     buyShares: Math.max(1, Math.floor(Number(raw.buyShares)) || base.buyShares),
@@ -56,7 +71,7 @@ export function normalizePhaseConfig(raw: Partial<SimPhaseConfig> | null | undef
     buyOrderType: resolveBuyOrderType(buyOptimize),
     minGap: asMoneyGap(raw.minGap),
     maxGap: asMoneyGap(raw.maxGap),
-    gapVsPtb: !buyOptimize && gapVsPtb === "none" ? "with" : gapVsPtb,
+    gapVsPtb: asGapVsPtb(raw.gapVsPtb, base.gapVsPtb),
     buyAbortOnCrossing: Math.max(
       0,
       Math.min(1000, Math.floor(Number(raw.buyAbortOnCrossing)) || 0),
@@ -88,8 +103,9 @@ export function normalizeTradingPhaseSetup(setup: TradingPhaseSetup): TradingPha
 }
 
 /**
- * Gap bounds always use |asset−PTB|. With/opposite independently constrain
- * direction in both GTD and FAK; only FAK "none" ignores direction.
+ * Gap bounds always use |asset−PTB|.
+ * Direction (With / Opposite) and dual modes (First / Both) apply the same for FAK and GTD.
+ * Min/max gap apply in every mode when gap is known.
  */
 export function gapAllowsBuy(
   side: "up" | "down",
@@ -98,13 +114,15 @@ export function gapAllowsBuy(
 ): boolean {
   const hasMagnitude = phase.minGap > 0 || phase.maxGap > 0;
   if (assetGap == null || !Number.isFinite(assetGap)) {
-    return phase.buyOptimize && phase.gapVsPtb === "none" && !hasMagnitude;
+    // No gap: only First/Both without magnitude filters can proceed.
+    return gapIgnoresDirection(phase.gapVsPtb) && !hasMagnitude;
   }
 
   const abs = Math.abs(assetGap);
   if (phase.minGap > 0 && abs + 1e-9 < phase.minGap) return false;
   if (phase.maxGap > 0 && abs - 1e-9 > phase.maxGap) return false;
-  if (phase.gapVsPtb === "none") return phase.buyOptimize;
+
+  if (gapIgnoresDirection(phase.gapVsPtb)) return true;
 
   const wantAbovePtb =
     side === "up" ? phase.gapVsPtb === "with" : phase.gapVsPtb === "opposite";
@@ -129,8 +147,8 @@ export function describeGapFilterCancelReason(
   if (phase.maxGap > 0 && abs - 1e-9 > phase.maxGap) {
     return "gap filter - above maxGap";
   }
-  if (phase.gapVsPtb === "none") {
-    return "gap filter - none";
+  if (gapIgnoresDirection(phase.gapVsPtb)) {
+    return `gap filter - ${phase.gapVsPtb}`;
   }
 
   return "gap filter - PTB side flip";
@@ -223,4 +241,4 @@ export function gtdExpirationUnix(windowEndSec: number, nowSec = Math.floor(Date
   return Math.max(target, nowSec + 180);
 }
 
-export { SIDES_ORDER };
+export { SIDES_ORDER, GAP_VS_PTB_VALUES };

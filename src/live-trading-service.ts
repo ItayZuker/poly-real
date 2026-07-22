@@ -64,6 +64,7 @@ import {
   centsToPrice,
   describeGapFilterCancelReason,
   gapAllowsBuy,
+  gapAllowsSecondSide,
   gtdExpirationUnix,
   phaseIndexForState,
   priceToCents,
@@ -74,6 +75,7 @@ import {
 import type {
   LiveWindowState,
   SimMarker,
+  SimPhaseConfig,
   SimQuoteLocks,
   SimSetup,
   TradingConfig,
@@ -606,7 +608,8 @@ export class LiveTradingService {
    */
   private buyBlockedWindowKey: string | null = null;
   /** Resting GTD limit buy for the active non-optimize phase. */
-  private restingBuy: RestingBuyOrder | null = null;
+  /** Resting GTD buys by side (First/Both may have both). */
+  private restingBuys = new Map<"up" | "down", RestingBuyOrder>();
   /** After gap-filter cancel, delay before placing another resting GTD buy. */
   private gtdBuyRepressUntilMs = 0;
   /** Last phase index for clearing buy repress across phase boundaries. */
@@ -1647,9 +1650,9 @@ export class LiveTradingService {
 
   private resetWindow(state: LiveWindowState): void {
     const prevKey = this.sessionKey;
-    const prevResting = this.restingBuy;
+    const prevRestings = [...this.restingBuys.values()];
     const prevRestingSell = this.restingSell;
-    this.restingBuy = null;
+    this.restingBuys.clear();
     this.restingSell = null;
     this.gtdBuyRepressUntilMs = 0;
     this.lastGtdBuyPhaseIdx = -1;
@@ -1665,8 +1668,10 @@ export class LiveTradingService {
     this.gtdSellBlockedWindowKey = null;
     this.gtdSellRepressUntilMs = 0;
     if (isTradingExecutor()) {
-      if (prevResting?.orderId) {
-        void this.finishBuyCancel(prevResting, "window roll", state);
+      for (const prevResting of prevRestings) {
+        if (prevResting.orderId) {
+          void this.finishBuyCancel(prevResting, "window roll", state);
+        }
       }
       if (prevRestingSell?.orderId) void cancelOpenOrder(this.userId, prevRestingSell.orderId);
     }
@@ -1721,9 +1726,31 @@ export class LiveTradingService {
     return this.positionCards.find((card) => card.id === id);
   }
 
-  private isBuyBlocked(state: LiveWindowState): boolean {
+  /** True when this phase no longer wants any more auto buys. */
+  private buysFullySatisfied(phase: Pick<SimPhaseConfig, "gapVsPtb">): boolean {
+    if (gapAllowsSecondSide(phase.gapVsPtb)) {
+      return Boolean(this.positions.up && this.positions.down);
+    }
+    return Boolean(this.positions.up || this.positions.down);
+  }
+
+  /** Whether this side may still receive an auto buy under the phase gap mode. */
+  private sideStillWantsBuy(
+    side: "up" | "down",
+    phase: Pick<SimPhaseConfig, "gapVsPtb">,
+  ): boolean {
+    if (this.positions[side]) return false;
+    if (!gapAllowsSecondSide(phase.gapVsPtb) && (this.positions.up || this.positions.down)) {
+      return false;
+    }
+    return true;
+  }
+
+  private isBuyBlocked(state: LiveWindowState, phase?: Pick<SimPhaseConfig, "gapVsPtb">): boolean {
     const key = sessionKey(state);
-    if (this.positions.up || this.positions.down) return true;
+    if (phase ? this.buysFullySatisfied(phase) : this.positions.up || this.positions.down) {
+      return true;
+    }
     if (this.manualBuyPending) return true;
     if (this.manualBuyOverrideWindowKey === key) return true;
     if (this.buyBlockedWindowKey === key) return true;
@@ -2068,7 +2095,7 @@ export class LiveTradingService {
     const series = String(seriesInput || DEFAULT_MARKET_SERIES).trim() || DEFAULT_MARKET_SERIES;
     if (series === this.boundSeries) return;
 
-    if (this.restingBuy) await this.cancelRestingBuy("market switch");
+    if (this.restingBuys.size > 0) await this.cancelAllRestingBuys("market switch");
     if (this.restingSell) await this.cancelRestingSell("market switch");
 
     this.boundSeries = series;
@@ -2118,8 +2145,8 @@ export class LiveTradingService {
     this.mirroredMarkerCount = this.autoEngine
       .getMarkers()
       .filter((m) => m.windowKey === sessionKey(state)).length;
-    if (this.restingBuy && !this.config.startTrading) {
-      await this.cancelRestingBuy("startTrading off");
+    if (this.restingBuys.size > 0 && !this.config.startTrading) {
+      await this.cancelAllRestingBuys("startTrading off");
     }
     if (this.restingSell && !this.config.startTrading) {
       await this.cancelRestingSell("startTrading off");
@@ -2166,8 +2193,11 @@ export class LiveTradingService {
       this.livePendingPhaseAborts.delete(idx);
       this.liveCompletedPhaseAbortCancellations.add(idx);
       if (this.liveFakWatch?.phaseIdx === idx) this.liveFakWatch = null;
-      if (this.restingBuy?.phaseIdx === idx) {
-        await this.cancelRestingBuy("PTB crossing abort", now, state);
+      for (const side of SIDES_ORDER) {
+        const resting = this.restingBuys.get(side);
+        if (resting?.phaseIdx === idx) {
+          await this.cancelRestingBuySide(side, "PTB crossing abort", now, state);
+        }
       }
       logService.info("trading", `Phase ${idx + 1} PTB-crossing cancellation executed`);
     }
@@ -2192,8 +2222,11 @@ export class LiveTradingService {
     const latency = Math.max(0, setup.latencyMs ?? state.feedLatencyMs ?? 0);
     if (latency <= 0) {
       this.liveCompletedPhaseAbortCancellations.add(phaseIdx);
-      if (this.restingBuy?.phaseIdx === phaseIdx) {
-        await this.cancelRestingBuy("PTB crossing abort", now, state);
+      for (const side of SIDES_ORDER) {
+        const resting = this.restingBuys.get(side);
+        if (resting?.phaseIdx === phaseIdx) {
+          await this.cancelRestingBuySide(side, "PTB crossing abort", now, state);
+        }
       }
       logService.info("trading", `Phase ${phaseIdx + 1} PTB-crossing cancellation executed`);
       return;
@@ -2211,24 +2244,27 @@ export class LiveTradingService {
     setup: SimSetup,
     nowMs?: number,
   ): Promise<void> {
-    if (this.orderInFlight || this.positions.up || this.positions.down) {
-      this.liveFakWatch = null;
-      return;
-    }
-    if (this.isBuyBlocked(state) || this.manualBuyPending) {
-      this.liveFakWatch = null;
-      return;
-    }
-    if (this.restingBuy) {
-      this.liveFakWatch = null;
-      return;
-    }
-
     const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
     const phaseIdx = phaseIndexForState(state, setup.phaseSplit, nowSec);
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
 
+    if (this.orderInFlight || this.buysFullySatisfied(phase)) {
+      this.liveFakWatch = null;
+      return;
+    }
+    if (this.isBuyBlocked(state, phase) || this.manualBuyPending) {
+      this.liveFakWatch = null;
+      return;
+    }
+    if (this.restingBuys.size > 0) {
+      this.liveFakWatch = null;
+      return;
+    }
+
     if (this.liveFakWatch && this.liveFakWatch.phaseIdx !== phaseIdx) {
+      this.liveFakWatch = null;
+    }
+    if (this.liveFakWatch && !this.sideStillWantsBuy(this.liveFakWatch.side, phase)) {
       this.liveFakWatch = null;
     }
 
@@ -2245,6 +2281,7 @@ export class LiveTradingService {
       const shares = Math.max(1, phase.buyShares || 1);
       const triggerCents = phase.buyTrigger;
       for (const side of SIDES_ORDER) {
+        if (!this.sideStillWantsBuy(side, phase)) continue;
         const askCents = this.liveAskCents(state, side);
         if (askCents == null || askCents !== triggerCents) continue;
         if (!gapAllowsBuy(side, phase, state.assetGap)) continue;
@@ -2328,21 +2365,34 @@ export class LiveTradingService {
       phaseIdx,
     );
     // Keep the watch only for clearly-unfilled retries; pending/block clears via isBuyBlocked.
-    if (result.ok || this.isBuyBlocked(state) || this.positions.up || this.positions.down) {
+    if (result.ok || this.isBuyBlocked(state, phase) || !this.sideStillWantsBuy(w.side, phase)) {
       this.liveFakWatch = null;
     }
   }
 
-  private async cancelRestingBuy(
+  private async cancelAllRestingBuys(
     reason: string,
     nowMs?: number,
     state?: LiveWindowState,
   ): Promise<void> {
-    const resting = this.restingBuy;
+    for (const side of SIDES_ORDER) {
+      if (this.restingBuys.has(side)) {
+        await this.cancelRestingBuySide(side, reason, nowMs, state);
+      }
+    }
+  }
+
+  private async cancelRestingBuySide(
+    side: "up" | "down",
+    reason: string,
+    nowMs?: number,
+    state?: LiveWindowState,
+  ): Promise<void> {
+    const resting = this.restingBuys.get(side);
     if (!resting) return;
     // Drop local tracking immediately so we never re-manage / leave it as "active"
     // in the next phase — but keep working the CLOB cancel until confirmed.
-    this.restingBuy = null;
+    this.restingBuys.delete(side);
     if (isRoutineGtdCancelReason(reason)) {
       this.gtdBuyRepressUntilMs = (nowMs ?? Date.now()) + GTD_FILTER_REPRESS_MS;
     }
@@ -2350,11 +2400,24 @@ export class LiveTradingService {
       "trading",
       `Cancel resting GTD (${reason}) ${resting.side.toUpperCase()} ${resting.shares} sh @ ${(resting.limitPrice * 100).toFixed(0)}¢ [phase ${((resting.phaseIdx ?? 0) + 1)}]`,
     );
-    if (!this.positions.up && !this.positions.down) {
+    if (!this.positions.up && !this.positions.down && this.restingBuys.size === 0) {
       this.autoEngine.setExternalBuyPaused(false);
     }
     if (!isTradingExecutor()) return;
     await this.finishBuyCancel(resting, reason, state, nowMs);
+  }
+
+  /** After a fill under First: cancel the sibling resting GTD immediately. */
+  private async cancelSiblingRestingAfterFirstFill(
+    filledSide: "up" | "down",
+    phase: Pick<SimPhaseConfig, "gapVsPtb">,
+    nowMs?: number,
+    state?: LiveWindowState,
+  ): Promise<void> {
+    if (phase.gapVsPtb !== "first") return;
+    const other = filledSide === "up" ? "down" : "up";
+    if (!this.restingBuys.has(other)) return;
+    await this.cancelRestingBuySide(other, "first fill — cancel other", nowMs, state);
   }
 
   private async cancelRestingSell(reason: string): Promise<void> {
@@ -2454,6 +2517,11 @@ export class LiveTradingService {
         resting.phaseIdx,
         { placementId: resting.placementId },
       );
+      const setup = this.resolveAutoSimSetup(state);
+      const phase = setup?.phases[resting.phaseIdx ?? 0];
+      if (phase) {
+        await this.cancelSiblingRestingAfterFirstFill(resting.side, phase, undefined, state);
+      }
       // Fully matched → nothing left to cancel.
       const status = snap.status.toLowerCase();
       if (status !== "live" && status !== "delayed") return true;
@@ -2535,7 +2603,7 @@ export class LiveTradingService {
   ): Promise<void> {
     if (this.manualBuyPending || this.manualBuyOverrideWindowKey === sessionKey(state)) return;
     if (this.buyBlockedWindowKey === sessionKey(state)) {
-      if (this.restingBuy) await this.cancelRestingBuy("buy blocked", nowMs, state);
+      if (this.restingBuys.size > 0) await this.cancelAllRestingBuys("buy blocked", nowMs, state);
       return;
     }
 
@@ -2560,40 +2628,52 @@ export class LiveTradingService {
 
     // Always cancel stale resting buys even while another order is in flight —
     // skipping this left phase-1 limits live into phase 2/3.
-    if (this.restingBuy) {
-      const r = this.restingBuy;
+    for (const side of SIDES_ORDER) {
+      const r = this.restingBuys.get(side);
+      if (!r) continue;
       const restingGapOk = gapAllowsBuy(r.side, phase, state.assetGap);
       const endingThisPhase = r.phaseIdx === phaseIdx && preCancelForNextPhase;
+      const filledBlocksSibling =
+        !gapAllowsSecondSide(phase.gapVsPtb) &&
+        Boolean(this.positions.up || this.positions.down) &&
+        !this.positions[side];
       if (
         r.sessionKey !== key ||
         r.phaseIdx !== phaseIdx ||
         phase.buyOptimize ||
         !phase.buyEnabled ||
         !restingGapOk ||
-        endingThisPhase
+        endingThisPhase ||
+        filledBlocksSibling ||
+        this.positions[side]
       ) {
-        await this.cancelRestingBuy(
+        await this.cancelRestingBuySide(
+          side,
           endingThisPhase
             ? "phase ending"
-            : r.phaseIdx !== phaseIdx
-              ? "phase change"
-              : phase.buyOptimize
-                ? "optimize on"
-                : !phase.buyEnabled
-                  ? "buy disabled"
-                  : !restingGapOk
-                    ? describeGapFilterCancelReason(r.side, phase, state.assetGap)
-                    : "buy disabled",
+            : this.positions[side]
+              ? "side filled"
+              : filledBlocksSibling
+                ? "first fill — cancel other"
+                : r.phaseIdx !== phaseIdx
+                  ? "phase change"
+                  : phase.buyOptimize
+                    ? "optimize on"
+                    : !phase.buyEnabled
+                      ? "buy disabled"
+                      : !restingGapOk
+                        ? describeGapFilterCancelReason(r.side, phase, state.assetGap)
+                        : "buy disabled",
           now,
           state,
         );
       }
     }
 
-    // Poll open resting order for fills.
-    if (this.restingBuy) {
-      await this.pollRestingBuy(state, setup, nowMs);
-      if (this.restingBuy) return; // still open — don't place another
+    // Poll open resting orders for fills (First may cancel sibling mid-poll).
+    for (const side of [...SIDES_ORDER]) {
+      if (!this.restingBuys.has(side)) continue;
+      await this.pollRestingBuySide(side, state, setup, nowMs);
     }
 
     if (this.orderInFlight) return;
@@ -2603,91 +2683,91 @@ export class LiveTradingService {
 
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;
-    if (this.positions.up || this.positions.down) return;
-    if (this.isBuyBlocked(state)) return;
-    if (this.restingBuy) return;
+    if (this.buysFullySatisfied(phase)) return;
+    if (this.isBuyBlocked(state, phase)) return;
     if (this.gtdBuyBlockedWindowKey === key) return;
     if (now < this.gtdBuyRepressUntilMs) return;
-
-    let chosenSide: "up" | "down" | null = null;
-    for (const side of SIDES_ORDER) {
-      if (gapAllowsBuy(side, phase, state.assetGap)) {
-        chosenSide = side;
-        break;
-      }
-    }
-    if (!chosenSide) return;
 
     const windowEnd = state.windowEnd ?? nowSec + 300;
     const limitPrice = centsToPrice(phase.buyTrigger);
     const shares = Math.max(1, phase.buyShares || 1);
 
-    this.orderInFlight = true;
-    try {
-      this.autoEngine.setExternalBuyPaused(true);
-      const result = await placeLimitGtdBuy(this.userId, {
-        series: state.series,
-        side: chosenSide,
-        size: shares,
-        price: limitPrice,
-        expirationSec: gtdExpirationUnix(windowEnd, nowSec),
-        state,
-        logTag: `phase ${phaseIdx + 1}`,
-      });
-      if (!result.success || !result.orderId) {
-        this.autoEngine.setExternalBuyPaused(false);
-        const err = result.error ?? "";
-        if (/expiration/i.test(err)) {
-          this.gtdBuyBlockedWindowKey = key;
-          logService.warn("trading", `GTD buy skipped for rest of window (${err})`);
-        } else if (err) {
-          logService.warn("trading", `GTD place failed: ${err}`);
-        }
-        return;
-      }
+    for (const side of SIDES_ORDER) {
+      if (this.restingBuys.has(side)) continue;
+      if (!this.sideStillWantsBuy(side, phase)) continue;
+      if (!gapAllowsBuy(side, phase, state.assetGap)) continue;
 
-      if (result.fillShares != null && result.fillPrice != null && result.fillShares > 0) {
-        await this.recordBuyFill(
+      this.orderInFlight = true;
+      try {
+        this.autoEngine.setExternalBuyPaused(true);
+        const result = await placeLimitGtdBuy(this.userId, {
+          series: state.series,
+          side,
+          size: shares,
+          price: limitPrice,
+          expirationSec: gtdExpirationUnix(windowEnd, nowSec),
           state,
-          chosenSide,
-          result.fillShares,
-          result.fillPrice,
-          result.usdcAmount,
-          result.tokenId,
-          result.conditionId,
-          result.slug,
-          "auto",
-          undefined,
-          phaseIdx,
-        );
-        return;
-      }
+          logTag: `phase ${phaseIdx + 1}`,
+        });
+        if (!result.success || !result.orderId) {
+          if (this.restingBuys.size === 0) this.autoEngine.setExternalBuyPaused(false);
+          const err = result.error ?? "";
+          if (/expiration/i.test(err)) {
+            this.gtdBuyBlockedWindowKey = key;
+            logService.warn("trading", `GTD buy skipped for rest of window (${err})`);
+            return;
+          } else if (err) {
+            logService.warn("trading", `GTD place failed (${side}): ${err}`);
+          }
+          continue;
+        }
 
-      this.restingBuy = {
-        orderId: result.orderId,
-        side: chosenSide,
-        phaseIdx,
-        sessionKey: key,
-        shares,
-        limitPrice,
-        sizeMatched: 0,
-        tokenId: result.tokenId,
-        conditionId: result.conditionId,
-        slug: result.slug,
-        placementId: this.scheduleContext?.placementId,
-      };
-      this.notify();
-    } finally {
-      this.orderInFlight = false;
+        if (result.fillShares != null && result.fillPrice != null && result.fillShares > 0) {
+          await this.recordBuyFill(
+            state,
+            side,
+            result.fillShares,
+            result.fillPrice,
+            result.usdcAmount,
+            result.tokenId,
+            result.conditionId,
+            result.slug,
+            "auto",
+            undefined,
+            phaseIdx,
+          );
+          await this.cancelSiblingRestingAfterFirstFill(side, phase, now, state);
+          if (!gapAllowsSecondSide(phase.gapVsPtb)) return;
+          continue;
+        }
+
+        this.restingBuys.set(side, {
+          orderId: result.orderId,
+          side,
+          phaseIdx,
+          sessionKey: key,
+          shares,
+          limitPrice,
+          sizeMatched: 0,
+          tokenId: result.tokenId,
+          conditionId: result.conditionId,
+          slug: result.slug,
+          placementId: this.scheduleContext?.placementId,
+        });
+        this.notify();
+      } finally {
+        this.orderInFlight = false;
+      }
     }
   }
 
-  private async pollRestingBuy(
+  private async pollRestingBuySide(
+    side: "up" | "down",
     state: LiveWindowState,
     setup: SimSetup,
     nowMs?: number,
   ): Promise<void> {
-    const resting = this.restingBuy;
+    const resting = this.restingBuys.get(side);
     if (!resting) return;
 
     const nowSec = Math.floor((nowMs ?? state.lastTickMs ?? Date.now()) / 1000);
@@ -2695,7 +2775,8 @@ export class LiveTradingService {
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const crossingCancellationDue = this.isLivePhaseAbortCancellationDue(phaseIdx);
     if (!crossingCancellationDue && !gapAllowsBuy(resting.side, phase, state.assetGap)) {
-      await this.cancelRestingBuy(
+      await this.cancelRestingBuySide(
+        side,
         describeGapFilterCancelReason(resting.side, phase, state.assetGap),
         nowMs ?? nowSec * 1000,
         state,
@@ -2724,12 +2805,24 @@ export class LiveTradingService {
         resting.phaseIdx,
         { placementId: resting.placementId },
       );
+      await this.cancelSiblingRestingAfterFirstFill(
+        resting.side,
+        phase,
+        nowMs ?? nowSec * 1000,
+        state,
+      );
       const pos = this.positions[resting.side];
-      resting.cardId = pos?.cardId ?? resting.cardId;
-      resting.sizeMatched = matched;
-      resting.tokenId = resting.tokenId ?? snap.assetId;
-      resting.conditionId = resting.conditionId ?? snap.market;
+      const still = this.restingBuys.get(side);
+      if (still) {
+        still.cardId = pos?.cardId ?? still.cardId;
+        still.sizeMatched = matched;
+        still.tokenId = still.tokenId ?? snap.assetId;
+        still.conditionId = still.conditionId ?? snap.market;
+      }
     }
+
+    const current = this.restingBuys.get(side);
+    if (!current) return;
 
     const status = snap.status.toLowerCase();
     if (crossingCancellationDue) {
@@ -2740,9 +2833,9 @@ export class LiveTradingService {
         );
       }
       if (status === "live" || status === "delayed") {
-        await this.cancelRestingBuy("PTB crossing abort", nowMs, state);
+        await this.cancelRestingBuySide(side, "PTB crossing abort", nowMs, state);
       } else {
-        this.restingBuy = null;
+        this.restingBuys.delete(side);
         this.notify();
       }
       return;
@@ -2752,8 +2845,8 @@ export class LiveTradingService {
     if (status === "live" || status === "delayed") return;
 
     // Matched, cancelled, expired, unmatched, etc.
-    this.restingBuy = null;
-    if (!this.positions.up && !this.positions.down) {
+    this.restingBuys.delete(side);
+    if (!this.positions.up && !this.positions.down && this.restingBuys.size === 0) {
       this.autoEngine.setExternalBuyPaused(false);
     }
     this.notify();
@@ -2764,8 +2857,8 @@ export class LiveTradingService {
     setup: SimSetup,
     nowMs?: number,
   ): Promise<void> {
-    const side = this.positions.up ? "up" : this.positions.down ? "down" : null;
-    if (!side) {
+    const heldSides = SIDES_ORDER.filter((s) => this.positions[s]);
+    if (heldSides.length === 0) {
       if (this.restingSell) await this.cancelRestingSell("no position");
       return;
     }
@@ -2778,24 +2871,34 @@ export class LiveTradingService {
       return;
     }
     if (this.restingSell) {
-      const wantLimit = Math.min(
-        0.99,
-        Math.max(0.01, this.positions[side]!.avgPrice + centsToPrice(phase.sellProfitCents)),
-      );
-      const stalePhase =
-        this.restingSell.phaseIdx !== phaseIdx ||
-        Math.abs(this.restingSell.limitPrice - wantLimit) > 1e-9;
-      if (stalePhase) {
-        await this.cancelRestingSell("phase sell settings change");
+      const sellSide = this.restingSell.side;
+      const pos = this.positions[sellSide];
+      if (!pos) {
+        await this.cancelRestingSell("no position");
       } else {
-        if (this.orderInFlight) return;
-        await this.pollRestingSell(state);
-        if (this.restingSell) return;
+        const wantLimit = Math.min(
+          0.99,
+          Math.max(0.01, pos.avgPrice + centsToPrice(phase.sellProfitCents)),
+        );
+        const stalePhase =
+          this.restingSell.phaseIdx !== phaseIdx ||
+          Math.abs(this.restingSell.limitPrice - wantLimit) > 1e-9;
+        if (stalePhase) {
+          await this.cancelRestingSell("phase sell settings change");
+        } else {
+          if (this.orderInFlight) return;
+          await this.pollRestingSell(state);
+          if (this.restingSell) return;
+        }
       }
     }
     if (this.orderInFlight) return;
-    if (!this.positions[side]) return;
-    await this.ensureRestingGtdSell(state, setup, side, nowMs);
+    // Prefer a held side that does not yet have a resting sell (Both may hold two).
+    for (const side of heldSides) {
+      if (!this.positions[side]) continue;
+      await this.ensureRestingGtdSell(state, setup, side, nowMs);
+      if (this.restingSell) return;
+    }
   }
 
   private async ensureRestingGtdSell(
@@ -3153,7 +3256,7 @@ export class LiveTradingService {
 
   canManualTrade(side: "up" | "down", leg: "buy" | "sell"): boolean {
     if (leg === "buy") {
-      return !this.positions.up && !this.positions.down && !this.pendingBuyConfirm;
+      return !this.positions[side] && !this.pendingBuyConfirm;
     }
     return Boolean(this.positions[side]);
   }
@@ -3192,7 +3295,7 @@ export class LiveTradingService {
       this.manualBuyPending = true;
       this.liveFakWatch = null;
       if (!this.isLiveArmed()) this.autoEngine.setExternalBuyPaused(true);
-      await this.cancelRestingBuy("manual buy");
+      await this.cancelAllRestingBuys("manual buy");
     } else {
       await this.cancelRestingSell("manual sell");
     }
