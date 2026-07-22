@@ -55,7 +55,12 @@ body {
   flex-shrink: 0;
   align-items: stretch;
   gap: 0;
+  box-sizing: border-box;
   width: 100%;
+  --topbar-height: 45px;
+  --header-control-height: 28px;
+  height: var(--topbar-height);
+  min-height: var(--topbar-height);
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
@@ -64,16 +69,11 @@ body {
   margin-left: auto;
   display: flex;
   align-items: center;
-  padding: 0 14px;
+  padding: 0 12px;
 }
 
-.auth-tabs-settings-btn {
-  width: 28px;
-  height: 28px;
-}
-
-.auth-tabs-settings-btn[hidden] {
-  display: none;
+.auth-tabs-right .header-settings-btn[hidden] {
+  display: none !important;
 }
 
 .auth-tab {
@@ -86,7 +86,7 @@ body {
   color: var(--muted);
   font-size: 0.9rem;
   font-weight: 600;
-  padding: 14px 20px;
+  padding: 0 20px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -911,15 +911,19 @@ body {
 .app-header {
   position: relative;
   width: 100%;
+  box-sizing: border-box;
+  height: var(--topbar-height, 45px);
+  min-height: var(--topbar-height, 45px);
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   flex-shrink: 0;
   --header-control-height: 28px;
+  --topbar-height: 45px;
 }
 
 .header-stats-progress {
@@ -2744,27 +2748,34 @@ body.is-schedule-dragging .schedule-day-header.is-fill-drop-target::after {
 }
 
 .header-settings-btn {
+  appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--header-control-height);
-  height: var(--header-control-height);
+  box-sizing: border-box;
+  width: var(--header-control-height, 28px);
+  height: var(--header-control-height, 28px);
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 50%;
   background: var(--bg);
   color: var(--text);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1;
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .header-settings-initial {
-  font-size: 0.78rem;
-  font-weight: 700;
-  line-height: 1;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
   letter-spacing: 0;
   text-transform: uppercase;
   user-select: none;
+  color: inherit;
 }
 
 .header-settings-btn:hover:not(.is-active) {
