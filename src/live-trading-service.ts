@@ -68,6 +68,7 @@ import {
   phaseIndexForState,
   priceToCents,
   sellEnabledForPhase,
+  shouldPreCancelGtdForNextPhase,
   SIDES_ORDER,
 } from "./phase-config.js";
 import type {
@@ -111,7 +112,7 @@ interface LiveFakBuyWatch {
   lastBookSampleCount: number;
 }
 
-/** Phase/GTD buy cancel still settling on the CLOB (avoid orphan fills in the next phase). */
+/** Phase/GTD buy cancel still settling on the CLOB (race-fill harvest / retry). */
 interface PendingBuyCancel {
   resting: {
     orderId: string;
@@ -1727,8 +1728,8 @@ export class LiveTradingService {
     if (this.manualBuyOverrideWindowKey === key) return true;
     if (this.buyBlockedWindowKey === key) return true;
     if (this.pendingBuyConfirm) return true;
-    // Block while a prior GTD cancel may still race-fill on the CLOB.
-    if (this.pendingBuyCancels.length > 0) return true;
+    // Prior-phase GTD cancels continue in the background; do not block the next
+    // phase place — early cancel + race-fill harvest cover the overlap.
     return false;
   }
 
@@ -2544,6 +2545,12 @@ export class LiveTradingService {
     const phase = setup.phases[phaseIdx] ?? setup.phases[0];
     const key = sessionKey(state);
     const crossingAborted = this.isLivePhaseBuyAborted(phaseIdx);
+    const preCancelForNextPhase = shouldPreCancelGtdForNextPhase(
+      state,
+      setup.phaseSplit,
+      phaseIdx,
+      nowSec,
+    );
 
     // Phase boundary must not inherit gap-filter repress from the prior phase.
     if (this.lastGtdBuyPhaseIdx !== phaseIdx) {
@@ -2556,23 +2563,27 @@ export class LiveTradingService {
     if (this.restingBuy) {
       const r = this.restingBuy;
       const restingGapOk = gapAllowsBuy(r.side, phase, state.assetGap);
+      const endingThisPhase = r.phaseIdx === phaseIdx && preCancelForNextPhase;
       if (
         r.sessionKey !== key ||
         r.phaseIdx !== phaseIdx ||
         phase.buyOptimize ||
         !phase.buyEnabled ||
-        !restingGapOk
+        !restingGapOk ||
+        endingThisPhase
       ) {
         await this.cancelRestingBuy(
-          r.phaseIdx !== phaseIdx
-            ? "phase change"
-            : phase.buyOptimize
-              ? "optimize on"
-              : !phase.buyEnabled
-                ? "buy disabled"
-                : !restingGapOk
-                  ? describeGapFilterCancelReason(r.side, phase, state.assetGap)
-                  : "buy disabled",
+          endingThisPhase
+            ? "phase ending"
+            : r.phaseIdx !== phaseIdx
+              ? "phase change"
+              : phase.buyOptimize
+                ? "optimize on"
+                : !phase.buyEnabled
+                  ? "buy disabled"
+                  : !restingGapOk
+                    ? describeGapFilterCancelReason(r.side, phase, state.assetGap)
+                    : "buy disabled",
           now,
           state,
         );
@@ -2587,6 +2598,8 @@ export class LiveTradingService {
 
     if (this.orderInFlight) return;
     if (crossingAborted) return;
+    // Last seconds of phase 1/2: do not place a fresh GTD that would be cancelled immediately.
+    if (preCancelForNextPhase) return;
 
     // Place GTD when optimize is off and phase allows buys.
     if (phase.buyOptimize || !phase.buyEnabled) return;

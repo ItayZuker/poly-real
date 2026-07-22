@@ -78,6 +78,15 @@ If min/max gap are both 0 and Gap vs PTB is **None** (FAK), buys are not blocked
 |---------|-------|--------------|
 | **Profit from buy (¢)** | 1–100 | Sell limit ≈ buy fill + this many cents. **100 = off** — hold to settlement (no sell) for fills from this phase |
 
+## Buy place & cancel (phases)
+
+| Mode | When placed | When cancelled |
+|------|-------------|----------------|
+| **GTD** (Optimize off) | When the phase starts (and gap rules allow), as a resting limit | **Phases 1–2:** ~**3 seconds before** the phase ends (so the next phase can place without waiting on cancel). Also on phase change, gap fail, buy off, fill, or **window end**. **Phase 3:** no next-phase cancel — cleared at **window end** (or fill / gap / buy off). |
+| **FAK** (Optimize on) | After ask **exactly** touches the trigger (then hunts ≤ trigger) | Watch drops on phase change, abort, or after the buy fires |
+
+GTD cancel starts early because live cancel can take about a second (sometimes longer). Starting ~3s before the boundary reduces overlap with the next phase’s resting order. The next phase **does not wait** for the prior cancel to finish; a late fill on the old order is still recorded.
+
 ## Defaults (new phase)
 
 | Setting | Default |

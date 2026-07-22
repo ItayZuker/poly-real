@@ -172,6 +172,49 @@ export function phaseIndexForState(
 }
 
 /**
+ * Seconds before a phase boundary to cancel an unfilled GTD so the next phase can
+ * place without waiting on CLOB cancel confirmation. Phase 3 has no successor.
+ */
+export const GTD_PHASE_END_CANCEL_LEAD_SEC = 3;
+
+/** Absolute unix end (sec) of phaseIdx within the window; phase 3 ends at windowEnd. */
+export function phaseEndSec(
+  state: LiveWindowState,
+  phaseSplit: [number, number],
+  phaseIdx: number,
+): number | null {
+  if (!state.windowStart || !state.windowEnd) return null;
+  const duration = state.windowEnd - state.windowStart;
+  if (duration <= 0) return null;
+  if (phaseIdx <= 0) return state.windowStart + duration * phaseSplit[0];
+  if (phaseIdx === 1) return state.windowStart + duration * phaseSplit[1];
+  return state.windowEnd;
+}
+
+/**
+ * True in the lead window before phase 1→2 or 2→3: cancel current GTD early and
+ * do not place a new one for this phase. Phase 3 never pre-cancels for a next phase.
+ */
+export function shouldPreCancelGtdForNextPhase(
+  state: LiveWindowState,
+  phaseSplit: [number, number],
+  phaseIdx: number,
+  nowSec: number,
+  leadSec = GTD_PHASE_END_CANCEL_LEAD_SEC,
+): boolean {
+  if (phaseIdx < 0 || phaseIdx >= 2) return false;
+  if (!state.windowStart || !state.windowEnd) return false;
+  const endSec = phaseEndSec(state, phaseSplit, phaseIdx);
+  if (endSec == null) return false;
+  const duration = state.windowEnd - state.windowStart;
+  const startFrac = phaseIdx === 0 ? 0 : phaseSplit[0];
+  const phaseDur = endSec - (state.windowStart + duration * startFrac);
+  const lead = Math.min(Math.max(0, leadSec), Math.max(0, Math.floor(phaseDur / 2)));
+  if (lead <= 0) return false;
+  return nowSec >= endSec - lead && nowSec < endSec;
+}
+
+/**
  * GTD stated expiration (unix sec). Exchange expires ~60s before this value.
  * Must be ≥ now+180; if window end is sooner we still meet the floor and cancel ourselves.
  */

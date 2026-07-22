@@ -10,7 +10,14 @@ import {
 } from "./book-depth.js";
 import { DEFAULT_CRYPTO_TAKER_FEE_PARAMS, type TakerFeeParams } from "./taker-fee.js";
 import type { LiveWindowState, SimMarker, SimQuoteLocks, SimSetup, SimLastWindow } from "./types.js";
-import { describeGapFilterCancelReason, gapAllowsBuy, priceToCents, sellEnabledForPhase, SIDES_ORDER } from "./phase-config.js";
+import {
+  describeGapFilterCancelReason,
+  gapAllowsBuy,
+  priceToCents,
+  sellEnabledForPhase,
+  shouldPreCancelGtdForNextPhase,
+  SIDES_ORDER,
+} from "./phase-config.js";
 import { resolveWindowOutcome } from "./window-outcome.js";
 import { logService } from "./log-service.js";
 
@@ -829,8 +836,10 @@ export class SimulatorEngine {
     phaseIdx: number,
     state: LiveWindowState,
     simNowMs: number,
+    preCancelForNextPhase = false,
   ): void {
     if (this.externalBuyPaused || phase.buyOptimize || !phase.buyEnabled) return;
+    if (preCancelForNextPhase) return;
     if (this.isPhaseBuyAborted(phaseIdx)) return;
     if (this.position || this.restingGtd || this.pendingBuy) return;
     if (simNowMs < this.gtdRepressUntilMs) return;
@@ -874,23 +883,28 @@ export class SimulatorEngine {
     phaseIdx: number,
     state: LiveWindowState,
     simNowMs: number,
+    preCancelForNextPhase = false,
   ): void {
     if (!this.restingGtd) return;
     const restingSide = this.restingGtd.side;
+    const endingThisPhase = this.restingGtd.phaseIdx === phaseIdx && preCancelForNextPhase;
     if (
       this.restingGtd.phaseIdx !== phaseIdx ||
       phase.buyOptimize ||
       !phase.buyEnabled ||
-      !gapAllowsBuy(restingSide, phase, state.assetGap)
+      !gapAllowsBuy(restingSide, phase, state.assetGap) ||
+      endingThisPhase
     ) {
       this.cancelRestingGtd(
-        this.restingGtd.phaseIdx !== phaseIdx
-          ? "phase change"
-          : phase.buyOptimize
-            ? "optimize on"
-            : !phase.buyEnabled
-              ? "buy disabled"
-              : describeGapFilterCancelReason(restingSide, phase, state.assetGap),
+        endingThisPhase
+          ? "phase ending"
+          : this.restingGtd.phaseIdx !== phaseIdx
+            ? "phase change"
+            : phase.buyOptimize
+              ? "optimize on"
+              : !phase.buyEnabled
+                ? "buy disabled"
+                : describeGapFilterCancelReason(restingSide, phase, state.assetGap),
         simNowMs,
       );
     }
@@ -1085,6 +1099,12 @@ export class SimulatorEngine {
     const phaseIdx = phaseIndexForFrac(frac, setup);
     const phase = setup.phases[phaseIdx];
     const quote = depthFromState(state);
+    const preCancelForNextPhase = shouldPreCancelGtdForNextPhase(
+      state,
+      setup.phaseSplit,
+      phaseIdx,
+      nowSec,
+    );
 
     // Hard boundary: kill prior-phase FAK/GTD before any fill can land.
     if (this.lastGtdPhaseIdx !== phaseIdx) {
@@ -1099,11 +1119,11 @@ export class SimulatorEngine {
     this.processPendingFills(state, setup, quote, nowSec, simNowMs);
     this.processPendingPhaseAbort(simNowMs);
 
-    // GTD resting: cancel on optimize/gap change, fill from book, place when active.
-    this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs);
+    // GTD resting: cancel on optimize/gap/phase-ending, fill from book, place when active.
+    this.syncRestingGtdForPhase(phase, phaseIdx, state, simNowMs, preCancelForNextPhase);
     this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     if (!this.position || this.restingGtd) {
-      this.tryPlaceRestingGtd(phase, phaseIdx, state, simNowMs);
+      this.tryPlaceRestingGtd(phase, phaseIdx, state, simNowMs, preCancelForNextPhase);
       this.tickRestingGtd(quote, nowSec, state, phase, phaseIdx, simNowMs);
     }
 

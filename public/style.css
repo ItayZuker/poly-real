@@ -53,10 +53,27 @@ body {
 .auth-tabs {
   display: flex;
   flex-shrink: 0;
+  align-items: stretch;
   gap: 0;
   width: 100%;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+}
+
+.auth-tabs-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+}
+
+.auth-tabs-settings-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.auth-tabs-settings-btn[hidden] {
+  display: none;
 }
 
 .auth-tab {
@@ -429,6 +446,10 @@ body {
   letter-spacing: -0.02em;
   line-height: 1.25;
   font-weight: 500;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .auth-docs-content h1 {
@@ -448,6 +469,55 @@ body {
   font-size: 1rem;
   color: #9aa3ad;
   font-weight: 500;
+}
+
+.auth-docs-section {
+  margin: 1.55em 0 1.75em;
+  padding: 0 0 1.15em;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.7);
+}
+
+.auth-docs-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 0.5em;
+}
+
+.auth-docs-section > h2 {
+  margin-top: 0;
+  margin-bottom: 0.65em;
+  padding: 4px 8px;
+  margin-left: -8px;
+  border-radius: 6px;
+}
+
+.auth-docs-section-body {
+  margin-left: 0.15rem;
+  padding-left: 1.15rem;
+  border-left: 1px solid rgba(48, 54, 61, 0.75);
+}
+
+.auth-docs-section-body > :first-child {
+  margin-top: 0;
+}
+
+.auth-docs-section-body > :last-child {
+  margin-bottom: 0;
+}
+
+.auth-docs-content h1.is-nav-hover,
+.auth-docs-content h2.is-nav-hover {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+  box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28);
+}
+
+.auth-docs-content h1.is-nav-hover {
+  padding: 4px 8px;
+  margin-left: -8px;
+  border-radius: 6px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .auth-docs-content p,

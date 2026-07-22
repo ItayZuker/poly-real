@@ -99,6 +99,7 @@
     let codeLines = [];
     let listType = null;
     let listItems = [];
+    let inSection = false;
     const usedIds = Object.create(null);
 
     function uniqueHeadingId(title) {
@@ -109,6 +110,22 @@
       }
       usedIds[base] += 1;
       return `${base}-${usedIds[base]}`;
+    }
+
+    function closeSection() {
+      if (!inSection) return;
+      out.push("</div></section>");
+      inSection = false;
+    }
+
+    function openSection(id, titleHtml) {
+      closeSection();
+      out.push(
+        `<section class="auth-docs-section">` +
+          `<h2 id="${id}">${titleHtml}</h2>` +
+          `<div class="auth-docs-section-body">`,
+      );
+      inSection = true;
     }
 
     function flushList() {
@@ -176,9 +193,16 @@
         flushList();
         const level = heading[1].length;
         const title = heading[2].trim();
-        // Only ## get ids so they match the left-nav sub-tabs.
-        const idAttr = level === 2 ? ` id="${uniqueHeadingId(title)}"` : "";
-        out.push(`<h${level}${idAttr}>${inlineFormat(title)}</h${level}>`);
+        const titleHtml = inlineFormat(title);
+        if (level === 1) {
+          closeSection();
+          out.push(`<h1>${titleHtml}</h1>`);
+        } else if (level === 2) {
+          // ## sections wrap body content for sidebar hover + visual separation.
+          openSection(uniqueHeadingId(title), titleHtml);
+        } else {
+          out.push(`<h${level}>${titleHtml}</h${level}>`);
+        }
         i += 1;
         continue;
       }
@@ -214,6 +238,7 @@
 
     flushList();
     flushCode();
+    closeSection();
     return out.join("\n");
   }
 

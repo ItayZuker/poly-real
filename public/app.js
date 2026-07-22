@@ -174,7 +174,8 @@ function showAuthViewPanels(view) {
 function syncAuthMainTabButton() {
   const mainBtn = $("auth-tab-btn-main");
   if (!mainBtn) return;
-  const showApp = isLoggedIn() && (authTopTab === "docs" || authTopTab === "versions");
+  const loggedIn = isLoggedIn();
+  const showApp = loggedIn && (authTopTab === "docs" || authTopTab === "versions");
   mainBtn.classList.toggle("is-back-mode", showApp);
   if (showApp) {
     mainBtn.innerHTML = '<span class="auth-tab-label">App</span>';
@@ -183,6 +184,16 @@ function syncAuthMainTabButton() {
     mainBtn.innerHTML = '<span class="auth-tab-label">Main</span>';
     mainBtn.setAttribute("aria-label", "Main");
   }
+  const settingsBtn = $("auth-settings-btn");
+  if (settingsBtn) settingsBtn.hidden = !loggedIn;
+}
+
+function openSettingsFromAuthChrome() {
+  showAppShell();
+  authTopTab = "main";
+  syncAuthMainTabButton();
+  syncAuthUrl("main", { replace: false });
+  if (typeof showAppPage === "function") showAppPage("settings");
 }
 
 function applyAuthRoute(tab, { syncUrl = true, replace = false } = {}) {
@@ -422,6 +433,26 @@ function setAuthDocsNavActive(pageId, sectionId) {
   });
 }
 
+function clearAuthDocsContentNavHover() {
+  const content = $("auth-docs-content");
+  if (!content) return;
+  content.querySelectorAll(".is-nav-hover").forEach((el) => el.classList.remove("is-nav-hover"));
+}
+
+/** Highlight the matching content heading while hovering a docs nav label. */
+function setAuthDocsContentNavHover(opts = {}) {
+  const content = $("auth-docs-content");
+  if (!content) return;
+  clearAuthDocsContentNavHover();
+  if (opts.sectionId) {
+    content.querySelector(`#${CSS.escape(opts.sectionId)}`)?.classList.add("is-nav-hover");
+    return;
+  }
+  if (opts.pageTitle) {
+    content.querySelector("h1")?.classList.add("is-nav-hover");
+  }
+}
+
 async function buildAuthDocsNav() {
   const nav = $("auth-docs-nav");
   if (!nav || !authDocsManifest) return;
@@ -442,6 +473,10 @@ async function buildAuthDocsNav() {
       clearAuthDocsSearchUi();
       void loadAuthDocPage(page.id);
     });
+    btn.addEventListener("mouseenter", () => {
+      if (page.id === authDocsActiveId) setAuthDocsContentNavHover({ pageTitle: true });
+    });
+    btn.addEventListener("mouseleave", () => clearAuthDocsContentNavHover());
     group.appendChild(btn);
 
     const sections = extractDocSections(authDocsLoaded[page.id] || "");
@@ -461,6 +496,12 @@ async function buildAuthDocsNav() {
           clearAuthDocsSearchUi();
           void loadAuthDocPage(page.id, { sectionId: section.id });
         });
+        subBtn.addEventListener("mouseenter", () => {
+          if (page.id === authDocsActiveId) {
+            setAuthDocsContentNavHover({ sectionId: section.id });
+          }
+        });
+        subBtn.addEventListener("mouseleave", () => clearAuthDocsContentNavHover());
         inner.appendChild(subBtn);
       }
       sub.appendChild(inner);
@@ -810,6 +851,12 @@ function bindAuthForm(onLoggedIn) {
       if (tab === "main" && !isLoggedIn()) showAuthViewPanels("home");
     });
   });
+
+  const authSettingsBtn = $("auth-settings-btn");
+  if (authSettingsBtn && authSettingsBtn.dataset.bound !== "1") {
+    authSettingsBtn.dataset.bound = "1";
+    authSettingsBtn.addEventListener("click", () => openSettingsFromAuthChrome());
+  }
 }
 
 function renderWalletAccount(data) {
@@ -870,14 +917,18 @@ function userNameInitial(name) {
 }
 
 function renderHeaderUserInitial(name) {
-  const el = $("settings-page-initial");
-  const btn = $("settings-page-btn");
   const initial = userNameInitial(name);
-  if (el) el.textContent = initial;
-  if (btn) {
-    const label = String(name || "").trim() || "Settings";
-    btn.title = label;
-    btn.setAttribute("aria-label", `Settings — ${label}`);
+  const label = String(name || "").trim() || "Settings";
+  const targets = [
+    { el: $("settings-page-initial"), btn: $("settings-page-btn") },
+    { el: $("auth-settings-initial"), btn: $("auth-settings-btn") },
+  ];
+  for (const { el, btn } of targets) {
+    if (el) el.textContent = initial;
+    if (btn) {
+      btn.title = label;
+      btn.setAttribute("aria-label", `Settings — ${label}`);
+    }
   }
 }
 

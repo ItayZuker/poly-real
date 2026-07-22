@@ -2,7 +2,7 @@
 
 ## Documentation
 
-The first Settings card is a single row: **Documentation** on the left, **Open** on the right (goes to `/docs`). Release notes are at `/version`. Use **Back** to return to the app. Choosing **Main** while signed in also returns you to `/`.
+The first Settings card is a single row: **Documentation** on the left, **Open** on the right (goes to `/docs`). Release notes are at `/version`. While signed in, the **Settings** button (name initial) stays in the Docs / Versions top bar as well as the app header. Use **App** (or **Main**) to return to the market.
 
 ## Profile
 
