@@ -105,6 +105,30 @@ function isLoggedIn() {
   return Boolean(currentUserId);
 }
 
+const SIGNED_IN_HINT_KEY = "poly-real:signed-in";
+
+function setSignedInHint(on) {
+  try {
+    if (on) localStorage.setItem(SIGNED_IN_HINT_KEY, "1");
+    else localStorage.removeItem(SIGNED_IN_HINT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function hasSignedInHint() {
+  try {
+    return localStorage.getItem(SIGNED_IN_HINT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** True when session is known or a prior signed-in visit was recorded (avoids Main/App flash). */
+function likelySignedIn() {
+  return isLoggedIn() || hasSignedInHint();
+}
+
 function pathToAuthTab(pathname) {
   const p = String(pathname || "/").replace(/\/+$/, "") || "/";
   if (p === "/docs") return "docs";
@@ -174,16 +198,20 @@ function showAuthViewPanels(view) {
 function syncAuthMainTabButton() {
   const mainBtn = $("auth-tab-btn-main");
   if (!mainBtn) return;
-  const loggedIn = isLoggedIn();
+  const loggedIn = likelySignedIn();
   const showApp = loggedIn && (authTopTab === "docs" || authTopTab === "versions");
   mainBtn.classList.toggle("is-back-mode", showApp);
-  if (showApp) {
-    mainBtn.innerHTML = '<span class="auth-tab-label">App</span>';
-    mainBtn.setAttribute("aria-label", "Open Market");
+  const mainLabel = mainBtn.querySelector(".auth-tab-label--main");
+  const appLabel = mainBtn.querySelector(".auth-tab-label--app");
+  if (mainLabel && appLabel) {
+    mainLabel.hidden = showApp;
+    appLabel.hidden = !showApp;
   } else {
-    mainBtn.innerHTML = '<span class="auth-tab-label">Main</span>';
-    mainBtn.setAttribute("aria-label", "Main");
+    mainBtn.innerHTML = showApp
+      ? '<span class="auth-tab-label auth-tab-label--app">App</span>'
+      : '<span class="auth-tab-label auth-tab-label--main">Main</span>';
   }
+  mainBtn.setAttribute("aria-label", showApp ? "Open Market" : "Main");
   const settingsBtn = $("auth-settings-btn");
   if (settingsBtn) settingsBtn.hidden = !loggedIn;
 }
@@ -775,6 +803,7 @@ let currentUserId = null;
 
 function setCurrentUser(user) {
   currentUserId = user?.id ? String(user.id) : null;
+  setSignedInHint(Boolean(currentUserId));
 }
 
 function userScopedStorageKey(base) {
@@ -1237,6 +1266,7 @@ function bindSettingsEditors() {
       logoutBtn.disabled = true;
       try {
         await logoutSession();
+        setSignedInHint(false);
         // Live trading keeps running server-side; only the UI session ends.
         window.location.reload();
       } catch (err) {
@@ -1266,6 +1296,7 @@ function bindSettingsEditors() {
       deleteBtn.disabled = true;
       try {
         await deleteAccount();
+        setSignedInHint(false);
         window.location.reload();
       } catch (err) {
         setSettingsSessionStatus(err instanceof Error ? err.message : String(err), true);
@@ -4494,8 +4525,9 @@ let appInitialized = false;
 
 async function enterApp(user, options = {}) {
   setCurrentUser(user);
-  showAppShell();
-  if (!options.keepPublicRoute) {
+  const keepPublicRoute = Boolean(options.keepPublicRoute);
+  if (!keepPublicRoute) {
+    showAppShell();
     syncAuthUrl("main", { replace: true });
   }
   if (user) {
@@ -4510,7 +4542,7 @@ async function enterApp(user, options = {}) {
   }
   appInitialized = true;
   await init();
-  if (!walletReady && typeof showAppPage === "function") {
+  if (!keepPublicRoute && !walletReady && typeof showAppPage === "function") {
     showAppPage("settings", { persist: false });
   }
 }
@@ -4519,25 +4551,42 @@ async function boot() {
   bindAuthUrlRouting();
   bindAuthForm(enterApp);
   const routeTab = pathToAuthTab(location.pathname);
+  // Paint Docs/Versions immediately so a logged-in refresh never flashes Market.
+  if (routeTab === "docs" || routeTab === "versions") {
+    showAuthOverlay();
+    authTopTab = routeTab;
+    renderAuthTopPanels(routeTab);
+    syncAuthMainTabButton();
+    if (routeTab === "docs") void ensureAuthDocsReady();
+    if (routeTab === "versions") void ensureAuthVersionsReady();
+  }
   try {
     const user = await fetchAuthMe();
     if (user) {
       if (routeTab === "docs" || routeTab === "versions") {
         await enterApp(user, { keepPublicRoute: true });
-        applyAuthRoute(routeTab, { syncUrl: false });
-      } else {
-        await enterApp(user);
+        syncAuthMainTabButton();
+        delete document.documentElement.dataset.initialAuthTab;
+        delete document.documentElement.dataset.signedInHint;
+        return;
       }
+      await enterApp(user);
+      delete document.documentElement.dataset.initialAuthTab;
+      delete document.documentElement.dataset.signedInHint;
       return;
     }
   } catch {
     // fall through to public auth pages
   }
+  setSignedInHint(false);
+  delete document.documentElement.dataset.signedInHint;
   if (routeTab === "docs" || routeTab === "versions") {
-    applyAuthRoute(routeTab, { syncUrl: false });
+    syncAuthMainTabButton();
+    delete document.documentElement.dataset.initialAuthTab;
     return;
   }
   showAuthScreen();
+  delete document.documentElement.dataset.initialAuthTab;
 }
 
 boot();

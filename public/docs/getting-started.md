@@ -1,52 +1,34 @@
 # Getting started
 
-## 1. Create an account
+## 1. Account
 
-On the **Main** tab, choose **Sign up** (email + password). A display name is optional. You do **not** need a wallet to create an account.
+**Sign up** with email and password. Wallet is not required yet.
 
-## 2. Add trading credentials
+## 2. Trading credentials
 
-Open **Settings** and fill **Trading credentials**:
+In **Settings**, save both:
 
-1. **Funder address** — your Polymarket proxy / profile wallet that holds USDC
-2. **Private key** — the EOA signer key (stored encrypted; not shown again after save)
+1. **Funder address** — Polymarket proxy / profile wallet (holds USDC)
+2. **Private key** — EOA signer (encrypted; not shown again after save)
 
-Until **both** are saved, **Market** and **Schedule** stay locked and the app sends you to Settings.
+Market and Schedule stay locked until both are saved. Details: [Settings & wallet](doc:settings).
 
-Details: [Settings & wallet](doc:settings).
+## 3. Market
 
-## 3. Pick a market
+Pick a series in the header (e.g. BTC/ETH 5m or 15m).
 
-Use the market selector in the header (series such as BTC/ETH/SOL 5m or 15m).
+## 4. Preview
 
-## 4. Preview on Market
+On **Market**, keep **Allow trade** off (demo). Watch quotes, phases, and the log. More: [Market](doc:market).
 
-On **Market**:
+## 5. Setup and schedule
 
-- Leave **Allow trade** off to stay in demo / preview mode
-- Watch quotes, chart phases, and the log
-- Optionally click quotes for manual demo orders when armed for demo flow
+1. Create a **setup** (phases, size, trigger) — [Setups & phases](doc:setups-phases)
+2. Place it on Mon–Sun × UTC hours — [Schedule](doc:schedule)
+3. On Market: **Use Schedule** + **Auto Trade** when you want the grid to drive trades
 
-More: [Market](doc:market).
+## 6. Go live
 
-## 5. Build a setup and schedule it
-
-On **Schedule / Heatmap**:
-
-1. Create or edit a **setup** (phases, sizes, triggers) — [Setups & phases](doc:setups-phases)
-2. Drag or place it onto Mon–Sun × UTC hours — [Schedule](doc:schedule)
-3. Enable **Use Schedule** + **Auto Trade** on Market when you want the grid to drive trades
-
-## 6. Go live carefully
-
-1. Confirm wallet balance and credentials in Settings / Market
-2. Turn **Allow trade** on for real orders
-3. Start with small size and verify the log and positions
-
-## See also
-
-- [Overview](doc:overview)
-- [Market](doc:market)
-- [Schedule](doc:schedule)
-- [Setups & phases](doc:setups-phases)
-- [Settings & wallet](doc:settings)
+1. Confirm credentials and balance
+2. Turn **Allow trade** on
+3. Start small; watch the log and positions

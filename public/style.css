@@ -54,15 +54,21 @@ body {
   display: flex;
   flex-shrink: 0;
   align-items: stretch;
-  gap: 0;
+  gap: 10px;
   box-sizing: border-box;
   width: 100%;
   --topbar-height: 45px;
   --header-control-height: 28px;
   height: var(--topbar-height);
   min-height: var(--topbar-height);
+  padding: 0 0 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+}
+
+.auth-tabs > .app-title {
+  align-self: center;
+  flex-shrink: 0;
 }
 
 .auth-tabs-right {
@@ -449,7 +455,7 @@ body {
   transition:
     color 0.15s ease,
     background-color 0.15s ease,
-    box-shadow 0.15s ease;
+    outline-color 0.15s ease;
 }
 
 .auth-docs-content h1 {
@@ -457,6 +463,12 @@ body {
   font-size: 1.55rem;
   color: #c9d1d9;
   font-weight: 550;
+  padding: 4px 8px;
+  margin-left: -8px;
+  border-radius: 6px;
+  width: fit-content;
+  max-width: calc(100% + 8px);
+  box-sizing: border-box;
 }
 
 .auth-docs-content h2 {
@@ -489,6 +501,7 @@ body {
   padding: 4px 8px;
   margin-left: -8px;
   border-radius: 6px;
+  box-sizing: border-box;
 }
 
 .auth-docs-section-body {
@@ -509,15 +522,8 @@ body {
 .auth-docs-content h2.is-nav-hover {
   color: var(--accent);
   background: rgba(88, 166, 255, 0.12);
-  box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28);
-}
-
-.auth-docs-content h1.is-nav-hover {
-  padding: 4px 8px;
-  margin-left: -8px;
-  border-radius: 6px;
-  width: fit-content;
-  max-width: 100%;
+  outline: 1px solid rgba(88, 166, 255, 0.28);
+  outline-offset: 0;
 }
 
 .auth-docs-content p,

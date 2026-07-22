@@ -7,6 +7,15 @@
   <link rel="stylesheet" href="/style.css" />
   <script>
     try {
+      var path = location.pathname.replace(/\/+$/, "") || "/";
+      if (path === "/docs") document.documentElement.dataset.initialAuthTab = "docs";
+      else if (path === "/version") document.documentElement.dataset.initialAuthTab = "versions";
+      if (
+        localStorage.getItem("poly-real:signed-in") === "1" &&
+        (path === "/docs" || path === "/version")
+      ) {
+        document.documentElement.dataset.signedInHint = "1";
+      }
       var initialPage = localStorage.getItem("poly-real:app-page");
       if (initialPage === "schedule" || initialPage === "settings") {
         document.documentElement.dataset.initialPage = initialPage;
@@ -17,6 +26,34 @@
     } catch (e) {}
   </script>
   <style>
+    html[data-initial-auth-tab] #auth-screen {
+      display: flex !important;
+    }
+    html[data-initial-auth-tab="docs"] #auth-tab-main,
+    html[data-initial-auth-tab="versions"] #auth-tab-main,
+    html[data-initial-auth-tab="docs"] #auth-tab-versions,
+    html[data-initial-auth-tab="versions"] #auth-tab-docs {
+      display: none !important;
+    }
+    html[data-initial-auth-tab="docs"] #auth-tab-docs,
+    html[data-initial-auth-tab="versions"] #auth-tab-versions {
+      display: flex !important;
+    }
+    html[data-initial-auth-tab] #app-shell {
+      display: none !important;
+    }
+    html[data-signed-in-hint] #auth-tab-btn-main .auth-tab-label--main {
+      display: none !important;
+    }
+    html[data-signed-in-hint] #auth-tab-btn-main .auth-tab-label--app {
+      display: inline !important;
+    }
+    html[data-signed-in-hint] #auth-tab-btn-main {
+      color: var(--text);
+    }
+    html[data-signed-in-hint] #auth-settings-btn {
+      display: inline-flex !important;
+    }
     html[data-initial-page="schedule"] #page-simulator,
     html[data-initial-page="settings"] #page-simulator {
       display: none !important;
@@ -40,8 +77,10 @@
   <div id="auth-screen" class="auth-screen" hidden>
     <div class="auth-shell" aria-label="Home">
       <nav class="auth-tabs" role="tablist" aria-label="Home sections">
+        <h1 class="app-title">Poly Real</h1>
         <button type="button" class="auth-tab is-active" role="tab" aria-selected="true" data-auth-tab="main" id="auth-tab-btn-main">
-          <span class="auth-tab-label">Main</span>
+          <span class="auth-tab-label auth-tab-label--main">Main</span>
+          <span class="auth-tab-label auth-tab-label--app" hidden>App</span>
         </button>
         <button type="button" class="auth-tab" role="tab" aria-selected="false" data-auth-tab="docs" id="auth-tab-btn-docs">Docs</button>
         <button type="button" class="auth-tab" role="tab" aria-selected="false" data-auth-tab="versions" id="auth-tab-btn-versions">Versions</button>
