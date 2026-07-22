@@ -8,8 +8,8 @@ alwaysApply: false
 
 - Source of truth for the **Docs** tab: `public/docs/*.md`
 - Nav order: `public/docs/manifest.json` (`pages[].id`, `title`, `file`)
-- Left sidebar subjects are built from `manifest.json`
-- Renderer: `public/markdown.js` — demos reuse **real app CSS classes**
+- Left sidebar: top-level pages from `manifest.json`; **sub-tabs** are built from each page’s `##` headings
+- Renderer: `public/markdown.js`
 
 ## Cross-links
 
@@ -17,32 +17,12 @@ Use `[Label](doc:page-id)` (e.g. `[Market](doc:market)`).
 
 App routes: `/` (main/app), `/docs` (documentation), `/version` (release notes).
 
-## Visual references (must match the app)
+## Structure
 
-Fenced `demo` blocks are non-interactive but must use the same markup/classes as the live UI:
-
-````md
-```demo
-trade-toggle|Allow trade|off
-trade-toggle|Auto Trade|on
-trade-size|10|shares
-trade-toggle|Use Schedule|on
-modal-toggle|Optimize|off
-modal-input|Shares to buy|10
-modal-select|Gap vs PTB|with|None=none,Opposite=opposite,With=with
-modal-stack|Title|My setup
-page-toggle|Schedule|Heatmap|Schedule
-auth-buttons|Log in|Sign up
-```
-````
-
-| Demo type | Matches |
-|-----------|---------|
-| `trade-toggle` / `trade-size` | Market Trade panel (`.wallet-control-field`) |
-| `modal-toggle` / `modal-input` / `modal-select` / `modal-stack` | Phase / setup modals |
-| `settings-field` | Settings page inputs |
-| `page-toggle` | Header Schedule / Heatmap toggle |
-| `auth-buttons` | Main Log in / Sign up |
+- Use `#` once for the page title
+- Use `##` for major sections (these become left-nav sub-tabs)
+- Prefer short, scannable sections over long walls of text
+- Do **not** add visual UI demos or mock controls in the docs
 
 ## Flow diagrams
 

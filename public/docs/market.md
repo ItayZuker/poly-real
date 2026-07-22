@@ -18,13 +18,6 @@ Live quotes and window state arrive over the live stream (SSE), not a browser We
 
 These toggles sit on the Market trade panel:
 
-```demo
-trade-toggle|Allow trade|off
-trade-toggle|Auto Trade|on
-trade-size|10|shares
-trade-toggle|Use Schedule|on
-```
-
 | Control | Meaning |
 |---------|---------|
 | **Allow trade** | Off = demo / simulation path; on = real orders when other gates pass |
@@ -32,20 +25,9 @@ trade-toggle|Use Schedule|on
 | **Use Schedule** | When on with Auto Trade, the UTC schedule placement drives which setup is active |
 | **Size** | Manual / fallback order size in shares or USDC (as shown in the UI) |
 
-Typical scheduled live path:
+Typical scheduled live path: **Allow trade** on, **Auto Trade** on, **Use Schedule** on.
 
-```demo
-trade-toggle|Allow trade|on
-trade-toggle|Auto Trade|on
-trade-toggle|Use Schedule|on
-```
-
-Graph-only editing path (edit phases on the chart):
-
-```demo
-trade-toggle|Auto Trade|on
-trade-toggle|Use Schedule|off
-```
+Graph-only editing path (edit phases on the chart): **Auto Trade** on, **Use Schedule** off.
 
 ## Chart and phases
 

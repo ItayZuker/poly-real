@@ -17,11 +17,6 @@ Poly Real needs both of these to unlock Market and Schedule:
 | **Funder address** | Polymarket proxy / profile wallet that holds USDC for trading |
 | **Private key** | EOA signer used to sign CLOB orders (encrypted at rest; not re-displayed after save) |
 
-```demo
-settings-field|Funder address|0x…|mono
-settings-field|Private key|••••••••|mono
-```
-
 In-app info panels next to each field explain where to find these values on Polymarket.
 
 ## Wallet gate
@@ -36,10 +31,6 @@ If funder or private key is missing:
 - Never share your private key
 - Prefer starting with **Allow trade** off (demo) after saving credentials
 - Confirm the funder address matches the wallet you fund with USDC
-
-```demo
-trade-toggle|Allow trade|off
-```
 
 Continue in [Getting started](doc:getting-started) and [Market](doc:market).
 

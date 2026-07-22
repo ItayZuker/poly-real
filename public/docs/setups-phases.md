@@ -16,11 +16,6 @@ On **Schedule**, the setups list holds your templates:
 
 ### Setup editor fields
 
-```demo
-modal-stack|Title|My BTC morning setup
-modal-stack|Description|Optional notes…|textarea
-```
-
 | Field | Meaning |
 |-------|---------|
 | **Title** | Name shown on the card and placements (required) |
@@ -46,27 +41,11 @@ Each up/down **window** runs from start → end. The setup divides that time int
 | **Use Schedule** on (with Auto Trade) | Yes — active schedule setup | No on Market — edit the setup card on Schedule instead (or turn off Use Schedule) |
 | Auto Trade off | Usually hidden unless a setup is being shown for context | — |
 
-```demo
-trade-toggle|Auto Trade|on
-trade-toggle|Use Schedule|off
-```
-
 ## Phase settings (phase modal)
 
 Open a phase from the chart (Market or setup editor). Each phase has its own Buy and Sell section.
 
 ### Buy
-
-```demo
-modal-toggle|Allow buy in this phase|on
-modal-input|Shares to buy|10
-modal-input|Trigger (¢) GTD|40
-modal-input|Abort on crossing off|0
-modal-toggle|Optimize|off
-modal-input|Max gap ($) None|0
-modal-input|Min gap ($) None|0
-modal-select|Gap vs PTB|with|None=none,Opposite=opposite,With=with
-```
 
 | Setting | Range / values | What it does |
 |---------|----------------|--------------|
@@ -79,13 +58,7 @@ modal-select|Gap vs PTB|with|None=none,Opposite=opposite,With=with
 | **Min gap ($)** | 0+ | Min \|asset − PTB\| in dollars. **0 = None** (no min filter) |
 | **Gap vs PTB** | None / With / Opposite | Direction filter relative to the side being bought (see below) |
 
-Optimize on (FAK) example:
-
-```demo
-modal-toggle|Optimize|on
-modal-input|Trigger (¢) FAK|40
-modal-select|Gap vs PTB|none|None=none,Opposite=opposite,With=with
-```
+With **Optimize** on, the trigger label shows **FAK** and Gap vs PTB may be **None**.
 
 #### Gap vs PTB
 
@@ -101,19 +74,9 @@ If min/max gap are both 0 and Gap vs PTB is **None** (FAK), buys are not blocked
 
 ### Sell
 
-```demo
-modal-input|Profit from buy (¢)|20
-```
-
 | Setting | Range | What it does |
 |---------|-------|--------------|
 | **Profit from buy (¢)** | 1–100 | Sell limit ≈ buy fill + this many cents. **100 = off** — hold to settlement (no sell) for fills from this phase |
-
-Hold-to-settlement example:
-
-```demo
-modal-input|Profit from buy (¢)|100
-```
 
 ## Defaults (new phase)
 
@@ -133,12 +96,6 @@ modal-input|Profit from buy (¢)|100
 - Build and tune setups on Schedule; place them on the UTC grid; then enable **Use Schedule** + **Auto Trade** on Market.
 - To tweak phases live on the Market chart without the schedule, turn **Use Schedule** off and keep **Auto Trade** on.
 - Start in demo (**Allow trade** off) until the phase rules behave as you expect.
-
-```demo
-trade-toggle|Allow trade|off
-trade-toggle|Auto Trade|on
-trade-toggle|Use Schedule|on
-```
 
 ## See also
 

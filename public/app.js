@@ -101,12 +101,6 @@ let authDocsSearchBound = false;
 let authVersionsLoaded = false;
 let authUrlSyncBound = false;
 
-const AUTH_TAB_BACK_ICON =
-  '<span class="auth-tab-back-icon" aria-hidden="true">' +
-  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
-  '<path d="M10.5 3.5L5.5 8l5 4.5"/>' +
-  "</svg></span>";
-
 function isLoggedIn() {
   return Boolean(currentUserId);
 }
@@ -180,11 +174,11 @@ function showAuthViewPanels(view) {
 function syncAuthMainTabButton() {
   const mainBtn = $("auth-tab-btn-main");
   if (!mainBtn) return;
-  const showBack = isLoggedIn() && (authTopTab === "docs" || authTopTab === "versions");
-  mainBtn.classList.toggle("is-back-mode", showBack);
-  if (showBack) {
-    mainBtn.innerHTML = `${AUTH_TAB_BACK_ICON}<span class="auth-tab-label">Back</span>`;
-    mainBtn.setAttribute("aria-label", "Back to app");
+  const showApp = isLoggedIn() && (authTopTab === "docs" || authTopTab === "versions");
+  mainBtn.classList.toggle("is-back-mode", showApp);
+  if (showApp) {
+    mainBtn.innerHTML = '<span class="auth-tab-label">App</span>';
+    mainBtn.setAttribute("aria-label", "Open Market");
   } else {
     mainBtn.innerHTML = '<span class="auth-tab-label">Main</span>';
     mainBtn.setAttribute("aria-label", "Main");
@@ -198,6 +192,7 @@ function applyAuthRoute(tab, { syncUrl = true, replace = false } = {}) {
       showAppShell();
       authTopTab = "main";
       syncAuthMainTabButton();
+      if (typeof showAppPage === "function") showAppPage("simulator");
       if (syncUrl) syncAuthUrl("main", { replace });
       return;
     }
@@ -357,6 +352,12 @@ function buildAuthDocSearchResults(query) {
 
 function updateAuthDocsNavSearchState(hitIds) {
   const searching = hitIds != null;
+  document.querySelectorAll(".auth-docs-nav-group").forEach((group) => {
+    const id = group.dataset.docId;
+    const hit = searching && hitIds.has(id);
+    group.classList.toggle("is-search-hit", searching && hit);
+    group.classList.toggle("is-search-miss", searching && !hit);
+  });
   document.querySelectorAll(".auth-docs-nav-btn").forEach((btn) => {
     btn.classList.remove("is-search-hit", "is-search-miss");
     if (!searching) return;
@@ -364,6 +365,168 @@ function updateAuthDocsNavSearchState(hitIds) {
     if (hitIds.has(id)) btn.classList.add("is-search-hit");
     else btn.classList.add("is-search-miss");
   });
+}
+
+function slugifyAuthDocHeading(text) {
+  // Do not name this slugifyDocHeading — that would overwrite window.slugifyDocHeading
+  // from markdown.js and recurse forever.
+  if (typeof window.slugifyDocHeading === "function") {
+    return window.slugifyDocHeading(text);
+  }
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "section";
+}
+
+function extractDocSections(md) {
+  const sections = [];
+  const used = Object.create(null);
+  const re = /^##\s+(.+)$/gm;
+  let match;
+  while ((match = re.exec(String(md || ""))) !== null) {
+    const title = match[1].trim();
+    let id = slugifyAuthDocHeading(title);
+    if (used[id]) {
+      used[id] += 1;
+      id = `${id}-${used[id]}`;
+    } else {
+      used[id] = 1;
+    }
+    sections.push({ title, id });
+  }
+  return sections;
+}
+
+function clearAuthDocsSearchUi() {
+  const input = $("auth-docs-search");
+  if (input && input.value) input.value = "";
+  authDocsSearchQuery = "";
+  updateAuthDocsNavSearchState(null);
+}
+
+function setAuthDocsNavActive(pageId, sectionId) {
+  document.querySelectorAll(".auth-docs-nav-group").forEach((group) => {
+    const active = group.dataset.docId === pageId;
+    group.classList.toggle("is-active", active);
+  });
+  document.querySelectorAll(".auth-docs-nav-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.docId === pageId);
+  });
+  document.querySelectorAll(".auth-docs-nav-sub-btn").forEach((btn) => {
+    const matchPage = btn.dataset.docId === pageId;
+    const matchSection = sectionId
+      ? btn.dataset.sectionId === sectionId
+      : false;
+    btn.classList.toggle("is-active", matchPage && matchSection);
+  });
+}
+
+async function buildAuthDocsNav() {
+  const nav = $("auth-docs-nav");
+  if (!nav || !authDocsManifest) return;
+  await preloadAuthDocsPages();
+  nav.innerHTML = "";
+  const pages = Array.isArray(authDocsManifest?.pages) ? authDocsManifest.pages : [];
+  for (const page of pages) {
+    const group = document.createElement("div");
+    group.className = "auth-docs-nav-group";
+    group.dataset.docId = page.id;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "auth-docs-nav-btn";
+    btn.textContent = page.title || page.id;
+    btn.dataset.docId = page.id;
+    btn.addEventListener("click", () => {
+      clearAuthDocsSearchUi();
+      void loadAuthDocPage(page.id);
+    });
+    group.appendChild(btn);
+
+    const sections = extractDocSections(authDocsLoaded[page.id] || "");
+    if (sections.length) {
+      const sub = document.createElement("div");
+      sub.className = "auth-docs-nav-sub";
+      const inner = document.createElement("div");
+      inner.className = "auth-docs-nav-sub-inner";
+      for (const section of sections) {
+        const subBtn = document.createElement("button");
+        subBtn.type = "button";
+        subBtn.className = "auth-docs-nav-sub-btn";
+        subBtn.textContent = section.title;
+        subBtn.dataset.docId = page.id;
+        subBtn.dataset.sectionId = section.id;
+        subBtn.addEventListener("click", () => {
+          clearAuthDocsSearchUi();
+          void loadAuthDocPage(page.id, { sectionId: section.id });
+        });
+        inner.appendChild(subBtn);
+      }
+      sub.appendChild(inner);
+      group.appendChild(sub);
+    }
+
+    nav.appendChild(group);
+  }
+}
+
+async function ensureAuthDocsReady() {
+  const nav = $("auth-docs-nav");
+  const content = $("auth-docs-content");
+  if (!nav || !content) return;
+  bindAuthDocsSearch();
+  try {
+    if (!authDocsManifest) {
+      const res = await fetch("/docs/manifest.json", { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      authDocsManifest = await res.json();
+      await buildAuthDocsNav();
+      const pages = Array.isArray(authDocsManifest?.pages) ? authDocsManifest.pages : [];
+      if (pages.length) await loadAuthDocPage(pages[0].id);
+      else content.innerHTML = "<p>No documentation pages yet.</p>";
+    } else if (authDocsSearchQuery) {
+      await runAuthDocsSearch(authDocsSearchQuery);
+    } else if (!authDocsActiveId && Array.isArray(authDocsManifest?.pages) && authDocsManifest.pages[0]) {
+      await loadAuthDocPage(authDocsManifest.pages[0].id);
+    }
+  } catch (err) {
+    content.textContent = `Failed to load docs: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+async function loadAuthDocPage(pageId, options = {}) {
+  const content = $("auth-docs-content");
+  if (!content || !authDocsManifest) return;
+  const page = (authDocsManifest.pages || []).find((p) => p.id === pageId);
+  if (!page) return;
+  authDocsActiveId = pageId;
+  const sectionId = options.sectionId || "";
+  setAuthDocsNavActive(pageId, sectionId);
+  try {
+    if (!authDocsLoaded[pageId]) {
+      const res = await fetch(`/docs/${page.file}`, { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      authDocsLoaded[pageId] = await res.text();
+    }
+    const md = authDocsLoaded[pageId];
+    content.innerHTML = typeof window.markdownToHtml === "function"
+      ? window.markdownToHtml(md)
+      : `<pre>${md}</pre>`;
+    bindAuthDocContentLinks(content);
+    if (sectionId) {
+      const target = content.querySelector(`#${CSS.escape(sectionId)}`);
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "smooth" });
+      } else {
+        content.scrollTop = 0;
+      }
+    } else {
+      content.scrollTop = 0;
+    }
+  } catch (err) {
+    content.textContent = `Failed to load ${page.file}: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 function renderAuthDocsSearchResults(query, results) {
@@ -426,74 +589,6 @@ async function runAuthDocsSearch(rawQuery) {
   const results = buildAuthDocSearchResults(authDocsSearchQuery);
   updateAuthDocsNavSearchState(new Set(results.map((r) => r.id)));
   renderAuthDocsSearchResults(authDocsSearchQuery, results);
-}
-
-async function ensureAuthDocsReady() {
-  const nav = $("auth-docs-nav");
-  const content = $("auth-docs-content");
-  if (!nav || !content) return;
-  bindAuthDocsSearch();
-  try {
-    if (!authDocsManifest) {
-      const res = await fetch("/docs/manifest.json", { cache: "no-cache" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      authDocsManifest = await res.json();
-      nav.innerHTML = "";
-      const pages = Array.isArray(authDocsManifest?.pages) ? authDocsManifest.pages : [];
-      for (const page of pages) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "auth-docs-nav-btn";
-        btn.textContent = page.title || page.id;
-        btn.dataset.docId = page.id;
-        btn.addEventListener("click", () => {
-          const input = $("auth-docs-search");
-          if (input && input.value) {
-            input.value = "";
-            authDocsSearchQuery = "";
-            updateAuthDocsNavSearchState(null);
-          }
-          void loadAuthDocPage(page.id);
-        });
-        nav.appendChild(btn);
-      }
-      void preloadAuthDocsPages();
-      if (pages.length) await loadAuthDocPage(pages[0].id);
-      else content.innerHTML = "<p>No documentation pages yet.</p>";
-    } else if (authDocsSearchQuery) {
-      await runAuthDocsSearch(authDocsSearchQuery);
-    } else if (!authDocsActiveId && Array.isArray(authDocsManifest?.pages) && authDocsManifest.pages[0]) {
-      await loadAuthDocPage(authDocsManifest.pages[0].id);
-    }
-  } catch (err) {
-    content.textContent = `Failed to load docs: ${err instanceof Error ? err.message : String(err)}`;
-  }
-}
-
-async function loadAuthDocPage(pageId) {
-  const content = $("auth-docs-content");
-  if (!content || !authDocsManifest) return;
-  const page = (authDocsManifest.pages || []).find((p) => p.id === pageId);
-  if (!page) return;
-  authDocsActiveId = pageId;
-  document.querySelectorAll(".auth-docs-nav-btn").forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.docId === pageId);
-  });
-  try {
-    if (!authDocsLoaded[pageId]) {
-      const res = await fetch(`/docs/${page.file}`, { cache: "no-cache" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      authDocsLoaded[pageId] = await res.text();
-    }
-    const md = authDocsLoaded[pageId];
-    content.innerHTML = typeof window.markdownToHtml === "function"
-      ? window.markdownToHtml(md)
-      : `<pre>${md}</pre>`;
-    bindAuthDocContentLinks(content);
-    content.scrollTop = 0;
-  } catch (err) {
-    content.textContent = `Failed to load ${page.file}: ${err instanceof Error ? err.message : String(err)}`;
-  }
 }
 
 function bindAuthDocContentLinks(root) {
