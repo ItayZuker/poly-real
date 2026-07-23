@@ -20,6 +20,8 @@ Reusable templates — full fields: [Setups & phases](doc:setups-phases).
 - Place or clear setups (drag or day-fill helpers)
 - Current UTC cell is highlighted
 - Double-click a placement to highlight it; highlighted cards feed the **Custom** header total (and still work with Heatmap)
+- Header range (**Market** / **Live** / **Schedule**): **Market** = all-time confirmed totals for the selected market series; **Live** = since last header reset; **Schedule** = sum of cards on the week grid
+- Counts and P/L always show numeric values (`0` / `+$0.00`) when empty — never dashes
 
 With **Use Schedule** + **Auto Trade** on [Market](doc:market), the **Live** setup on the current cell drives trading for that series. Replay placements never trade.
 
@@ -31,7 +33,7 @@ With **Use Schedule** + **Auto Trade** on [Market](doc:market), the **Live** set
 | Setups | Own list | Own list (separate from Live) |
 | Placements | Own week grid | Own week grid |
 | Card stats | Live trade outcomes | Filled when you press **Replay** |
-| Header total | Same summary chrome (Schedule range = sum of cards) | Same — totals update as replay results arrive |
+| Header total | Same summary chrome (**Market** = series all-time, **Live** = since reset, **Schedule** = sum of cards) | Same — totals update as replay results arrive |
 
 In **Replay**, a **Replay** button appears above the Live/Replay switcher. It sends the placed cards (and their setups) for the areas they cover on the week grid. Results stream back **one card at a time** (green / red / blue + PnL). The top summary shows the **total**.
 

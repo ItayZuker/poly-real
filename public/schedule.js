@@ -550,18 +550,16 @@
     menu.classList.toggle("opens-up", !openDown);
   }
 
-  function formatPlacementPnl(pnl, hasData) {
-    if (!hasData || pnl == null || !Number.isFinite(pnl)) return "—";
-    const sign = pnl >= 0 ? "+" : "-";
-    return `${sign}$${Math.abs(pnl).toFixed(2)}`;
+  function formatPlacementPnl(pnl, _hasData) {
+    const n = pnl != null && Number.isFinite(Number(pnl)) ? Number(pnl) : 0;
+    const sign = n >= 0 ? "+" : "-";
+    return `${sign}$${Math.abs(n).toFixed(2)}`;
   }
 
-  function pnlSignClass(pnl, hasData, includeNeutral = false) {
-    if (!hasData || pnl == null || !Number.isFinite(pnl)) {
-      return includeNeutral ? "is-neutral" : null;
-    }
-    if (pnl > 0) return "is-positive";
-    if (pnl < 0) return "is-negative";
+  function pnlSignClass(pnl, _hasData, _includeNeutral = false) {
+    const n = pnl != null && Number.isFinite(Number(pnl)) ? Number(pnl) : 0;
+    if (n > 0) return "is-positive";
+    if (n < 0) return "is-negative";
     return "is-neutral";
   }
 
@@ -571,7 +569,7 @@
     if (cls) el.classList.add(cls);
   }
 
-  function appendStatItem(parent, color, value, hasData) {
+  function appendStatItem(parent, color, value, _hasData) {
     const item = document.createElement("span");
     item.className = "schedule-placement-stat";
     const dot = document.createElement("span");
@@ -579,7 +577,8 @@
     dot.setAttribute("aria-hidden", "true");
     const count = document.createElement("span");
     count.className = "schedule-placement-stat-count";
-    count.textContent = hasData ? String(value ?? 0) : "—";
+    const n = value != null && Number.isFinite(Number(value)) ? Number(value) : 0;
+    count.textContent = String(n);
     item.append(dot, count);
     parent.appendChild(item);
   }
