@@ -485,10 +485,8 @@ export async function sumTradingStatEventsForSeries(
   series: string,
 ): Promise<SessionMemoryTotals> {
   const events = await listTradingStatEvents(userId, {});
-  const filtered = events.filter((event) => {
-    const s = event.card?.series;
-    return !s || s === series;
-  });
+  const want = String(series || "").trim();
+  const filtered = events.filter((event) => String(event.card?.series ?? "").trim() === want);
   return sumEvents(filtered);
 }
 
