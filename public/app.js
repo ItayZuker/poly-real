@@ -4570,11 +4570,8 @@ function bindPageToggle() {
 
     if (window.SchedulePlacements) {
       window.SchedulePlacements.onViewChange();
-      if (isSimulator) {
-        window.SchedulePlacements.setHeaderSummaryRange?.("market");
-      } else if (isSchedule) {
-        window.SchedulePlacements.setHeaderSummaryRange?.("schedule");
-      }
+      // Header stats range is a user choice (saved in localStorage) — do not
+      // force it per page, or manual selections never stick (see docs/schedule.md).
     }
   };
   showAppPage = showPage;
