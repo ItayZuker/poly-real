@@ -1,6 +1,11 @@
 {
-  "current": "1.5.2",
+  "current": "1.5.3",
   "releases": [
+    {
+      "version": "1.5.3",
+      "releasedAt": "2026-07-24T14:37:00.000Z",
+      "notes": "Position cards show times in UTC (matching the schedule board) and display the buy fill immediately while the trade is still pending confirmation."
+    },
     {
       "version": "1.5.2",
       "releasedAt": "2026-07-24T13:31:00.000Z",
