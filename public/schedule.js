@@ -998,7 +998,9 @@
 
   let headerSummaryRange = "schedule";
   let headerSummaryFetchTimer = null;
-  let headerSummaryRequestId = 0;
+  /** In-flight Market totals fetch (coalesced — see fetchHeaderSummaryTotals). */
+  let headerMarketFetchPromise = null;
+  let headerMarketFetchSeries = null;
   /** All-time Market totals per series from session-memory. */
   let headerMarketTotals = {};
   /** Full Live-range totals (every real outcome since reset), not just schedule cards. */
@@ -1281,7 +1283,6 @@
   }
 
   async function fetchHeaderSummaryTotals() {
-    const requestId = ++headerSummaryRequestId;
     const mode = headerSummaryRange;
 
     if (mode === "live") {
@@ -1299,32 +1300,50 @@
     const cached = headerMarketTotals[series];
     if (cached) renderHeaderSummaryTotals(cached);
 
-    const params = new URLSearchParams({ mode: "market", series });
-    try {
-      const res = await fetch(`/api/trading/session-memory?${params}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `Session memory failed (${res.status})`);
-      }
-      const data = await res.json();
-      if (requestId !== headerSummaryRequestId) return data;
-      const totals = normalizeSessionTotals({
-        hasData: data.hasData === true,
-        green: data.green ?? 0,
-        red: data.red ?? 0,
-        blue: data.blue ?? 0,
-        pnl: data.pnl ?? 0,
-      });
-      headerMarketTotals[series] = totals;
-      renderHeaderSummaryTotals(totals);
-      return totals;
-    } catch (err) {
-      console.warn("Header summary fetch failed:", err);
-      if (requestId === headerSummaryRequestId) {
-        renderHeaderSummaryTotals(cached ?? emptyTotals());
-      }
-      return null;
+    // Coalesce concurrent fetches: SSE-driven refreshes fire every ~1.5s while the
+    // browser's per-host connection pool is busy (SSE streams + polling), so requests
+    // can take seconds. Starting a new request per refresh starved the header forever —
+    // each retry invalidated the previous response before it could render.
+    if (headerMarketFetchPromise && headerMarketFetchSeries === series) {
+      return headerMarketFetchPromise;
     }
+
+    const params = new URLSearchParams({ mode: "market", series });
+    headerMarketFetchSeries = series;
+    headerMarketFetchPromise = (async () => {
+      try {
+        const res = await fetch(`/api/trading/session-memory?${params}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || `Session memory failed (${res.status})`);
+        }
+        const data = await res.json();
+        const totals = normalizeSessionTotals({
+          hasData: data.hasData === true,
+          green: data.green ?? 0,
+          red: data.red ?? 0,
+          blue: data.blue ?? 0,
+          pnl: data.pnl ?? 0,
+        });
+        headerMarketTotals[series] = totals;
+        // A late response is still the right data as long as the user is still
+        // looking at Market for this series.
+        if (headerSummaryRange === "market" && selectedSeries() === series) {
+          renderHeaderSummaryTotals(totals);
+        }
+        return totals;
+      } catch (err) {
+        console.warn("Header summary fetch failed:", err);
+        if (headerSummaryRange === "market" && selectedSeries() === series) {
+          renderHeaderSummaryTotals(headerMarketTotals[series] ?? emptyTotals());
+        }
+        return null;
+      } finally {
+        headerMarketFetchPromise = null;
+        headerMarketFetchSeries = null;
+      }
+    })();
+    return headerMarketFetchPromise;
   }
 
   function scheduleHeaderSummaryRefresh() {
