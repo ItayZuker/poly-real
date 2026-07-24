@@ -2768,7 +2768,8 @@ function formatPositionBuyTime(buyAt) {
   // Markers sometimes store ms; live cards use unix seconds.
   const date = new Date(sec > 1e12 ? sec : sec * 1000);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString("en-GB", { hour12: false });
+  // UTC — position card times align with the UTC schedule board.
+  return date.toLocaleTimeString("en-GB", { hour12: false, timeZone: "UTC" });
 }
 
 function renderPositionCard(card) {
@@ -2785,7 +2786,13 @@ function renderPositionCard(card) {
   const buyLabel = buyTime
     ? `Buy <span class="position-card-buy-time">${buyTime}</span>`
     : "Buy";
-  let detailHtml = `<div class="position-card-row"><span>${buyLabel}</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.buyPrice)}`}</strong></div>`;
+  // Buy fill is known at trigger time — show it immediately, even while the
+  // card is still open / waiting for confirmation.
+  const hasBuyFill =
+    card.shares != null && Number.isFinite(Number(card.shares)) &&
+    card.buyPrice != null && Number.isFinite(Number(card.buyPrice));
+  const buyValue = hasBuyFill ? `${card.shares} @ ${fmtPriceCents(card.buyPrice)}` : "";
+  let detailHtml = `<div class="position-card-row"><span>${buyLabel}</span><strong>${buyValue}</strong></div>`;
 
   if (status === "sold") {
     detailHtml += `<div class="position-card-row"><span>Sell</span><strong>${isLoading ? "" : `${card.shares} @ ${fmtPriceCents(card.sellPrice)}`}</strong></div>`;
