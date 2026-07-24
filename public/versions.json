@@ -1,6 +1,11 @@
 {
-  "current": "1.5.1",
+  "current": "1.5.2",
   "releases": [
+    {
+      "version": "1.5.2",
+      "releasedAt": "2026-07-24T13:31:00.000Z",
+      "notes": "Fix: header Market totals now render reliably (in-flight fetches are coalesced and late responses still display); stats range selection is no longer forced when switching pages; legacy btc_5m stat events normalized to btc-5m."
+    },
     {
       "version": "1.5.1",
       "releasedAt": "2026-07-23T07:46:55.000Z",
